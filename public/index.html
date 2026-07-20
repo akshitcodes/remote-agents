@@ -62,7 +62,7 @@
   .empty { text-align: center; color: var(--fg-dim); padding: 40px 20px; }
 
   /* chat view */
-  #chatView { flex: 1; display: none; flex-direction: column; min-height: 0; }
+  #chatView { flex: 1; display: none; flex-direction: column; min-height: 0; max-width: 100%; overflow-x: hidden; }
   #messages { flex: 1; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; padding: 14px 12px; }
   .msg { max-width: 88%; margin-bottom: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
   .msg.md { white-space: normal; }
@@ -118,6 +118,7 @@
   .item-chip span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .item-chip.link { cursor: pointer; }
   .item-chip.link:active { background: var(--bg3); }
+  .item-chip.pending { color: var(--warn); border-color: #9e6a03; border-style: dashed; margin-left: auto; }
   .ic { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 2; flex-shrink: 0; vertical-align: -2px; }
 
   /* diff colors */
@@ -137,14 +138,14 @@
   #noBtn { background: var(--bg3); color: var(--danger); border: 1px solid var(--danger) !important; }
 
   /* composer + controls */
-  #composerWrap { background: var(--bg2); border-top: 1px solid var(--border); flex-shrink: 0; padding: 8px 10px calc(env(safe-area-inset-bottom) + 8px); }
-  #controls { display: flex; gap: 7px; margin-bottom: 8px; flex-wrap: wrap; }
+  #composerWrap { background: var(--bg2); border-top: 1px solid var(--border); flex-shrink: 0; max-width: 100%; overflow-x: hidden; padding: 8px 10px calc(env(safe-area-inset-bottom) + 8px); }
+  #controls { display: flex; gap: 7px; margin-bottom: 8px; flex-wrap: wrap; min-width: 0; }
   .ctl { display: flex; align-items: center; gap: 5px; background: var(--bg3); border: 1px solid var(--border); color: var(--fg-dim); border-radius: 8px; padding: 5px 9px; font-size: 12px; cursor: pointer; white-space: nowrap; }
   .ctl:active { background: var(--bg); }
   .ctl b { color: var(--fg); font-weight: 600; }
   .ctl .ck { color: var(--fg-faint); font-size: 10px; }
-  #composer { display: flex; gap: 8px; align-items: flex-end; }
-  #input { flex: 1; background: var(--bg3); border: 1px solid var(--border); color: var(--fg); border-radius: 18px; padding: 9px 14px; font-size: 15px; outline: none; resize: none; max-height: 120px; font-family: inherit; line-height: 1.4; }
+  #composer { display: flex; gap: 8px; align-items: flex-end; min-width: 0; }
+  #input { flex: 1; min-width: 0; background: var(--bg3); border: 1px solid var(--border); color: var(--fg); border-radius: 18px; padding: 9px 14px; font-size: 15px; outline: none; resize: none; max-height: 120px; font-family: inherit; line-height: 1.4; }
   #sendBtn, #stopBtn { width: 38px; height: 38px; border-radius: 50%; border: none; font-size: 17px; cursor: pointer; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
   #sendBtn { background: var(--accent); color: #04260f; }
   #sendBtn:disabled { opacity: .4; }
@@ -230,6 +231,7 @@
         <button class="ctl" id="modelCtl"><span>Model</span> <b id="modelName">—</b> <span class="ck">▾</span></button>
         <button class="ctl" id="effortCtl"><span>Effort</span> <b id="effortName">—</b> <span class="ck">▾</span></button>
         <button class="ctl" id="modeCtl"><span id="modeName">Agent</span> <span class="ck">▾</span></button>
+        <button class="ctl" id="steerCtl"><span>Send</span> <b id="steerName">Queue</b> <span class="ck">▾</span></button>
       </div>
       <div id="composer">
         <textarea id="input" rows="1" placeholder="Message Codex…"></textarea>
@@ -277,7 +279,10 @@ const state = {
   approvalId: null,
   searchTimer: null,
   models: [], model: null, effort: null,
-  mode: "agent",             // agent | chat | full
+  modeByProvider: { codex: "auto", claude: "manual" }, // permission mode, per provider
+  sendMode: "queue",         // queue | steer — what happens when you send mid-turn
+  busy: false,               // is a turn currently running
+  pending: [],               // [{ text, chip }] messages waiting to send
   lastDiff: "",
 };
 
@@ -287,11 +292,46 @@ function providerLabel() { return PROVIDER_LABELS[state.provider] || "Codex"; }
 
 function activeProvider() { return state.active ? (state.active.provider || "codex") : state.provider; }
 
-const MODES = {
-  chat:  { name: "Read-only", sandbox: "read-only", approvalPolicy: "on-request", desc: "Codex can read files and run safe commands, but asks before anything that writes." },
-  agent: { name: "Agent",     sandbox: "workspace-write", approvalPolicy: "on-request", desc: "Codex can edit files in the project and run commands, asking when it needs to escape the sandbox." },
-  full:  { name: "Full access", sandbox: "danger-full-access", approvalPolicy: "never", desc: "No sandbox, no approval prompts. Codex runs everything unattended. Use with care." },
+// Permission modes are provider-specific and map to each CLI's real controls:
+//  - Codex: `sandbox` + `approvalPolicy` are passed to turn/start.
+//  - Claude: the mode key maps to `claude --permission-mode` (manual routes
+//    sensitive tools through the approval hook).
+const MODE_SETS = {
+  codex: {
+    "read-only": { name: "Read Only",    sandbox: "read-only",          approvalPolicy: "on-request", desc: "Reads files and runs safe commands; asks before anything that writes." },
+    "auto":      { name: "Auto",          sandbox: "workspace-write",    approvalPolicy: "on-request", desc: "Edits files and runs commands in the project; asks before leaving the workspace." },
+    "full":      { name: "Full Access",   sandbox: "danger-full-access", approvalPolicy: "never",      desc: "No sandbox and no prompts — runs everything unattended. Use with care." },
+  },
+  claude: {
+    "manual":      { name: "Manual approve",       desc: "Asks before running commands or editing files (approvals appear here)." },
+    "acceptEdits": { name: "Auto (accept edits)",  desc: "Auto-accepts file edits and runs tools without asking." },
+    "plan":        { name: "Plan",                 desc: "Read-only — plans and explains without changing anything." },
+    "bypass":      { name: "Bypass permissions",   desc: "No prompts at all. Full autonomy — use with care." },
+  },
 };
+
+const DEFAULT_MODE = { codex: "auto", claude: "manual" };
+
+const SEND_MODES = {
+  queue: { name: "Queue", desc: "Held and sent automatically when the current turn finishes." },
+  steer: { name: "Steer", desc: "Interrupts the current turn now, then sends — so the agent changes course immediately." },
+};
+
+function modeSetFor(provider) { return MODE_SETS[provider] || MODE_SETS.codex; }
+
+// Resolve the active provider's selected permission mode, repairing an invalid key.
+function currentMode() {
+  const p = activeProvider();
+  const set = modeSetFor(p);
+  let key = state.modeByProvider[p];
+
+  if (!set[key]) {
+    key = DEFAULT_MODE[p];
+    state.modeByProvider[p] = key;
+  }
+
+  return { key, ...set[key] };
+}
 
 // ---------- api ----------
 async function api(path, body) {
@@ -678,6 +718,7 @@ function onNotify(method, params, provider) {
       updateUsageLive(params.rateLimits);
       break;
 
+    case "turn/aborted":
     case "turn/completed":
     case "turn/failed":
       setBusy(false);
@@ -686,6 +727,7 @@ function onNotify(method, params, provider) {
 
       if (method === "turn/failed") { chip("⚠️", "Turn failed" + (params.error?.message ? ": " + params.error.message : "")); }
 
+      flushPending();
       break;
   }
 }
@@ -695,7 +737,10 @@ async function openThread(t) {
   state.active = t;
   state.activeTurnId = null;
   state.items = new Map();
+  state.pending = [];
   state.lastDiff = "";
+  setBusy(false);
+  syncControls();
   $("listView").style.display = "none";
   $("chatView").style.display = "flex";
   $("backBtn").style.display = "block";
@@ -762,6 +807,8 @@ async function switchProvider(name) {
 }
 
 // ---------- sending ----------
+// send() is the composer action. When idle it sends immediately; when a turn is
+// running it enqueues (Queue = send on turn end, Steer = interrupt now + send).
 async function send() {
   const text = $("input").value.trim();
 
@@ -769,34 +816,81 @@ async function send() {
 
   $("input").value = "";
   $("input").style.height = "auto";
-  addUser(text);
-  setBusy(true);
 
-  const mode = MODES[state.mode];
+  if (state.busy) {
+    enqueue(text);
+    return;
+  }
+
+  addUser(text);
+  doSend(text);
+}
+
+function enqueue(text) {
+  addUser(text);
+  const steering = state.sendMode === "steer";
+  const c = chip("⏳", steering ? "Steering — interrupting the current turn…" : "Queued — sends when the current turn finishes");
+  c.classList.add("pending");
+  state.pending.push({ text, chip: c });
+
+  // Steer forces the running turn to end now; the turn-end handler flushes.
+  if (steering) { interruptApi(); }
+}
+
+// Send the next queued message once the turn has ended.
+function flushPending() {
+  if (state.busy || !state.pending.length || !state.active) { return; }
+
+  const next = state.pending.shift();
+
+  if (next.chip) { next.chip.remove(); }
+
+  doSend(next.text);
+}
+
+// The actual API call for one message. The user bubble is already rendered.
+async function doSend(text) {
+  const m = currentMode();
+  setBusy(true);
 
   try {
     await api("/api/message", {
       provider: state.active.provider || "codex",
       threadId: state.active.id, text,
       model: state.model, effort: state.effort,
-      mode: state.mode, cwd: state.active.cwd, draft: state.active.draft,
-      approvalPolicy: mode.approvalPolicy, sandbox: mode.sandbox,
+      mode: m.key, cwd: state.active.cwd, draft: state.active.draft,
+      approvalPolicy: m.approvalPolicy, sandbox: m.sandbox,
     });
   } catch (e) {
     chip("⚠️", "send failed: " + e.message);
     setBusy(false);
+    flushPending();
   }
 }
 
 function setBusy(busy) {
-  $("sendBtn").disabled = busy;
+  state.busy = busy;
+  // Send stays enabled while busy so messages can be queued or used to steer.
   $("stopBtn").style.display = busy ? "flex" : "none";
 }
 
-async function interrupt() {
-  if (state.active) {
-    try { await api("/api/interrupt", { provider: state.active.provider || "codex", threadId: state.active.id, turnId: state.activeTurnId }); } catch {}
+// Low-level interrupt (used by both Stop and Steer).
+async function interruptApi() {
+  if (!state.active) { return; }
+
+  try {
+    await api("/api/interrupt", { provider: state.active.provider || "codex", threadId: state.active.id, turnId: state.activeTurnId });
+  } catch {}
+}
+
+// Stop button: a hard stop — drop anything queued, then interrupt.
+function stopAgent() {
+  for (const p of state.pending) {
+    if (p.chip) { p.chip.remove(); }
   }
+
+  state.pending = [];
+  interruptApi();
 }
 
 // ---------- approvals ----------
@@ -869,14 +963,30 @@ function openEffortSheet() {
 }
 
 function openModeSheet() {
-  const html = Object.entries(MODES).map(([k, v]) => `
-    <div class="opt ${k === state.mode ? "sel" : ""}" data-mode="${k}">
+  const provider = activeProvider();
+  const set = modeSetFor(provider);
+  const cur = currentMode().key;
+  const who = PROVIDER_LABELS[provider] || "the agent";
+  const html = Object.entries(set).map(([k, v]) => `
+    <div class="opt ${k === cur ? "sel" : ""}" data-mode="${k}">
       <div class="radio"></div>
       <div><div class="on">${esc(v.name)}</div><div class="od">${esc(v.desc)}</div></div>
     </div>`).join("");
-  openSheet(`<h2>Permissions</h2><div class="hint">How much Codex can do before asking you.</div>${html}`);
+  openSheet(`<h2>Permissions</h2><div class="hint">How much ${esc(who)} can do before asking you.</div>${html}`);
   $("sheetBody").querySelectorAll("[data-mode]").forEach((el) => {
-    el.onclick = () => { state.mode = el.dataset.mode; persistPrefs(); syncControls(); closeSheet(); };
+    el.onclick = () => { state.modeByProvider[provider] = el.dataset.mode; persistPrefs(); syncControls(); closeSheet(); };
+  });
+}
+
+function openSendModeSheet() {
+  const html = Object.entries(SEND_MODES).map(([k, v]) => `
+    <div class="opt ${k === state.sendMode ? "sel" : ""}" data-send="${k}">
+      <div class="radio"></div>
+      <div><div class="on">${esc(v.name)}</div><div class="od">${esc(v.desc)}</div></div>
+    </div>`).join("");
+  openSheet(`<h2>Sending mid-turn</h2><div class="hint">What happens when you send a message while the agent is still working. You can always Stop instead.</div>${html}`);
+  $("sheetBody").querySelectorAll("[data-send]").forEach((el) => {
+    el.onclick = () => { state.sendMode = el.dataset.send; persistPrefs(); syncControls(); closeSheet(); };
   });
 }
 
@@ -895,11 +1005,12 @@ function syncControls() {
   const m = currentModel();
   $("modelName").textContent = m?.displayName || state.model || "—";
   $("effortName").textContent = state.effort || "—";
-  $("modeName").textContent = MODES[state.mode].name;
+  $("modeName").textContent = currentMode().name;
+  $("steerName").textContent = SEND_MODES[state.sendMode].name;
 }
 
 function persistPrefs() {
-  localStorage.setItem("cxp_prefs", JSON.stringify({ provider: state.provider, model: state.model, effort: state.effort, mode: state.mode }));
+  localStorage.setItem("cxp_prefs", JSON.stringify({ provider: state.provider, model: state.model, effort: state.effort, modeByProvider: state.modeByProvider, sendMode: state.sendMode }));
 }
 
 function loadPrefs() {
@@ -1084,7 +1195,11 @@ async function initModels() {
     const m = currentModel();
     const efforts = (m?.supportedReasoningEfforts ?? []).map((e) => e.reasoningEffort);
     state.effort = prefs.effort && efforts.includes(prefs.effort) ? prefs.effort : m?.defaultReasoningEffort ?? efforts[0] ?? null;
-    state.mode = prefs.mode || "agent";
+
+    if (prefs.modeByProvider) { state.modeByProvider = { ...state.modeByProvider, ...prefs.modeByProvider }; }
+
+    if (prefs.sendMode && SEND_MODES[prefs.sendMode]) { state.sendMode = prefs.sendMode; }
+
     syncControls();
   } catch {}
 }
@@ -1093,13 +1208,14 @@ async function initModels() {
 $("backBtn").onclick = backToList;
 $("loadMore").onclick = () => loadThreads(true);
 $("sendBtn").onclick = send;
-$("stopBtn").onclick = interrupt;
+$("stopBtn").onclick = stopAgent;
 $("okBtn").onclick = () => answerApproval("approve");
 $("sessBtn").onclick = () => answerApproval("session");
 $("noBtn").onclick = () => answerApproval("deny");
 $("modelCtl").onclick = openModelSheet;
 $("effortCtl").onclick = openEffortSheet;
 $("modeCtl").onclick = openModeSheet;
+$("steerCtl").onclick = openSendModeSheet;
 $("newBtn").onclick = openNewSheet;
 $("usageBtn").onclick = openUsageSheet;
 $("diffBtn").onclick = () => openDiffSheet(state.lastDiff || "No diff");

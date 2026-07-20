@@ -190,6 +190,7 @@ export class CodexProvider extends BaseProvider {
   async listThreads({ search, cursor } = {}) {
     await this.ready();
     const params = { limit: 25 };
+    params.sortKey = "recency_at";
 
     if (cursor) {
       params.cursor = cursor;

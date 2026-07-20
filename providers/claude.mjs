@@ -95,20 +95,26 @@ const EFFORTS = [
   { reasoningEffort: "max", description: "Maximum thinking budget." },
 ];
 
-// Our permission modes -> Claude --permission-mode. Accepts either the mode key
-// (chat/agent/full) or the Codex sandbox name.
+// Our permission modes -> Claude --permission-mode. Accepts the UI mode keys
+// (manual/acceptEdits/plan/bypass) plus legacy/Codex aliases for safety.
 function permissionModeFor(value) {
   switch (value) {
+    case "plan":
     case "chat":
     case "read-only":
       return "plan";
+    case "bypass":
     case "full":
     case "danger-full-access":
       return "bypassPermissions";
+    case "acceptEdits":
     case "agent":
     case "workspace-write":
-    default:
       return "acceptEdits";
+    case "manual":
+    case "default":
+    default:
+      return "default";
   }
 }
 
@@ -655,11 +661,11 @@ export class ClaudeProvider extends BaseProvider {
       args.push("--effort", effort);
     }
 
-    // Interactive approvals for "agent" mode: run in default permission mode but
+    // Interactive approvals for "manual" mode: run in default permission mode but
     // gate sensitive tools through the PreToolUse hook (which asks the phone).
-    // "full" bypasses everything; "read-only" plans without acting.
+    // acceptEdits/plan/bypass run non-interactively with their native mode.
     const modeKey = mode ?? sandbox;
-    const interactive = this.hookPath && this.endpoint && (modeKey === "agent" || modeKey === "workspace-write" || modeKey == null);
+    const interactive = this.hookPath && this.endpoint && (modeKey === "manual" || modeKey === "default" || modeKey == null);
 
     if (interactive) {
       args.push("--permission-mode", "default");
