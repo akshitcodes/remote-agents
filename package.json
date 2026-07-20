@@ -1,0 +1,35 @@
+{
+  "name": "remote-agents",
+  "version": "0.3.0",
+  "description": "Self-hosted mobile web UI for your Codex and Claude Code CLI sessions — browse, resume, and drive your coding agents from your phone.",
+  "type": "module",
+  "bin": {
+    "remote-agents": "bin/codex-phone.mjs"
+  },
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node bin/codex-phone.mjs"
+  },
+  "files": [
+    "bin/",
+    "server.mjs",
+    "providers/",
+    "public/",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "qrcode-terminal": "^0.12.0"
+  },
+  "keywords": [
+    "codex",
+    "claude",
+    "cli",
+    "mobile",
+    "remote",
+    "coding-agent"
+  ],
+  "license": "MIT"
+}

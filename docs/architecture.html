@@ -1,0 +1,639 @@
+<style>
+  :root {
+    /* light — "blueprint paper" */
+    --bg: #eef1f7;
+    --bg-raised: #ffffff;
+    --bg-node: #ffffff;
+    --ink: #141d2b;
+    --ink-dim: #556074;
+    --ink-faint: #8492a6;
+    --line: #d2dae8;
+    --grid: rgba(31,111,214,0.06);
+    --signal: #1f6fd6;
+    --agent: #1f9e52;
+    --amber: #b3760e;
+    --shadow: 0 1px 2px rgba(20,29,43,0.05), 0 8px 24px rgba(20,29,43,0.06);
+    --tab: rgba(31,111,214,0.10);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0c131f;
+      --bg-raised: #111a28;
+      --bg-node: #16202f;
+      --ink: #dde6f2;
+      --ink-dim: #8b9bb1;
+      --ink-faint: #5c6c82;
+      --line: #263449;
+      --grid: rgba(74,163,255,0.07);
+      --signal: #4aa3ff;
+      --agent: #46c46a;
+      --amber: #e0a848;
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 10px 30px rgba(0,0,0,0.35);
+      --tab: rgba(74,163,255,0.14);
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #eef1f7; --bg-raised: #ffffff; --bg-node: #ffffff;
+    --ink: #141d2b; --ink-dim: #556074; --ink-faint: #8492a6;
+    --line: #d2dae8; --grid: rgba(31,111,214,0.06);
+    --signal: #1f6fd6; --agent: #1f9e52; --amber: #b3760e;
+    --shadow: 0 1px 2px rgba(20,29,43,0.05), 0 8px 24px rgba(20,29,43,0.06);
+    --tab: rgba(31,111,214,0.10);
+  }
+  :root[data-theme="dark"] {
+    --bg: #0c131f; --bg-raised: #111a28; --bg-node: #16202f;
+    --ink: #dde6f2; --ink-dim: #8b9bb1; --ink-faint: #5c6c82;
+    --line: #263449; --grid: rgba(74,163,255,0.07);
+    --signal: #4aa3ff; --agent: #46c46a; --amber: #e0a848;
+    --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 10px 30px rgba(0,0,0,0.35);
+    --tab: rgba(74,163,255,0.14);
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    font-size: 17px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .mono {
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, monospace;
+  }
+
+  .wrap {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 0 20px 96px;
+  }
+
+  /* ---------- hero ---------- */
+  header.hero {
+    padding: 72px 0 40px;
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 8px;
+  }
+  .eyebrow {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--signal);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .eyebrow::before {
+    content: "";
+    width: 26px;
+    height: 1px;
+    background: var(--signal);
+    opacity: 0.6;
+  }
+  h1 {
+    font-size: clamp(30px, 6.5vw, 46px);
+    line-height: 1.08;
+    letter-spacing: -0.02em;
+    font-weight: 700;
+    text-wrap: balance;
+    margin: 18px 0 14px;
+  }
+  .dek {
+    font-size: 19px;
+    color: var(--ink-dim);
+    max-width: 60ch;
+    margin: 0;
+  }
+  .meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 26px;
+  }
+  .meta code {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12.5px;
+    color: var(--ink-dim);
+    background: var(--bg-node);
+    border: 1px solid var(--line);
+    padding: 5px 10px;
+    border-radius: 7px;
+  }
+  .meta code b { color: var(--signal); font-weight: 600; }
+
+  /* ---------- sections ---------- */
+  section { padding-top: 52px; }
+  .kicker {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin-bottom: 10px;
+  }
+  h2 {
+    font-size: 25px;
+    letter-spacing: -0.01em;
+    font-weight: 680;
+    margin: 0 0 14px;
+    text-wrap: balance;
+  }
+  p { margin: 0 0 16px; }
+  p.lead { color: var(--ink); }
+  a { color: var(--signal); text-underline-offset: 2px; }
+  strong { font-weight: 640; }
+  .prose code {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 0.86em;
+    color: var(--ink);
+    background: var(--tab);
+    padding: 1px 6px;
+    border-radius: 5px;
+  }
+
+  /* ---------- diagram canvas ---------- */
+  .canvas {
+    background:
+      linear-gradient(var(--grid) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size: 22px 22px;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 26px 20px;
+    margin: 22px 0 8px;
+    overflow-x: auto;
+    box-shadow: var(--shadow);
+  }
+  .cap {
+    font-size: 14px;
+    color: var(--ink-faint);
+    margin: 0 4px 22px;
+    text-align: center;
+  }
+
+  /* nodes + chain */
+  .chain { display: flex; flex-direction: column; align-items: stretch; }
+  .node {
+    position: relative;
+    background: var(--bg-node);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--accent, var(--signal));
+    border-radius: 11px;
+    padding: 14px 16px;
+    box-shadow: var(--shadow);
+  }
+  .node .role {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent, var(--signal));
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .node .role .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--accent, var(--signal));
+  }
+  .node .name { font-weight: 640; font-size: 16.5px; margin-top: 4px; }
+  .node .desc { font-size: 13.5px; color: var(--ink-dim); margin-top: 3px; line-height: 1.5; }
+  .node .tech {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px; color: var(--ink-faint); margin-top: 8px;
+  }
+
+  .client { --accent: var(--signal); }
+  .mesh   { --accent: var(--ink-faint); }
+  .bridge { --accent: var(--signal); }
+  .agent-node { --accent: var(--agent); }
+  .store  { --accent: var(--amber); }
+  .cloud  { --accent: var(--ink-faint); }
+
+  /* mesh node gets a schematic dashed treatment */
+  .node.mesh {
+    border: 1px dashed var(--line);
+    border-left: 3px solid var(--ink-faint);
+    background: transparent;
+    box-shadow: none;
+  }
+
+  /* hop connector */
+  .hop {
+    display: flex; flex-direction: column; align-items: center;
+    gap: 6px; padding: 9px 0;
+  }
+  .hop .seg { width: 2px; height: 12px; background: linear-gradient(var(--line), var(--signal)); opacity: 0.7; }
+  .hop .lbl {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 11px; letter-spacing: 0.04em;
+    color: var(--ink-dim);
+    background: var(--bg-raised);
+    border: 1px solid var(--line);
+    border-radius: 20px;
+    padding: 3px 11px;
+    white-space: nowrap;
+  }
+  .hop .dir { color: var(--signal); font-size: 13px; line-height: 1; }
+
+  /* host wrapper containing sub-nodes */
+  .host {
+    background: var(--bg-raised);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 14px;
+    box-shadow: var(--shadow);
+  }
+  .host > .role {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--ink-dim);
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 12px;
+  }
+  .host > .role .tag {
+    margin-left: auto; text-transform: none; letter-spacing: 0;
+    color: var(--agent); font-size: 11px;
+  }
+  .host .node { box-shadow: none; }
+  .leaves { display: flex; gap: 10px; }
+  .leaves .node { flex: 1; min-width: 0; }
+
+  /* ---------- two-lane diagram ---------- */
+  .lanes { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .lane {
+    background: var(--bg-node);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 16px;
+    box-shadow: var(--shadow);
+  }
+  .lane h3 {
+    margin: 0 0 4px; font-size: 15px; font-weight: 640;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .lane .arrow { font-size: 15px; }
+  .lane.req h3 .arrow { color: var(--signal); }
+  .lane.evt h3 .arrow { color: var(--agent); }
+  .lane .sub { font-size: 12.5px; color: var(--ink-faint); margin-bottom: 12px; }
+  .lane ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 7px; }
+  .lane li {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12.5px; color: var(--ink-dim);
+    background: var(--bg-raised);
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    padding: 6px 9px;
+  }
+  .lane.req li { border-left: 2px solid var(--signal); }
+  .lane.evt li { border-left: 2px solid var(--agent); }
+
+  /* ---------- lifecycle steps ---------- */
+  ol.steps { counter-reset: s; list-style: none; margin: 22px 0 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
+  ol.steps li {
+    counter-increment: s;
+    position: relative;
+    padding: 2px 0 2px 52px;
+    min-height: 36px;
+  }
+  ol.steps li::before {
+    content: counter(s);
+    position: absolute; left: 0; top: 0;
+    width: 34px; height: 34px;
+    display: flex; align-items: center; justify-content: center;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 14px; font-weight: 600;
+    color: var(--signal);
+    background: var(--tab);
+    border: 1px solid var(--line);
+    border-radius: 9px;
+  }
+  ol.steps li .st { font-weight: 600; font-size: 15.5px; }
+  ol.steps li .sd { font-size: 14px; color: var(--ink-dim); }
+  ol.steps li .m {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px; color: var(--signal);
+  }
+
+  /* ---------- callout ---------- */
+  .callout {
+    display: flex; gap: 14px;
+    background: var(--bg-raised);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 16px 18px;
+    margin-top: 22px;
+  }
+  .callout .ic { font-size: 20px; line-height: 1.3; }
+  .callout .bd { font-size: 14.5px; color: var(--ink-dim); }
+  .callout .bd b { color: var(--ink); font-weight: 640; }
+
+  /* ---------- improve section ---------- */
+  .improve-head {
+    border-top: 2px solid var(--line);
+    margin-top: 64px;
+    padding-top: 52px;
+  }
+  .improve-head .kicker { color: var(--amber); }
+  .improve-head .kicker::before,
+  .eyebrow.future::before { background: var(--amber); }
+
+  .roadmap { display: flex; flex-direction: column; gap: 12px; margin-top: 24px; }
+  .card {
+    background: var(--bg-node);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 16px 18px;
+    box-shadow: var(--shadow);
+  }
+  .card .top { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .card .idx {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px; color: var(--amber); font-weight: 600;
+  }
+  .card h3 { margin: 0; font-size: 17px; font-weight: 650; flex: 1; min-width: 180px; }
+  .card p { margin: 8px 0 0; font-size: 14.5px; color: var(--ink-dim); }
+  .card p code {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 0.85em; background: var(--tab); padding: 1px 5px; border-radius: 4px; color: var(--ink);
+  }
+  .tags { display: flex; gap: 6px; }
+  .tag {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 10.5px; letter-spacing: 0.04em; text-transform: uppercase;
+    padding: 3px 8px; border-radius: 20px; white-space: nowrap;
+    border: 1px solid var(--line);
+  }
+  .tag.impact { color: var(--agent); }
+  .tag.effort { color: var(--ink-faint); }
+  .tag.now { color: var(--amber); border-color: var(--amber); }
+
+  /* target arch reuses node styling; multi-agent leaves */
+  .agents-row { display: flex; gap: 8px; }
+  .agents-row .node { flex: 1; padding: 10px 11px; }
+  .agents-row .node .name { font-size: 14px; }
+
+  footer {
+    margin-top: 72px; padding-top: 24px;
+    border-top: 1px solid var(--line);
+    font-size: 13px; color: var(--ink-faint);
+    display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px;
+  }
+
+  @media (max-width: 560px) {
+    body { font-size: 16px; }
+    .lanes { grid-template-columns: 1fr; }
+    .leaves { flex-direction: column; }
+    .agents-row { flex-wrap: wrap; }
+    .agents-row .node { min-width: 40%; }
+    header.hero { padding-top: 52px; }
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .node.mesh { animation: breathe 4s ease-in-out infinite; }
+    @keyframes breathe { 50% { border-color: var(--signal); } }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="hero">
+    <div class="eyebrow">System Architecture</div>
+    <h1>Driving Codex from your phone</h1>
+    <p class="dek">A single Node process on your Mac turns the Codex CLI into something you can open, read, and continue from your pocket — over a private mesh, with nothing exposed to the internet.</p>
+    <div class="meta">
+      <code class="mono">host <b>100.103.140.59:8484</b></code>
+      <code class="mono">transport <b>Tailscale</b></code>
+      <code class="mono">deps <b>0</b></code>
+      <code class="mono">~/Code/codex-phone</code>
+    </div>
+  </header>
+
+  <section class="prose">
+    <div class="kicker">The whole idea</div>
+    <h2>One bridge, two protocols, a private wire</h2>
+    <p class="lead">Your phone can't talk to the Codex CLI directly — the CLI speaks a machine protocol over pipes, not HTTP. So the bridge does two translations at once: it turns your phone's taps into <strong>JSON-RPC calls</strong> the CLI understands, and it turns the CLI's streaming output into a <strong>live feed</strong> the browser can render. Everything rides an encrypted Tailscale connection, so the phone reaches the Mac from anywhere without opening a port.</p>
+  </section>
+
+  <div class="canvas">
+    <div class="chain">
+
+      <div class="node client">
+        <div class="role"><span class="dot"></span>Client · your phone</div>
+        <div class="name">Web app (added to Home Screen)</div>
+        <div class="desc">Plain HTML/JS in Safari. Renders the session list and chat; holds a pairing token in a cookie.</div>
+        <div class="tech mono">fetch() · EventSource · cookie: cxp_session</div>
+      </div>
+
+      <div class="hop"><span class="seg"></span><span class="lbl mono">HTTPS · encrypted WireGuard</span><span class="dir">↕</span><span class="seg"></span></div>
+
+      <div class="node mesh">
+        <div class="role"><span class="dot"></span>Transport · Tailscale mesh</div>
+        <div class="name">Private point-to-point tunnel</div>
+        <div class="desc">Both devices join the same tailnet. Traffic is end-to-end encrypted; no inbound firewall port is ever opened. Works on cellular, survives IP changes.</div>
+      </div>
+
+      <div class="hop"><span class="seg"></span><span class="lbl mono">TCP · tailnet IP :8484</span><span class="dir">↕</span><span class="seg"></span></div>
+
+      <div class="host">
+        <div class="role mono">Host · your Mac (awake, plugged in)<span class="tag mono">codex logged in</span></div>
+
+        <div class="node bridge">
+          <div class="role"><span class="dot"></span>Bridge · server.mjs</div>
+          <div class="name">HTTP + SSE server</div>
+          <div class="desc">Serves the web app, checks the token, and translates each API route into a CLI call. Fans CLI events out to every connected phone.</div>
+          <div class="tech mono">GET /api/threads · POST /api/message · GET /api/events</div>
+        </div>
+
+        <div class="hop"><span class="seg"></span><span class="lbl mono">stdio · JSON-RPC 2.0 (newline-delimited)</span><span class="dir">↕</span><span class="seg"></span></div>
+
+        <div class="node agent-node">
+          <div class="role"><span class="dot"></span>Agent · child process</div>
+          <div class="name">codex app-server</div>
+          <div class="desc">The same engine the VS&nbsp;Code extension uses. Loads sessions, runs turns, streams back reasoning, output, and approval requests.</div>
+          <div class="tech mono">spawned by the bridge · talks over stdin/stdout</div>
+        </div>
+
+        <div class="hop"><span class="seg"></span><span class="lbl mono">reads &amp; writes</span><span class="dir">↕</span><span class="seg"></span></div>
+
+        <div class="leaves">
+          <div class="node store">
+            <div class="role"><span class="dot"></span>State</div>
+            <div class="name">~/.codex/sessions</div>
+            <div class="desc">Rollout files — the same ones <code class="mono">codex resume</code> uses.</div>
+          </div>
+          <div class="node cloud">
+            <div class="role"><span class="dot"></span>Model</div>
+            <div class="name">OpenAI API</div>
+            <div class="desc">Auth lives on the Mac. Your phone never sees a key.</div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+  <p class="cap">The signal chain, phone to model. Every hop is bidirectional; nothing between them is public.</p>
+
+  <section class="prose">
+    <div class="kicker">On the wire</div>
+    <h2>Commands go down, events come up</h2>
+    <p>The connection is deliberately lopsided. Your <strong>actions</strong> are occasional, request-and-reply: tap a session, send a message. The agent's <strong>output</strong> is a continuous stream — reasoning, tokens, command results — that has to arrive as it happens. So the bridge uses two different channels, each suited to its direction.</p>
+  </section>
+
+  <div class="canvas">
+    <div class="lanes">
+      <div class="lane req">
+        <h3><span class="arrow">↓</span> Phone → Mac</h3>
+        <div class="sub">Discrete HTTP requests, answered once each.</div>
+        <ul class="mono">
+          <li>thread/list &nbsp;— browse sessions</li>
+          <li>thread/read &nbsp;— load history</li>
+          <li>thread/resume — reopen a session</li>
+          <li>turn/start &nbsp;— send a message</li>
+          <li>turn/interrupt — stop a run</li>
+          <li>approval &nbsp;— allow / deny</li>
+        </ul>
+      </div>
+      <div class="lane evt">
+        <h3><span class="arrow">↑</span> Mac → Phone</h3>
+        <div class="sub">One long-lived stream (Server-Sent Events).</div>
+        <ul class="mono">
+          <li>turn/started</li>
+          <li>item/agentMessage/delta</li>
+          <li>item/started &nbsp;— command / edit</li>
+          <li>item/completed</li>
+          <li>requestApproval &nbsp;— needs you</li>
+          <li>turn/completed</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+  <p class="cap">The stream is why replies type out live and approval prompts appear the instant the agent asks.</p>
+
+  <section class="prose">
+    <div class="kicker">Trace · one sequence</div>
+    <h2>Anatomy of a single message</h2>
+    <p>Here is exactly what happens between tapping send and watching the reply appear.</p>
+    <ol class="steps">
+      <li><span class="st">You tap send.</span> <span class="sd">The web app POSTs your text to <span class="m mono">/api/message</span> with the session's id.</span></li>
+      <li><span class="st">Bridge reopens the session.</span> <span class="sd">If this session isn't live yet, it calls <span class="m mono">thread/resume</span> — loading the exact rollout file from disk.</span></li>
+      <li><span class="st">Bridge starts a turn.</span> <span class="sd">It sends <span class="m mono">turn/start</span> to the app-server over the pipe.</span></li>
+      <li><span class="st">The agent works.</span> <span class="sd">app-server calls the model, runs commands, edits files — emitting events the whole time.</span></li>
+      <li><span class="st">Events stream to your phone.</span> <span class="sd">Each <span class="m mono">delta</span> is pushed down the open SSE channel; the reply grows character by character.</span></li>
+      <li><span class="st">Turn completes.</span> <span class="sd">A <span class="m mono">turn/completed</span> event arrives, the input unlocks, and the change is already saved to the same file your Mac terminal reads.</span></li>
+    </ol>
+  </section>
+
+  <div class="callout">
+    <div class="ic">🔒</div>
+    <div class="bd"><b>Why this is safe to leave running.</b> The Mac never opens a public port — the only way in is the Tailscale mesh, which requires your logged-in device. On top of that, every request needs the pairing token. The trade-off: whoever holds the pairing link can drive Codex as you, so treat it like a password and keep the bind on the tailnet, never <code class="mono">0.0.0.0</code> on a café network.</div>
+  </div>
+
+  <!-- =============== IMPROVE =============== -->
+
+  <section class="improve-head prose">
+    <div class="kicker">Where this goes next</div>
+    <h2>From reading Codex to commanding every agent</h2>
+    <p class="lead">Today the bridge does one thing well: your Codex sessions, on your phone. To make it a genuine <strong>control room</strong> — every agent on every machine, managed from your pocket — two things have to change. It has to speak to more than one agent, and it has to reach <em>you</em> instead of waiting for you to check it.</p>
+    <p>That second point is the real hinge. Right now you have to open the app to know anything happened. A control room pushes: <em>"agent finished," "agent needs approval," "agent hit an error."</em> Everything below is ordered by that leverage — the pieces that turn <em>viewing</em> into <em>managing</em> come first.</p>
+  </section>
+
+  <div class="canvas">
+    <div class="chain">
+      <div class="node client">
+        <div class="role"><span class="dot"></span>Phone · one control room</div>
+        <div class="name">Unified dashboard + push</div>
+        <div class="desc">Every agent across every host in one list, each with live status. Notifications arrive even when the app is closed.</div>
+      </div>
+
+      <div class="hop"><span class="seg"></span><span class="lbl mono">push channel + mesh</span><span class="dir">↕</span><span class="seg"></span></div>
+
+      <div class="host">
+        <div class="role mono">Any host · Mac / cloud box / work machine</div>
+        <div class="node bridge">
+          <div class="role"><span class="dot"></span>Broker</div>
+          <div class="name">One bridge, many adapters</div>
+          <div class="desc">A common interface in front of each agent, normalizing their events into one shape.</div>
+        </div>
+        <div class="hop"><span class="seg"></span><span class="lbl mono">adapter per agent</span><span class="dir">↕</span><span class="seg"></span></div>
+        <div class="agents-row">
+          <div class="node agent-node"><div class="role"><span class="dot"></span>Adapter</div><div class="name">Codex</div></div>
+          <div class="node agent-node"><div class="role"><span class="dot"></span>Adapter</div><div class="name">Claude Code</div></div>
+          <div class="node agent-node"><div class="role"><span class="dot"></span>Adapter</div><div class="name">Cursor / others</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="cap">The target shape: a broker per machine, an adapter per agent, one phone watching all of them.</p>
+
+  <div class="roadmap">
+
+    <div class="card">
+      <div class="top">
+        <span class="idx mono">01</span>
+        <h3>Always-on daemon</h3>
+        <div class="tags"><span class="tag now">do first</span><span class="tag effort">small</span></div>
+      </div>
+      <p>A <code>LaunchAgent</code> plus <code>caffeinate</code> so the bridge starts on login, restarts if it dies, and keeps the Mac awake while a run is active. Without this, everything else is moot the moment the lid closes. This is an afternoon of work and I can set it up now.</p>
+    </div>
+
+    <div class="card">
+      <div class="top">
+        <span class="idx mono">02</span>
+        <h3>Push notifications</h3>
+        <div class="tags"><span class="tag impact">high impact</span><span class="tag effort">medium</span></div>
+      </div>
+      <p>The feature that makes it <em>manage</em>. When a turn finishes or an approval is waiting, your phone buzzes. Cheapest path is a self-hosted push service (<code>ntfy</code>) the bridge posts to — works with the web app today, no Apple account. Richer path is native APNs, which needs the paid developer account.</p>
+    </div>
+
+    <div class="card">
+      <div class="top">
+        <span class="idx mono">03</span>
+        <h3>Multi-agent adapters</h3>
+        <div class="tags"><span class="tag impact">high impact</span><span class="tag effort">medium</span></div>
+      </div>
+      <p>Wrap each CLI behind one interface — <code>list</code>, <code>read</code>, <code>send</code>, <code>events</code> — and normalize their output into a single event model. Codex is done; Claude Code (stream-json) and Cursor slot in next. t3code already solved this normalization in the open — worth borrowing its shape rather than reinventing it.</p>
+    </div>
+
+    <div class="card">
+      <div class="top">
+        <span class="idx mono">04</span>
+        <h3>Orchestration dashboard</h3>
+        <div class="tags"><span class="tag impact">high impact</span><span class="tag effort">medium</span></div>
+      </div>
+      <p>A home screen listing every agent with a live status pill — <em>running · idle · waiting on you · failed</em> — plus the ability to start a fresh session with a project, model, and effort picker, and run several in parallel. This is the "control room" view the whole thing is building toward.</p>
+    </div>
+
+    <div class="card">
+      <div class="top">
+        <span class="idx mono">05</span>
+        <h3>Multi-host + wake relay</h3>
+        <div class="tags"><span class="tag impact">medium</span><span class="tag effort">larger</span></div>
+      </div>
+      <p>Point the phone at several machines at once — home Mac, work machine, a cloud box that never sleeps. A small outbound-dialing relay covers the cases Tailscale can't (a sleeping laptop, locked-down networks), and could even wake a host on demand before handing off the task.</p>
+    </div>
+
+    <div class="card">
+      <div class="top">
+        <span class="idx mono">06</span>
+        <h3>Native iOS app</h3>
+        <div class="tags"><span class="tag impact">polish</span><span class="tag effort">larger</span></div>
+      </div>
+      <p>The original goal, once the web version proves the workflow. Background connections that survive a locked phone, real notifications, biometric unlock, and a share sheet to fling a link or snippet straight to an agent. Buildable with a free Apple account for personal sideloading; notifications are the reason to eventually pay the $99.</p>
+    </div>
+
+  </div>
+
+  <div class="callout" style="margin-top:28px;">
+    <div class="ic">🧭</div>
+    <div class="bd"><b>If you do nothing else, do 01 and 02.</b> An always-on bridge that can buzz your phone is the difference between a clever demo and a tool you actually run your agents from. The rest is breadth on top of that foundation.</div>
+  </div>
+
+  <footer>
+    <span class="mono">codex-phone · architecture</span>
+    <span class="mono">self-hosted · zero-dependency</span>
+  </footer>
+
+</div>
