@@ -1,11 +1,12 @@
 # remote-agents
 
 **Use your coding agents from another device.** remote-agents is a tiny
-self-hosted bridge that puts your existing **Codex** and **Claude Code** CLI
-sessions on a web page you can open from your phone, tablet, or any browser:
-browse every session, open one, read its full history, and continue it — with
-model/effort pickers, live streaming, reasoning, command output, diffs,
-approvals, token usage, and rich markdown.
+self-hosted bridge that puts your existing **Codex**, **Claude Code**, and
+**Grok** CLI sessions on a web page you can open from your phone, tablet, or any
+browser: browse every session, open one, read its full history, and continue it
+— with model/effort pickers, permission modes, live streaming, reasoning,
+command output, diffs, approvals, token usage, rich markdown, a
+markdown/code file viewer, and an installable, offline-capable PWA.
 
 It runs on your own machine and talks to your own already-logged-in CLIs. No
 accounts to create, nothing sent to a third party, no build step.
@@ -20,8 +21,9 @@ accounts to create, nothing sent to a third party, no build step.
 2. At least one coding CLI installed **and logged in**:
    - **Codex** — [Codex CLI](https://developers.openai.com/codex/cli), then `codex login`
    - **Claude** — [Claude Code](https://claude.com/product/claude-code), then run `claude` once to sign in
+   - **Grok** — the `grok` CLI, then sign in
 
-   (Having neither logged in is fine to *start* the server — you'll just see no
+   (Having none logged in is fine to *start* the server — you'll just see no
    sessions for that provider. Log in and it appears.)
 
 **Run it**
@@ -77,11 +79,37 @@ cat ~/.codex-phone/config.json     # { "token": "...", "port": 8484 }
 
 ## Access from anywhere
 
-By default the phone must be on the **same Wi-Fi**. To reach it over cellular
-from anywhere — with nothing exposed to the public internet — install
-[Tailscale](https://tailscale.com) on **both** the computer and the phone and
-sign into the same tailnet. remote-agents auto-detects it and prints an
-"Anywhere" link + QR.
+By default the phone must be on the **same Wi-Fi**. Two ways to reach it from
+anywhere (cellular included):
+
+**Option A — Tailscale (most private).** Install [Tailscale](https://tailscale.com)
+on **both** the computer and the phone and sign into the same tailnet. Nothing is
+exposed to the public internet; remote-agents auto-detects it and prints an
+"Anywhere" link + QR. (Note: the raw tailnet URL is HTTP, so the offline PWA
+needs `tailscale serve` to get HTTPS.)
+
+**Option B — Cloudflare tunnel (no Tailscale, HTTPS, fast on poor networks).**
+Requires [`cloudflared`](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)
+(`brew install cloudflared`).
+
+```bash
+remote-agents tunnel        # quick tunnel: instant public HTTPS URL + QR (random URL)
+```
+
+The URL is HTTPS, so the **installable, offline-capable PWA works on your phone**.
+The quick-tunnel URL changes each run; for a **stable** URL, use your own domain
+on Cloudflare (free) with a named tunnel:
+
+```bash
+cloudflared tunnel login
+cloudflared tunnel create remote-agents
+cloudflared tunnel route dns remote-agents agents.your-domain.com
+remote-agents tunnel --name remote-agents --hostname agents.your-domain.com
+```
+
+> A tunnel exposes the server publicly behind Cloudflare — the **token is the
+> only lock**, so keep the link private. For identity-based access (email code /
+> Google), put **Cloudflare Access** (free) in front of the tunnel.
 
 ## Keep it always running (optional)
 
@@ -154,10 +182,14 @@ provider works).
 
 - The only way in is a URL containing your pairing token — treat it like a
   password. Anyone with it can drive your agents as you.
-- Bind to a trusted network (localhost / LAN / tailnet); never expose the port
-  to the public internet.
+- Prefer a trusted network (localhost / LAN / tailnet). If you use
+  `remote-agents tunnel`, the server is reachable publicly behind Cloudflare and
+  the **token is the only lock** — keep the link private, and add **Cloudflare
+  Access** for an identity gate.
 - Agent output is sanitized with DOMPurify, so untrusted HTML in a model reply
   can't run scripts in your browser.
+- The file viewer is sandboxed to each thread's project directory (path traversal
+  is rejected).
 
 ---
 
@@ -168,23 +200,31 @@ model that the web UI renders:
 
 - **Codex** — runs `codex app-server` (JSON-RPC over stdio); reads sessions from `~/.codex/sessions`.
 - **Claude** — runs `claude` in `--output-format stream-json`; reads sessions from `~/.claude/projects`.
+- **Grok** — runs `grok` in `--output-format streaming-messages-json` (Anthropic wire format); reads sessions from `~/.grok/sessions`.
 
-Both sit behind a common provider interface (`providers/base.mjs`), so the UI
-speaks to either the same way — switch with the Codex/Claude toggle. Adding
+All three sit behind a common provider interface (`providers/base.mjs`), so the
+UI speaks to each the same way — switch with the Codex/Claude/Grok toggle. Adding
 another agent = one new `providers/<name>.mjs` implementing
 `list / read / send / events`. See `docs/architecture.html` for the full picture.
 
 ## Features
 
-Session list (searchable) · full history · resume + live streaming · model &
-effort selectors · permission modes · reasoning · live command output · diffs ·
-interactive approvals · live token counter · usage & rate limits · new-session
-flow · interrupt · rich sanitized markdown. Codex and Claude share all of it.
+Session list (searchable, sorted by last activity) · full history · resume + live
+streaming · model & effort selectors · **provider-specific permission modes** ·
+reasoning · live command output · diffs · **markdown/code file viewer**
+(syntax-highlighted) · interactive approvals · **queue / steer** messages
+mid-turn · stop · live token counter · usage & rate limits · new-session flow ·
+**live running-thread status** (incl. turns started on the Mac) · rich sanitized
+markdown. Codex, Claude, and Grok share all of it.
 
-**Known Claude limits:** approvals are gated via a PreToolUse hook in Agent mode
-(works, but hook-based rather than native); the usage panel is thinner than
-Codex's (5-hour rate window + session cost — Claude exposes no lifetime-token
-count headless).
+**Installable PWA + offline.** Add it to your home screen; it launches instantly
+and recently-opened chats are readable **offline** (cached in IndexedDB), then
+re-sync when you're back online. You only need the network to *send*.
+
+**Permission modes** map to each CLI's real controls — Codex: Read Only /
+Auto / Full Access; Claude: Manual / Accept edits / Plan / Bypass; Grok: Manual /
+Bypass. **Known Claude limit:** approvals are gated via a PreToolUse hook in
+Manual mode (works, but hook-based rather than native).
 
 ## License
 
