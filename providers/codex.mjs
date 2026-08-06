@@ -221,7 +221,17 @@ export class CodexProvider extends BaseProvider {
 
   async readThread(id) {
     await this.ready();
-    return this.rpc("thread/read", { threadId: id, includeTurns: true });
+    const result = await this.rpc("thread/read", { threadId: id, includeTurns: true });
+
+    // Prewarm: resume the thread in the app-server as soon as it's opened, so the
+    // first send doesn't pay the resume/history-replay cost. Fire-and-forget;
+    // per-turn approvalPolicy/sandboxPolicy on turn/start still governs each turn
+    // (matches how brand-new threads are marked resumed without a session policy).
+    if (!this.resumedThreads.has(id)) {
+      this.ensureResumed(id).catch(() => {});
+    }
+
+    return result;
   }
 
   async models() {

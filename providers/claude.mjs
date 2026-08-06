@@ -4,8 +4,9 @@
 // so the existing chat renderer is reused unchanged.
 //
 //   - listThreads / readThread / projects  read ~/.claude/projects/**/*.jsonl
-//   - send   spawns `claude --output-format stream-json` and translates its
-//            stream-json envelope into normalized notify events.
+//   - send   drives a persistent `claude -p --input-format stream-json` process
+//            per open thread, writing each user turn to stdin and translating
+//            the stream-json envelope into normalized notify events.
 //   - models is a static list; usage is partial (5h window, usedPercent null).
 //
 // Interactive approvals: in "agent" mode the bridge attaches a PreToolUse hook
@@ -205,10 +206,13 @@ export class ClaudeProvider extends BaseProvider {
   constructor(emit) {
     super(emit, "claude");
 
-    this.children = new Map(); // threadId (and adopted session id) -> child
+    // Persistent warm sessions: threadId and (once known) native sessionId
+    // both point at the same session object.
+    this.sessions = new Map();
     this.summaryCache = new Map(); // path -> { mtime, summary }
     this.drafts = new Map(); // draft id -> cwd (recovered on send)
     this.lastRateLimit = null; // last rate_limit_info seen (for usage())
+    this.spawnCount = 0; // test observability: process reuse across turns
 
     // interactive approvals
     this.endpoint = null; // { host, port }
@@ -220,6 +224,19 @@ export class ClaudeProvider extends BaseProvider {
     this.sessionCost = 0; // cumulative $ this server run
     this.lastUsage = null; // last result.usage
     this.lastModelUsage = null; // last result.modelUsage
+
+    // Idle reaper: drop warm sessions idle > 10 minutes.
+    this.reaper = setInterval(() => {
+      const now = Date.now();
+
+      for (const s of new Set(this.sessions.values())) {
+        if (!s.busy && now - (s.lastUsed || 0) > 10 * 60 * 1000) {
+          this.closeSession(s);
+        }
+      }
+    }, 60 * 1000);
+
+    this.reaper.unref?.();
   }
 
   async init() {}
@@ -520,6 +537,21 @@ export class ClaudeProvider extends BaseProvider {
       }
     }
 
+    // Prewarm the stream-json process so the first send on this thread is warm.
+    try {
+      if (!this.sessions.has(id)) {
+        this.ensureSession(id, {
+          cwd: this.cwdForSession(id),
+          model: undefined,
+          effort: undefined,
+          modeKey: undefined,
+          isDraft: false,
+        });
+      }
+    } catch {
+      // ignore prewarm failures
+    }
+
     return { thread: { turns } };
   }
 
@@ -634,7 +666,209 @@ export class ClaudeProvider extends BaseProvider {
     return homedir() || process.cwd();
   }
 
-  // ---------- live turn ----------
+  // ---------- live turn (persistent stream-json session pool) ----------
+
+  // Normalize model/effort/modeKey for pool key matching (undefined == no override).
+  modelModeMatch(session, model, effort, modeKey) {
+    const m = model || undefined;
+    const e = effort || undefined;
+    const k = modeKey || undefined;
+    return session.model === m && session.effort === e && session.modeKey === k;
+  }
+
+  newCtx(emitThreadId, isDraft) {
+    return {
+      emitThreadId,
+      isDraft,
+      adopted: false,
+      sessionId: null,
+      turnId: null,
+      streamMsgId: null,
+      blockKinds: new Map(), // block index -> "text" | "thinking" | "tool_use"
+      toolKinds: new Map(), // tool_use_id -> "cmd" | "file" | "mcp"
+      toolCommands: new Map(), // tool_use_id -> command string
+      sawResult: false,
+    };
+  }
+
+  // Clear per-turn fields; keep emitThreadId / isDraft / adopted / sessionId.
+  resetTurn(ctx) {
+    ctx.turnId = null;
+    ctx.streamMsgId = null;
+    ctx.blockKinds = new Map();
+    ctx.toolKinds = new Map();
+    ctx.toolCommands = new Map();
+    ctx.sawResult = false;
+  }
+
+  async ensureSession(emitThreadId, { cwd, model, effort, modeKey, isDraft }) {
+    const existing = this.sessions.get(emitThreadId);
+
+    if (existing && !existing.dead && this.modelModeMatch(existing, model, effort, modeKey)) {
+      existing.lastUsed = Date.now();
+      return existing;
+    }
+
+    if (existing) {
+      this.closeSession(existing);
+    }
+
+    const resolvedModel = model || undefined;
+    const resolvedEffort = effort || undefined;
+    const resolvedModeKey = modeKey || undefined;
+
+    const args = [
+      "-p",
+      "--input-format",
+      "stream-json",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--include-partial-messages",
+    ];
+
+    if (!isDraft) {
+      args.push("--resume", emitThreadId);
+    }
+
+    if (resolvedModel) {
+      args.push("--model", resolvedModel);
+    }
+
+    if (resolvedEffort) {
+      args.push("--effort", resolvedEffort);
+    }
+
+    // Interactive approvals for "manual" mode: run in default permission mode but
+    // gate sensitive tools through the PreToolUse hook (which asks the phone).
+    // acceptEdits/plan/bypass run non-interactively with their native mode.
+    const interactive =
+      this.hookPath && this.endpoint && (resolvedModeKey === "manual" || resolvedModeKey === "default" || resolvedModeKey == null);
+
+    if (interactive) {
+      args.push("--permission-mode", "default");
+      const url = `http://${this.endpoint.host}:${this.endpoint.port}/internal/claude-approval`;
+      const settings = {
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: "*",
+              hooks: [
+                {
+                  type: "command",
+                  command: `"${process.execPath}" "${this.hookPath}" ${url} ${this.hookSecret}`,
+                },
+              ],
+            },
+          ],
+        },
+      };
+      args.push("--settings", JSON.stringify(settings));
+    } else {
+      args.push("--permission-mode", permissionModeFor(resolvedModeKey));
+    }
+
+    let child;
+
+    try {
+      child = spawn("claude", args, { cwd, stdio: ["pipe", "pipe", "pipe"] });
+    } catch (e) {
+      throw Object.assign(new Error("failed to spawn claude: " + (e.message ?? e)), { status: 500 });
+    }
+
+    this.spawnCount += 1;
+
+    const session = {
+      child,
+      cwd,
+      model: resolvedModel,
+      effort: resolvedEffort,
+      modeKey: resolvedModeKey,
+      sessionId: null,
+      emitThreadId,
+      ready: null,
+      busy: false,
+      dead: false,
+      lastUsed: Date.now(),
+      feed: null,
+      ctx: this.newCtx(emitThreadId, isDraft),
+      turnDone: null,
+      _resolveTurnDone: null,
+    };
+
+    // Store under emitThreadId before returning so concurrent callers share it.
+    this.sessions.set(emitThreadId, session);
+
+    session.feed = makeLineReader((line) => this.handleStreamLine(line, session));
+    child.stdout.on("data", (d) => session.feed(d));
+
+    child.stderr.on("data", (d) => {
+      process.stderr.write(`[claude] ${d}`);
+    });
+
+    const onDead = (msg) => {
+      if (session.dead) {
+        return;
+      }
+
+      session.dead = true;
+      this.sessions.delete(emitThreadId);
+
+      if (session.sessionId) {
+        this.sessions.delete(session.sessionId);
+      }
+
+      if (session.busy) {
+        this.notify("turn/failed", {
+          threadId: session.emitThreadId,
+          turn: { status: "failed", error: { message: msg } },
+        });
+        session.busy = false;
+
+        if (session._resolveTurnDone) {
+          session._resolveTurnDone();
+          session._resolveTurnDone = null;
+        }
+      }
+    };
+
+    child.on("error", (e) => {
+      const msg =
+        e.code === "ENOENT"
+          ? "The `claude` CLI was not found on PATH. Install Claude Code and restart codex-phone."
+          : String(e.message ?? e);
+      onDead(msg);
+    });
+
+    child.on("exit", (code) => {
+      onDead(code ? `claude exited with code ${code}` : "claude exited");
+    });
+
+    // Claude has no separate init handshake — the process is usable immediately;
+    // the first stdin write drives system/init.
+    session.ready = Promise.resolve();
+
+    return session;
+  }
+
+  closeSession(session) {
+    if (!session) {
+      return;
+    }
+
+    session.dead = true;
+    this.sessions.delete(session.emitThreadId);
+
+    if (session.sessionId) {
+      this.sessions.delete(session.sessionId);
+    }
+
+    try {
+      session.child?.kill("SIGTERM");
+    } catch {
+      // ignore
+    }
+  }
 
   async send(body = {}) {
     const { threadId, text, model, effort, mode, sandbox, cwd, draft } = body;
@@ -646,100 +880,63 @@ export class ClaudeProvider extends BaseProvider {
     const isDraft = !!draft || !threadId || String(threadId).startsWith("draft-") || threadId === "new";
     const emitThreadId = threadId || "draft-" + randomBytes(6).toString("hex");
     const resolvedCwd = this.cwdForSession(threadId, cwd);
-
-    const args = ["-p", text, "--output-format", "stream-json", "--verbose", "--include-partial-messages"];
-
-    if (!isDraft) {
-      args.push("--resume", threadId);
-    }
-
-    if (model) {
-      args.push("--model", model);
-    }
-
-    if (effort) {
-      args.push("--effort", effort);
-    }
-
-    // Interactive approvals for "manual" mode: run in default permission mode but
-    // gate sensitive tools through the PreToolUse hook (which asks the phone).
-    // acceptEdits/plan/bypass run non-interactively with their native mode.
     const modeKey = mode ?? sandbox;
-    const interactive = this.hookPath && this.endpoint && (modeKey === "manual" || modeKey === "default" || modeKey == null);
 
-    if (interactive) {
-      args.push("--permission-mode", "default");
-      const url = `http://${this.endpoint.host}:${this.endpoint.port}/internal/claude-approval`;
-      const settings = {
-        hooks: {
-          PreToolUse: [{ matcher: "*", hooks: [{ type: "command", command: `"${process.execPath}" "${this.hookPath}" ${url} ${this.hookSecret}` }] }],
-        },
-      };
-      args.push("--settings", JSON.stringify(settings));
-    } else {
-      args.push("--permission-mode", permissionModeFor(modeKey));
+    const session = await this.ensureSession(emitThreadId, {
+      cwd: resolvedCwd,
+      model,
+      effort,
+      modeKey,
+      isDraft,
+    });
+
+    await session.ready;
+
+    // Serialize turns on the same warm session.
+    if (session.busy && session.turnDone) {
+      await session.turnDone;
     }
 
-    let child;
+    if (session.busy) {
+      throw Object.assign(new Error("a turn is already running"), { status: 409 });
+    }
+
+    if (session.dead) {
+      throw Object.assign(new Error("session is dead"), { status: 500 });
+    }
+
+    this.resetTurn(session.ctx);
+    session.busy = true;
+    session.turnDone = new Promise((r) => {
+      session._resolveTurnDone = r;
+    });
+
+    // Do NOT emit turn/started here — the translation already emits it from
+    // message_start (handleAnthropicEvent), same as the cold-spawn path.
+    const frame = JSON.stringify({
+      type: "user",
+      message: { role: "user", content: [{ type: "text", text }] },
+    });
 
     try {
-      child = spawn("claude", args, { cwd: resolvedCwd, stdio: ["ignore", "pipe", "pipe"] });
+      session.child.stdin.write(frame + "\n");
     } catch (e) {
-      throw Object.assign(new Error("failed to spawn claude: " + (e.message ?? e)), { status: 500 });
-    }
+      session.busy = false;
 
-    this.children.set(emitThreadId, child);
-
-    const ctx = {
-      emitThreadId,
-      isDraft,
-      adopted: false,
-      turnId: null,
-      sessionId: null,
-      streamMsgId: null,
-      blockKinds: new Map(), // block index -> "text" | "thinking" | "tool_use"
-      toolKinds: new Map(), // tool_use_id -> "cmd" | "file" | "mcp"
-      toolCommands: new Map(), // tool_use_id -> command string
-      sawResult: false,
-    };
-
-    const feed = makeLineReader((line) => this.handleStreamLine(line, ctx, child));
-
-    child.stdout.on("data", (d) => feed(d));
-
-    child.stderr.on("data", (d) => {
-      process.stderr.write(`[claude] ${d}`);
-    });
-
-    child.on("error", (e) => {
-      const msg = e.code === "ENOENT" ? "The `claude` CLI was not found on PATH. Install Claude Code and restart codex-phone." : String(e.message ?? e);
-      this.notify("turn/failed", { threadId: ctx.emitThreadId, turn: { status: "failed", error: { message: msg } } });
-      this.cleanupChild(ctx);
-    });
-
-    child.on("exit", (code) => {
-      if (!ctx.sawResult) {
-        this.notify("turn/failed", {
-          threadId: ctx.emitThreadId,
-          turn: { status: "failed", error: { message: code ? `claude exited with code ${code}` : "claude exited" } },
-        });
+      if (session._resolveTurnDone) {
+        session._resolveTurnDone();
+        session._resolveTurnDone = null;
       }
 
-      this.cleanupChild(ctx);
-    });
+      throw Object.assign(new Error("failed to write to claude stdin: " + (e.message ?? e)), { status: 500 });
+    }
 
+    session.lastUsed = Date.now();
     return { ok: true, threadId: emitThreadId };
   }
 
-  cleanupChild(ctx) {
-    this.children.delete(ctx.emitThreadId);
-
-    if (ctx.sessionId) {
-      this.children.delete(ctx.sessionId);
-    }
-  }
-
-  handleStreamLine(line, ctx, child) {
+  handleStreamLine(line, session) {
+    const ctx = session.ctx;
     let obj;
 
     try {
@@ -753,7 +950,8 @@ export class ClaudeProvider extends BaseProvider {
     if (obj.type === "system" && obj.subtype === "init") {
       if (obj.session_id) {
         ctx.sessionId = obj.session_id;
-        this.children.set(obj.session_id, child);
+        session.sessionId = obj.session_id;
+        this.sessions.set(obj.session_id, session);
 
         if (ctx.isDraft && !ctx.adopted) {
           ctx.adopted = true;
@@ -811,6 +1009,16 @@ export class ClaudeProvider extends BaseProvider {
         threadId: tid,
         turn: { id: ctx.turnId, status: failed ? "failed" : "completed", error: failed ? { message: String(obj.result ?? obj.subtype) } : undefined },
       });
+
+      // End the turn at the session level so the warm process can accept another.
+      session.busy = false;
+      session.lastUsed = Date.now();
+
+      if (session._resolveTurnDone) {
+        session._resolveTurnDone();
+        session._resolveTurnDone = null;
+      }
+
       return;
     }
   }
@@ -944,14 +1152,61 @@ export class ClaudeProvider extends BaseProvider {
     return total > 0 ? total : null;
   }
 
+  // Prefer a control interrupt on stdin; fall back to killing the child (next
+  // send respawns warm). Correct Stop matters more than keeping warmth after Stop.
+  // Empirically: control_request / type:interrupt are best-effort; kill is reliable.
   async interrupt({ threadId } = {}) {
-    const child = this.children.get(threadId);
+    const session = this.sessions.get(threadId);
 
-    if (child) {
+    if (!session || session.dead) {
+      return { ok: true };
+    }
+
+    if (session.busy && session.child?.stdin?.writable) {
       try {
-        child.kill("SIGTERM");
+        session.child.stdin.write(
+          JSON.stringify({ type: "control_request", request: { subtype: "interrupt" } }) + "\n",
+        );
+      } catch {
+        // ignore write errors; fall through to kill
+      }
+
+      // Brief wait for a clean result path.
+      if (session.turnDone) {
+        await Promise.race([
+          session.turnDone,
+          new Promise((r) => setTimeout(r, 1500)),
+        ]);
+      }
+    }
+
+    if (session.busy && !session.dead) {
+      // Fall back: kill the process. Do not pre-set dead so onDead fails the turn.
+      try {
+        session.child?.kill("SIGTERM");
       } catch {
         // ignore
+      }
+
+      if (session.turnDone) {
+        await Promise.race([
+          session.turnDone,
+          new Promise((r) => setTimeout(r, 1000)),
+        ]);
+      }
+
+      // Safety net if exit handler did not run.
+      if (session.busy) {
+        this.notify("turn/failed", {
+          threadId: session.emitThreadId,
+          turn: { status: "failed", error: { message: "cancelled" } },
+        });
+        session.busy = false;
+
+        if (session._resolveTurnDone) {
+          session._resolveTurnDone();
+          session._resolveTurnDone = null;
+        }
       }
     }
 

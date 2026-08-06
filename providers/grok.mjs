@@ -4,22 +4,23 @@
 // emit, so the existing chat renderer is reused unchanged.
 //
 //   - listThreads / readThread / projects  read ~/.grok/sessions/**
-//   - send   spawns `grok --output-format streaming-messages-json` and
-//            translates Anthropic Messages API wire-format NDJSON into
-//            normalized notify events (same shapes as ClaudeProvider).
+//   - send   drives a persistent `grok agent stdio` ACP process per open
+//            thread, translating session updates into normalized notify events.
 //   - models is a static list; usage is best-effort from result lines.
 //
-// Approvals: headless interactive approval interception is limited. When the
-// UI mode is bypass/full we pass --always-approve; otherwise we leave Grok to
-// handle approvals itself (no phone-side PreToolUse hook equivalent).
+// Approvals: headless ACP auto-approves via requestPermission. Manual mode
+// never truly gated in headless (matches prior behavior).
 
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { readdirSync, statSync, openSync, readSync, closeSync, existsSync, readFileSync } from "node:fs";
+import { readdirSync, statSync, openSync, readSync, closeSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
+import { Readable, Writable } from "node:stream";
 
-import { BaseProvider, toEpochSec, makeLineReader } from "./base.mjs";
+import { ClientSideConnection, ndJsonStream } from "@zed-industries/agent-client-protocol";
+
+import { BaseProvider, toEpochSec } from "./base.mjs";
 
 const SESSIONS_DIR = join(homedir(), ".grok", "sessions");
 const HEAD_BYTES = 65536;
@@ -267,15 +268,31 @@ export class GrokProvider extends BaseProvider {
   constructor(emit) {
     super(emit, "grok");
 
-    this.children = new Map(); // threadId (and adopted session id) -> child
+    // Persistent ACP sessions: threadId and (once known) native sessionId
+    // both point at the same session object.
+    this.sessions = new Map();
     this.summaryCache = new Map(); // sessionDir path -> { mtime, summary }
     this.drafts = new Map(); // draft id -> cwd (recovered on send)
     this.endpoint = null; // { host, port } — stored for future approval hooks
+    this.spawnCount = 0; // test observability: process reuse across turns
 
     // usage enrichment from result lines
     this.sessionCost = 0;
     this.lastUsage = null;
     this.lastModelUsage = null;
+
+    // Idle reaper: drop warm sessions idle > 10 minutes.
+    this.reaper = setInterval(() => {
+      const now = Date.now();
+
+      for (const s of new Set(this.sessions.values())) {
+        if (!s.busy && now - (s.lastUsed || 0) > 10 * 60 * 1000) {
+          this.closeSession(s);
+        }
+      }
+    }, 60 * 1000);
+
+    this.reaper.unref?.();
   }
 
   async init() {}
@@ -702,6 +719,24 @@ export class GrokProvider extends BaseProvider {
       }
     }
 
+    // Prewarm the ACP process so the first send on this thread is warm. Use the
+    // default model/effort the UI sends by default, so the common case reuses the
+    // prewarmed process instead of respawning on a model/effort mismatch. (If the
+    // user picked a non-default effort, the first send recreates — still correct.)
+    try {
+      if (!this.sessions.has(id)) {
+        const defaultModel = (MODELS.find((m) => m.isDefault) ?? MODELS[0])?.id;
+        this.ensureSession(id, {
+          cwd: this.cwdForSession(id),
+          model: defaultModel,
+          effort: "high",
+          isDraft: false,
+        });
+      }
+    } catch {
+      // ignore prewarm failures
+    }
+
     return { thread: { turns } };
   }
 
@@ -807,7 +842,440 @@ export class GrokProvider extends BaseProvider {
     return homedir() || process.cwd();
   }
 
-  // ---------- live turn ----------
+  // ---------- live turn (persistent ACP session pool) ----------
+
+  // Normalize model/effort for pool key matching (undefined == no override).
+  modelEffortMatch(session, model, effort) {
+    const m = model || undefined;
+    const e = effort || undefined;
+    return session.model === m && session.effort === e;
+  }
+
+  async ensureSession(emitThreadId, { cwd, model, effort, isDraft }) {
+    const existing = this.sessions.get(emitThreadId);
+
+    if (existing && !existing.dead && this.modelEffortMatch(existing, model, effort)) {
+      existing.lastUsed = Date.now();
+      return existing;
+    }
+
+    if (existing) {
+      await this.closeSession(existing);
+    }
+
+    const resolvedModel = model || undefined;
+    const resolvedEffort = effort || undefined;
+    const args = ["agent"];
+
+    if (resolvedModel) {
+      args.push("--model", resolvedModel);
+    }
+
+    if (resolvedEffort) {
+      args.push("--reasoning-effort", resolvedEffort);
+    }
+
+    args.push("stdio");
+
+    let child;
+
+    try {
+      child = spawn("grok", args, { cwd, stdio: ["pipe", "pipe", "pipe"] });
+    } catch (e) {
+      throw Object.assign(new Error("failed to spawn grok: " + (e.message ?? e)), { status: 500 });
+    }
+
+    this.spawnCount += 1;
+
+    const session = {
+      child,
+      conn: null,
+      sessionId: null,
+      cwd,
+      model: resolvedModel,
+      effort: resolvedEffort,
+      ready: null,
+      loadingHistory: false,
+      busy: false,
+      turn: null,
+      turnDone: null, // Promise that resolves when the in-flight turn finishes
+      lastUsed: Date.now(),
+      emitThreadId,
+      dead: false,
+      mode: null,
+    };
+
+    // Store under emitThreadId before awaiting so concurrent callers share ready.
+    this.sessions.set(emitThreadId, session);
+
+    child.stderr.on("data", (d) => {
+      process.stderr.write(`[grok] ${d}`);
+    });
+
+    const onDead = (msg) => {
+      if (session.dead) {
+        return;
+      }
+
+      session.dead = true;
+      this.sessions.delete(emitThreadId);
+
+      if (session.sessionId) {
+        this.sessions.delete(session.sessionId);
+      }
+
+      if (session.busy) {
+        this.notify("turn/failed", {
+          threadId: session.emitThreadId,
+          turn: { status: "failed", error: { message: msg } },
+        });
+        session.busy = false;
+        session.turn = null;
+
+        if (session._resolveTurnDone) {
+          session._resolveTurnDone();
+          session._resolveTurnDone = null;
+        }
+      }
+    };
+
+    child.on("error", (e) => {
+      const msg = e.code === "ENOENT"
+        ? "The `grok` CLI was not found on PATH. Install Grok and restart codex-phone."
+        : String(e.message ?? e);
+      onDead(msg);
+    });
+
+    child.on("exit", (code) => {
+      onDead(code ? `grok exited with code ${code}` : "grok exited");
+    });
+
+    const input = Writable.toWeb(child.stdin);
+    const output = Readable.toWeb(child.stdout);
+    const stream = ndJsonStream(input, output);
+    const conn = new ClientSideConnection(() => this.makeClientHandlers(session), stream);
+    session.conn = conn;
+
+    session.ready = (async () => {
+      await conn.initialize({
+        protocolVersion: 1,
+        clientCapabilities: {
+          fs: { readTextFile: true, writeTextFile: true },
+          terminal: false,
+        },
+      });
+
+      if (isDraft) {
+        const r = await conn.newSession({ cwd, mcpServers: [] });
+        session.sessionId = r.sessionId;
+        this.sessions.set(r.sessionId, session);
+        this.drafts.delete(emitThreadId);
+        this.notify("thread/adopted", { threadId: emitThreadId, sessionId: r.sessionId });
+      } else {
+        session.loadingHistory = true;
+
+        try {
+          await conn.loadSession({ sessionId: emitThreadId, cwd, mcpServers: [] });
+          session.sessionId = emitThreadId;
+          this.sessions.set(emitThreadId, session);
+        } finally {
+          session.loadingHistory = false;
+        }
+      }
+
+      session.lastUsed = Date.now();
+    })();
+
+    // Surface ready failures as dead sessions.
+    session.ready.catch((err) => {
+      onDead(String(err?.message ?? err));
+    });
+
+    return session;
+  }
+
+  closeSession(session) {
+    if (!session) {
+      return;
+    }
+
+    session.dead = true;
+    this.sessions.delete(session.emitThreadId);
+
+    if (session.sessionId) {
+      this.sessions.delete(session.sessionId);
+    }
+
+    try {
+      session.child?.kill("SIGTERM");
+    } catch {
+      // ignore
+    }
+  }
+
+  newTurnState(turnId, threadId) {
+    return {
+      turnId,
+      threadId,
+      lastKind: null,
+      blockSeq: 0,
+      textItemId: null,
+      thoughtItemId: null,
+      textAccum: "",
+      thoughtAccum: "",
+      toolKinds: new Map(),
+      toolCommands: new Map(),
+      toolOutLen: new Map(),
+      sawEnd: false,
+    };
+  }
+
+  makeClientHandlers(session) {
+    return {
+      sessionUpdate: async ({ update }) => this.onSessionUpdate(session, update),
+      requestPermission: async (p) => this.onRequestPermission(session, p),
+      readTextFile: async ({ path }) => ({ content: readFileSync(path, "utf8") }),
+      writeTextFile: async ({ path, content }) => {
+        writeFileSync(path, content);
+        return {};
+      },
+    };
+  }
+
+  onRequestPermission(_session, p) {
+    const opts = p.options || [];
+    const pick = opts.find((o) =>
+      /allow|approve|yes|once|always/i.test((o.optionId || "") + (o.name || "") + (o.kind || ""))
+    ) || opts[0];
+    return { outcome: { outcome: "selected", optionId: pick?.optionId } };
+  }
+
+  onSessionUpdate(session, update) {
+    if (!session.turn || session.loadingHistory) {
+      return;
+    }
+
+    const t = session.turn;
+    const tid = t.threadId;
+    const kind = update.sessionUpdate;
+
+    switch (kind) {
+      case "user_message_chunk":
+        return;
+
+      case "agent_message_chunk": {
+        const text = update.content?.text ?? "";
+
+        if (!text) {
+          return;
+        }
+
+        if (t.lastKind !== "text") {
+          this.finalizeBlock(session);
+          t.blockSeq++;
+          t.textItemId = t.turnId + ":t" + t.blockSeq;
+          t.textAccum = "";
+          t.lastKind = "text";
+        }
+
+        t.textAccum += text;
+        this.notify("item/agentMessage/delta", { threadId: tid, itemId: t.textItemId, delta: text });
+        return;
+      }
+
+      case "agent_thought_chunk": {
+        const text = update.content?.text ?? "";
+
+        if (!text) {
+          return;
+        }
+
+        if (t.lastKind !== "thought") {
+          this.finalizeBlock(session);
+          t.blockSeq++;
+          t.thoughtItemId = t.turnId + ":r" + t.blockSeq;
+          t.thoughtAccum = "";
+          t.lastKind = "thought";
+        }
+
+        t.thoughtAccum += text;
+        this.notify("item/reasoning/summaryTextDelta", { threadId: tid, itemId: t.thoughtItemId, delta: text });
+        return;
+      }
+
+      case "tool_call": {
+        this.finalizeBlock(session);
+        t.lastKind = null;
+        const id = update.toolCallId;
+        const toolKind = update._meta?.["x.ai/tool"]?.kind ?? update.kind;
+
+        if (toolKind === "execute") {
+          const command = update.rawInput?.command ?? update.title ?? "";
+          t.toolKinds.set(id, "cmd");
+          t.toolCommands.set(id, command);
+          t.toolOutLen.set(id, 0);
+          this.notify("item/started", {
+            threadId: tid,
+            item: { type: "commandExecution", id, command, status: "running" },
+          });
+        } else if (toolKind === "edit") {
+          const input = update.rawInput ?? {};
+          const path = input.file_path ?? input.path ?? update.locations?.[0]?.path ?? "";
+          let diff = "";
+
+          if (input.content != null && input.old_string == null) {
+            // full write
+            diff = String(input.content)
+              .split("\n")
+              .map((l) => "+" + l)
+              .join("\n");
+          } else if (input.old_string != null || input.new_string != null) {
+            const del = String(input.old_string ?? "").split("\n").map((l) => "-" + l).join("\n");
+            const add = String(input.new_string ?? "").split("\n").map((l) => "+" + l).join("\n");
+            diff = del + "\n" + add;
+          }
+
+          t.toolKinds.set(id, "file");
+          this.notify("item/completed", {
+            threadId: tid,
+            item: { type: "fileChange", id, changes: [{ path, diff }] },
+          });
+        } else {
+          const tool = update.title ?? update._meta?.["x.ai/tool"]?.name ?? "tool";
+          const server = String(tool).includes("__") ? String(tool).split("__")[0] : "tool";
+          t.toolKinds.set(id, "mcp");
+          this.notify("item/started", {
+            threadId: tid,
+            item: { type: "mcpToolCall", id, server, tool },
+          });
+        }
+
+        return;
+      }
+
+      case "tool_call_update": {
+        const id = update.toolCallId;
+        const toolKind = t.toolKinds.get(id);
+        const status = update.status;
+        const out = (update.content || []).map((c) => c?.content?.text ?? "").join("");
+
+        if (toolKind === "cmd") {
+          const prev = t.toolOutLen.get(id) ?? 0;
+
+          if (out.length > prev) {
+            this.notify("item/commandExecution/outputDelta", {
+              threadId: tid,
+              itemId: id,
+              delta: out.slice(prev),
+            });
+            t.toolOutLen.set(id, out.length);
+          }
+
+          if (status === "completed" || status === "failed") {
+            this.notify("item/completed", {
+              threadId: tid,
+              item: {
+                type: "commandExecution",
+                id,
+                command: t.toolCommands.get(id) ?? "",
+                aggregatedOutput: out,
+                exitCode: update.rawOutput?.exit_code ?? (status === "failed" ? 1 : 0),
+                status: "completed",
+              },
+            });
+          }
+        } else if (toolKind === "mcp" && (status === "completed" || status === "failed")) {
+          this.notify("item/completed", {
+            threadId: tid,
+            item: { type: "mcpToolCall", id, server: "tool", tool: id, status: "completed" },
+          });
+        }
+
+        // file kind already completed at tool_call — ignore updates.
+        return;
+      }
+
+      default:
+        // plan, available_commands_update, current_mode_update, etc.
+        return;
+    }
+  }
+
+  finalizeBlock(session) {
+    const t = session.turn;
+
+    if (!t) {
+      return;
+    }
+
+    if (t.lastKind === "text" && t.textItemId && (t.textAccum || "").trim()) {
+      this.notify("item/completed", {
+        threadId: t.threadId,
+        item: { type: "agentMessage", id: t.textItemId, text: t.textAccum },
+      });
+      t.textItemId = null;
+      t.textAccum = "";
+    }
+
+    if (t.lastKind === "thought" && t.thoughtItemId && (t.thoughtAccum || "").trim()) {
+      this.notify("item/completed", {
+        threadId: t.threadId,
+        item: { type: "reasoning", id: t.thoughtItemId, summary: [t.thoughtAccum] },
+      });
+      t.thoughtItemId = null;
+      t.thoughtAccum = "";
+    }
+  }
+
+  finishTurn(session, res) {
+    this.finalizeBlock(session);
+    const cancelled = res?.stopReason === "cancelled";
+    const failed = res?.stopReason === "refusal";
+    const tid = session.emitThreadId;
+    const turnId = session.turn?.turnId;
+
+    if (cancelled) {
+      this.notify("turn/failed", {
+        threadId: tid,
+        turn: { status: "failed", error: { message: "Turn cancelled" } },
+      });
+    } else if (failed) {
+      this.notify("turn/failed", {
+        threadId: tid,
+        turn: { status: "failed", error: { message: "refusal" } },
+      });
+    } else {
+      this.notify("turn/completed", {
+        threadId: tid,
+        turn: { id: turnId, status: "completed" },
+      });
+    }
+
+    session.busy = false;
+    session.turn = null;
+    session.lastUsed = Date.now();
+
+    if (session._resolveTurnDone) {
+      session._resolveTurnDone();
+      session._resolveTurnDone = null;
+    }
+  }
+
+  failTurn(session, err) {
+    this.finalizeBlock(session);
+    this.notify("turn/failed", {
+      threadId: session.emitThreadId,
+      turn: { status: "failed", error: { message: String(err?.message ?? err) } },
+    });
+    session.busy = false;
+    session.turn = null;
+    session.lastUsed = Date.now();
+
+    if (session._resolveTurnDone) {
+      session._resolveTurnDone();
+      session._resolveTurnDone = null;
+    }
+  }
 
   async send(body = {}) {
     const { threadId, text, model, effort, mode, sandbox, cwd, draft } = body;
@@ -817,316 +1285,57 @@ export class GrokProvider extends BaseProvider {
     }
 
     const isDraft = !!draft || !threadId || String(threadId).startsWith("draft-") || threadId === "new";
-    const emitThreadId = threadId || "draft-" + randomBytes(6).toString("hex");
+    const emitThreadId = threadId || ("draft-" + randomBytes(6).toString("hex"));
     const resolvedCwd = this.cwdForSession(threadId, cwd);
-
-    const args = [
-      "-p", text,
-      "--output-format", "streaming-messages-json",
-      "--include-partial-messages",
-      "--cwd", resolvedCwd,
-    ];
-
-    if (!isDraft) {
-      args.push("--resume", threadId);
-    }
-
-    if (model) {
-      args.push("--model", model);
-    }
-
-    if (effort) {
-      args.push("--effort", effort);
-    }
-
-    // Map UI permission mode. Bypass → --always-approve; other modes either
-    // pass --permission-mode or leave Grok's defaults (manual interactive
-    // approval interception is limited in headless mode).
     const modeKey = mode ?? sandbox;
-    args.push(...permissionArgsFor(modeKey));
 
-    let child;
+    const session = await this.ensureSession(emitThreadId, {
+      cwd: resolvedCwd,
+      model,
+      effort,
+      isDraft,
+    });
 
-    try {
-      child = spawn("grok", args, { cwd: resolvedCwd, stdio: ["ignore", "pipe", "pipe"] });
-    } catch (e) {
-      throw Object.assign(new Error("failed to spawn grok: " + (e.message ?? e)), { status: 500 });
+    session.mode = modeKey;
+    await session.ready;
+
+    // Serialize turns on the same warm session (frontend usually enqueues; this
+    // is the safe path if two sends race). Wait for the previous turn to finish.
+    if (session.busy && session.turnDone) {
+      await session.turnDone;
     }
 
-    this.children.set(emitThreadId, child);
+    if (session.busy) {
+      throw Object.assign(new Error("a turn is already running"), { status: 409 });
+    }
 
-    const ctx = {
-      emitThreadId,
-      isDraft,
-      adopted: false,
-      turnId: null,
-      sessionId: null,
-      streamMsgId: null,
-      blockKinds: new Map(), // block index -> "text" | "thinking" | "tool_use"
-      toolKinds: new Map(), // tool_use_id -> "cmd" | "file" | "mcp"
-      toolCommands: new Map(), // tool_use_id -> command string
-      sawResult: false,
-    };
+    if (session.dead) {
+      throw Object.assign(new Error("session is dead"), { status: 500 });
+    }
 
-    const feed = makeLineReader((line) => this.handleStreamLine(line, ctx, child));
-
-    child.stdout.on("data", (d) => feed(d));
-
-    child.stderr.on("data", (d) => {
-      process.stderr.write(`[grok] ${d}`);
+    const turnId = "turn-" + randomBytes(6).toString("hex");
+    session.busy = true;
+    session.turn = this.newTurnState(turnId, session.emitThreadId);
+    session.turnDone = new Promise((resolve) => {
+      session._resolveTurnDone = resolve;
     });
 
-    child.on("error", (e) => {
-      const msg = e.code === "ENOENT"
-        ? "The `grok` CLI was not found on PATH. Install Grok and restart codex-phone."
-        : String(e.message ?? e);
-      this.notify("turn/failed", { threadId: ctx.emitThreadId, turn: { status: "failed", error: { message: msg } } });
-      this.cleanupChild(ctx);
-    });
+    this.notify("turn/started", { threadId: session.emitThreadId, turn: { id: turnId } });
 
-    child.on("exit", (code) => {
-      if (!ctx.sawResult) {
-        this.notify("turn/failed", {
-          threadId: ctx.emitThreadId,
-          turn: { status: "failed", error: { message: code ? `grok exited with code ${code}` : "grok exited" } },
-        });
-      }
-
-      this.cleanupChild(ctx);
-    });
+    const sid = session.sessionId;
+    session.conn
+      .prompt({ sessionId: sid, prompt: [{ type: "text", text }] })
+      .then((res) => this.finishTurn(session, res))
+      .catch((err) => this.failTurn(session, err));
 
     return { ok: true, threadId: emitThreadId };
   }
 
-  cleanupChild(ctx) {
-    this.children.delete(ctx.emitThreadId);
-
-    if (ctx.sessionId) {
-      this.children.delete(ctx.sessionId);
-    }
-  }
-
-  handleStreamLine(line, ctx, child) {
-    let obj;
-
-    try {
-      obj = JSON.parse(line);
-    } catch {
-      return;
-    }
-
-    const tid = ctx.emitThreadId;
-
-    // Grok streaming-messages-json mirrors Claude stream-json envelopes:
-    // system/init, stream_event, assistant, user (tool_result), result.
-    if (obj.type === "system" && obj.subtype === "init") {
-      if (obj.session_id) {
-        ctx.sessionId = obj.session_id;
-        this.children.set(obj.session_id, child);
-
-        if (ctx.isDraft && !ctx.adopted) {
-          ctx.adopted = true;
-          this.drafts.delete(tid);
-          this.notify("thread/adopted", { threadId: tid, sessionId: obj.session_id });
-        }
-      }
-
-      return;
-    }
-
-    if (obj.type === "stream_event") {
-      this.handleAnthropicEvent(obj.event ?? {}, ctx);
-      return;
-    }
-
-    if (obj.type === "assistant") {
-      this.handleAssistantMessage(obj.message ?? {}, ctx);
-      return;
-    }
-
-    if (obj.type === "user") {
-      this.handleUserMessage(obj.message ?? {}, ctx);
-      return;
-    }
-
-    if (obj.type === "result") {
-      ctx.sawResult = true;
-      const total = this.tokensFromUsage(obj.usage);
-
-      if (total != null) {
-        this.notify("thread/tokenUsage/updated", { threadId: tid, tokenUsage: { total: { totalTokens: total } } });
-      }
-
-      if (typeof obj.total_cost_usd === "number") {
-        this.sessionCost += obj.total_cost_usd;
-      }
-
-      this.lastUsage = obj.usage ?? this.lastUsage;
-      this.lastModelUsage = obj.modelUsage ?? this.lastModelUsage;
-
-      const failed = (obj.subtype && obj.subtype !== "success") || obj.is_error === true;
-      this.notify(failed ? "turn/failed" : "turn/completed", {
-        threadId: tid,
-        turn: {
-          id: ctx.turnId,
-          status: failed ? "failed" : "completed",
-          error: failed ? { message: String(obj.result ?? obj.subtype ?? "error") } : undefined,
-        },
-      });
-      return;
-    }
-  }
-
-  handleAnthropicEvent(event, ctx) {
-    const tid = ctx.emitThreadId;
-
-    switch (event.type) {
-      case "message_start": {
-        const id = event.message?.id;
-        ctx.streamMsgId = id;
-
-        if (!ctx.turnId) {
-          ctx.turnId = id || "turn";
-          this.notify("turn/started", { threadId: tid, turn: { id: ctx.turnId } });
-        }
-
-        ctx.blockKinds = new Map();
-        break;
-      }
-
-      case "content_block_start": {
-        const kind = event.content_block?.type;
-        ctx.blockKinds.set(event.index, kind);
-        break;
-      }
-
-      case "content_block_delta": {
-        const kind = ctx.blockKinds.get(event.index);
-        const itemId = `${ctx.streamMsgId}:${event.index}`;
-        const delta = event.delta ?? {};
-
-        if (delta.type === "text_delta" && kind === "text") {
-          this.notify("item/agentMessage/delta", { threadId: tid, itemId, delta: delta.text ?? "" });
-        } else if (delta.type === "thinking_delta" && kind === "thinking") {
-          this.notify("item/reasoning/summaryTextDelta", { threadId: tid, itemId, delta: delta.thinking ?? "" });
-        }
-
-        // input_json_delta: tool input streams here; rendered from the
-        // assembled assistant message instead, so nothing to emit.
-        break;
-      }
-
-      default:
-        break;
-    }
-  }
-
-  handleAssistantMessage(message, ctx) {
-    const tid = ctx.emitThreadId;
-    const content = Array.isArray(message.content) ? message.content : [];
-
-    content.forEach((block, i) => {
-      const itemId = `${message.id}:${i}`;
-
-      if (block.type === "text") {
-        if ((block.text ?? "").trim()) {
-          this.notify("item/completed", { threadId: tid, item: { type: "agentMessage", id: itemId, text: block.text } });
-        }
-      } else if (block.type === "thinking") {
-        if ((block.thinking ?? "").trim()) {
-          this.notify("item/completed", { threadId: tid, item: { type: "reasoning", id: itemId, summary: [block.thinking] } });
-        }
-      } else if (block.type === "tool_use") {
-        const item = toolUseToItem(block);
-
-        if (item.type === "commandExecution") {
-          ctx.toolKinds.set(block.id, "cmd");
-          ctx.toolCommands.set(block.id, item.command);
-          this.notify("item/started", { threadId: tid, item: { type: "commandExecution", id: block.id, command: item.command, status: "running" } });
-        } else if (item.type === "fileChange") {
-          ctx.toolKinds.set(block.id, "file");
-          this.notify("item/completed", { threadId: tid, item });
-        } else {
-          ctx.toolKinds.set(block.id, "mcp");
-          this.notify("item/started", { threadId: tid, item });
-        }
-      }
-    });
-
-    const total = this.tokensFromUsage(message.usage);
-
-    if (total != null) {
-      this.notify("thread/tokenUsage/updated", { threadId: tid, tokenUsage: { total: { totalTokens: total } } });
-    }
-  }
-
-  handleUserMessage(message, ctx) {
-    const tid = ctx.emitThreadId;
-    const content = Array.isArray(message.content) ? message.content : [];
-
-    for (const block of content) {
-      if (block.type !== "tool_result") {
-        continue;
-      }
-
-      const kind = ctx.toolKinds.get(block.tool_use_id);
-
-      if (kind === "cmd") {
-        const output = toolResultText(block.content);
-        const exitCode = toolResultExitCode(block.content, !!block.is_error);
-
-        if (output) {
-          this.notify("item/commandExecution/outputDelta", { threadId: tid, itemId: block.tool_use_id, delta: output });
-        }
-
-        this.notify("item/completed", {
-          threadId: tid,
-          item: {
-            type: "commandExecution",
-            id: block.tool_use_id,
-            command: ctx.toolCommands.get(block.tool_use_id) ?? "",
-            aggregatedOutput: output,
-            exitCode,
-            status: "completed",
-          },
-        });
-      } else if (kind === "mcp") {
-        this.notify("item/completed", {
-          threadId: tid,
-          item: {
-            type: "mcpToolCall",
-            id: block.tool_use_id,
-            server: "tool",
-            tool: block.tool_use_id,
-            status: "completed",
-          },
-        });
-      }
-    }
-  }
-
-  tokensFromUsage(usage) {
-    if (!usage) {
-      return null;
-    }
-
-    const input = usage.input_tokens ?? 0;
-    const output = usage.output_tokens ?? 0;
-    const cacheRead = usage.cache_read_input_tokens ?? 0;
-    const cacheCreate = usage.cache_creation_input_tokens ?? 0;
-    const total = input + output + cacheRead + cacheCreate;
-    return total > 0 ? total : null;
-  }
-
   async interrupt({ threadId } = {}) {
-    const child = this.children.get(threadId);
+    const session = this.sessions.get(threadId);
 
-    if (child) {
-      try {
-        child.kill("SIGTERM");
-      } catch {
-        // ignore
-      }
+    if (session && session.busy && session.sessionId && session.conn) {
+      session.conn.cancel({ sessionId: session.sessionId }).catch(() => {});
     }
 
     return { ok: true };
