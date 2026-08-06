@@ -21,6 +21,13 @@ let PORT = 8484;
 let TOKEN = "";
 const COOKIE_NAME = "cxp_session";
 
+// PWA assets served without the session cookie (no secrets in them).
+const PWA_FILES = {
+  "/sw.js": { file: "sw.js", type: "application/javascript; charset=utf-8" },
+  "/manifest.webmanifest": { file: "manifest.webmanifest", type: "application/manifest+json; charset=utf-8" },
+  "/favicon.ico": { file: "icons/icon-192.png", type: "image/png" },
+};
+
 // ---------- SSE fan-out ----------
 
 const sseClients = new Set(); // http responses subscribed to events
@@ -295,6 +302,29 @@ const server = createServer(async (req, res) => {
 
     res.writeHead(200, { "content-type": "text/html" });
     return res.end(indexHtml);
+  }
+
+  // PWA assets (service worker, manifest, icons, favicon) are served pre-auth —
+  // they carry no secrets and the browser/SW may request them without the cookie.
+  if (req.method === "GET" && (PWA_FILES[url.pathname] || url.pathname.startsWith("/icons/"))) {
+    const entry = PWA_FILES[url.pathname] ?? { file: join("icons", basename(url.pathname)), type: "image/png" };
+    const file = join(__dirname, "public", entry.file);
+
+    if (!existsSync(file)) {
+      return json(res, 404, { error: "not found" });
+    }
+
+    const headers = { "content-type": entry.type };
+
+    if (url.pathname === "/sw.js") {
+      headers["cache-control"] = "no-cache";
+      headers["service-worker-allowed"] = "/";
+    } else {
+      headers["cache-control"] = "max-age=86400";
+    }
+
+    res.writeHead(200, headers);
+    return res.end(readFileSync(file));
   }
 
   if (!isAuthed(req)) {

@@ -7,7 +7,10 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#0d1117">
-<title>Codex Phone</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icons/icon-180.png">
+<link rel="icon" type="image/png" href="/icons/icon-192.png">
+<title>Remote Agents</title>
 <style>
   :root {
     --bg: #0d1117; --bg2: #161b22; --bg3: #21262d; --border: #30363d;
@@ -1348,6 +1351,13 @@ function initProvider() {
 
   $("providerSeg").querySelectorAll("[data-provider]").forEach((b) => b.classList.toggle("on", b.dataset.provider === state.provider));
   $("hTitle").textContent = providerLabel() + " Sessions";
+}
+
+// Register the service worker for instant launch + offline app shell.
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch(() => {});
+  });
 }
 
 initProvider();
