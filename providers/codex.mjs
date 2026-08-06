@@ -178,12 +178,26 @@ export class CodexProvider extends BaseProvider {
     await this.initializePromise;
   }
 
-  async ensureResumed(threadId) {
+  // Resume a thread, applying the permission mode at the SESSION level (as the
+  // official Codex client does), not only per-turn. `sandbox` here is the
+  // SandboxMode string ("read-only" | "workspace-write" | "danger-full-access"),
+  // which is what thread/resume expects (turn/start takes a sandboxPolicy object).
+  async ensureResumed(threadId, { approvalPolicy, sandbox } = {}) {
     if (this.resumedThreads.has(threadId)) {
       return;
     }
 
-    await this.rpc("thread/resume", { threadId });
+    const params = { threadId };
+
+    if (approvalPolicy) {
+      params.approvalPolicy = approvalPolicy;
+    }
+
+    if (sandbox) {
+      params.sandbox = sandbox;
+    }
+
+    await this.rpc("thread/resume", params);
     this.resumedThreads.add(threadId);
   }
 
@@ -287,7 +301,7 @@ export class CodexProvider extends BaseProvider {
       throw Object.assign(new Error("threadId and text required"), { status: 400 });
     }
 
-    await this.ensureResumed(threadId);
+    await this.ensureResumed(threadId, { approvalPolicy, sandbox });
 
     const params = { threadId, input: [{ type: "text", text }] };
 

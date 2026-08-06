@@ -298,7 +298,7 @@ function activeProvider() { return state.active ? (state.active.provider || "cod
 //    sensitive tools through the approval hook).
 const MODE_SETS = {
   codex: {
-    "read-only": { name: "Read Only",    sandbox: "read-only",          approvalPolicy: "on-request", desc: "Reads files and runs safe commands; asks before anything that writes." },
+    "read-only": { name: "Read Only",    sandbox: "read-only",          approvalPolicy: "untrusted",  desc: "Reads files and runs safe commands; asks before anything that writes." },
     "auto":      { name: "Auto",          sandbox: "workspace-write",    approvalPolicy: "on-request", desc: "Edits files and runs commands in the project; asks before leaving the workspace." },
     "full":      { name: "Full Access",   sandbox: "danger-full-access", approvalPolicy: "never",      desc: "No sandbox and no prompts — runs everything unattended. Use with care." },
   },
