@@ -45,6 +45,8 @@
   #connDot { width: 9px; height: 9px; border-radius: 50%; background: var(--danger); flex-shrink: 0; transition: background .3s; }
   #connDot.on { background: var(--accent); }
   #tokCount { font-size: 11px; color: var(--fg-dim); white-space: nowrap; }
+  #offlinePill { display: none; font-size: 10px; font-weight: 600; color: var(--warn); background: #d2992222; border: 1px solid var(--warn); border-radius: 20px; padding: 2px 8px; white-space: nowrap; }
+  body.offline #offlinePill { display: inline-block; }
 
   /* list view */
   #listView { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; }
@@ -202,6 +204,7 @@
       <div class="title" id="hTitle">Codex Sessions</div>
       <div class="sub" id="hSub"></div>
     </div>
+    <span id="offlinePill">Offline</span>
     <span id="tokCount" class="mono"></span>
     <button id="diffBtn" class="hbtn icon" aria-label="Diff" style="display:none"><svg viewBox="0 0 24 24"><path d="M12 3v18M5 8h4M5 12h4M5 16h4"/><path d="M15 12h4M17 10v4"/></svg></button>
     <button id="usageBtn" class="hbtn icon" aria-label="Usage"><svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 18 0 9 9 0 0 0-18 0z"/><path d="M12 12l4-2"/><path d="M12 7v0"/></svg></button>
@@ -359,6 +362,92 @@ async function api(path, body) {
   return res.json();
 }
 
+// ---------- offline cache (IndexedDB) ----------
+// Recently-opened threads and the session list are cached so the app reads fully
+// offline. On open we paint from cache instantly, then revalidate from the
+// network; heavy tool output/diffs are trimmed to keep entries small.
+const IDB_NAME = "remote-agents";
+const IDB_STORE = "cache";
+const MAX_CACHED_TURNS = 40;
+const MAX_FIELD_CHARS = 4000;
+let _idbPromise = null;
+
+function idbOpen() {
+  if (_idbPromise) { return _idbPromise; }
+
+  _idbPromise = new Promise((resolve, reject) => {
+    let req;
+
+    try {
+      req = indexedDB.open(IDB_NAME, 1);
+    } catch (e) {
+      reject(e);
+      return;
+    }
+
+    req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+
+  return _idbPromise;
+}
+
+async function idbGet(key) {
+  try {
+    const db = await idbOpen();
+
+    return await new Promise((resolve, reject) => {
+      const r = db.transaction(IDB_STORE, "readonly").objectStore(IDB_STORE).get(key);
+      r.onsuccess = () => resolve(r.result);
+      r.onerror = () => reject(r.error);
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+async function idbSet(key, val) {
+  try {
+    const db = await idbOpen();
+
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, "readwrite");
+      tx.objectStore(IDB_STORE).put(val, key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch {
+    // storage unavailable / evicted — cache is best-effort
+  }
+}
+
+function threadCacheKey(provider, id) { return "th:" + (provider || "codex") + ":" + id; }
+
+function listCacheKey(provider) { return "list:" + (provider || "codex"); }
+
+// Keep the last N turns; truncate large command output and diffs to a preview.
+function trimThreadForCache(thread) {
+  const clip = (s) => (typeof s === "string" && s.length > MAX_FIELD_CHARS ? s.slice(0, MAX_FIELD_CHARS) + "\n… (truncated — open online for the full text)" : s);
+  const turns = (thread?.turns ?? []).slice(-MAX_CACHED_TURNS).map((turn) => ({
+    items: (turn.items ?? []).map((it) => {
+      const c = { ...it };
+
+      if (typeof c.aggregatedOutput === "string") { c.aggregatedOutput = clip(c.aggregatedOutput); }
+
+      if (Array.isArray(c.changes)) { c.changes = c.changes.map((ch) => ({ ...ch, diff: clip(ch.diff) })); }
+
+      return c;
+    }),
+  }));
+
+  return { turns };
+}
+
+function setOfflineNote(on) {
+  document.body.classList.toggle("offline", on);
+}
+
 // ---------- helpers ----------
 function relTime(sec) {
   const d = Math.floor(Date.now() / 1000) - sec;
@@ -436,17 +525,38 @@ function renderRows(append) {
 async function loadThreads(append) {
   const q = new URLSearchParams();
   const search = $("search").value.trim();
+  const provider = state.provider;
 
-  q.set("provider", state.provider);
+  q.set("provider", provider);
 
   if (append && state.nextCursor) { q.set("cursor", state.nextCursor); }
 
   if (search) { q.set("search", search); }
 
-  const res = await api("/api/threads?" + q);
-  state.threads = append ? state.threads.concat(res.data) : res.data;
-  state.nextCursor = res.nextCursor;
-  renderRows(append);
+  try {
+    const res = await api("/api/threads?" + q);
+    state.threads = append ? state.threads.concat(res.data) : res.data;
+    state.nextCursor = res.nextCursor;
+    renderRows(append);
+    setOfflineNote(false);
+
+    // Cache the first page (no search) so the list renders offline.
+    if (!append && !search) { idbSet(listCacheKey(provider), { data: res.data, nextCursor: res.nextCursor }); }
+  } catch (e) {
+    // Offline / unreachable — fall back to the last cached list for this provider.
+    if (append || search) { throw e; }
+
+    const cached = await idbGet(listCacheKey(provider));
+
+    if (cached?.data && state.provider === provider) {
+      state.threads = cached.data;
+      state.nextCursor = null;
+      renderRows(false);
+      setOfflineNote(true);
+    } else {
+      $("rows").innerHTML = '<div class="empty">Offline — no saved sessions for ' + esc(providerLabel()) + ".</div>";
+    }
+  }
 }
 
 // ---------- chat rendering ----------
@@ -787,22 +897,48 @@ async function openThread(t) {
     return;
   }
 
+  const cacheKey = threadCacheKey(t.provider, t.id);
+
+  // Paint the cached copy instantly (works offline); the network refreshes it.
+  const cached = await idbGet(cacheKey);
+
+  if (state.active !== t) { return; }
+
+  if (cached?.thread) {
+    renderHistory(cached.thread);
+
+    if (cached.tokens) { $("tokCount").textContent = fmtTokens(cached.tokens) + " tok"; }
+  }
+
   try {
     const res = await api("/api/thread?id=" + encodeURIComponent(t.id) + "&provider=" + encodeURIComponent(t.provider || "codex"));
+
+    if (state.active !== t) { return; }
+
     renderHistory(res.thread);
+    setOfflineNote(false);
     const tu = res.thread?.tokenUsage?.total?.totalTokens ?? res.thread?.turns?.at?.(-1)?.tokenUsage?.total?.totalTokens;
 
     if (tu) { $("tokCount").textContent = fmtTokens(tu) + " tok"; }
+
+    idbSet(cacheKey, { thread: trimThreadForCache(res.thread), updatedAt: t.updatedAt, tokens: tu ?? cached?.tokens ?? null, cachedAt: Date.now() });
 
     // If a turn is already running on this thread (e.g. started on the Mac),
     // reflect it: show the stop button and let live events stream in.
     if (isRunning(t.provider, t.id)) { setBusy(true); }
   } catch (e) {
+    if (state.active !== t) { return; }
+
     const msg = String(e.message || "");
 
-    if (/not materialized|not found|before first user message/i.test(msg)) {
+    if (cached?.thread) {
+      // Offline but we have a saved copy — keep it on screen, flag it.
+      setOfflineNote(true);
+    } else if (/not materialized|not found|before first user message/i.test(msg)) {
       // Brand-new session with no history yet — this is expected, not an error.
       box().innerHTML = '<div class="empty">New session — send a message to begin.</div>';
+    } else if (!navigator.onLine) {
+      box().innerHTML = '<div class="empty">Offline — no saved copy of this session yet.</div>';
     } else {
       box().innerHTML = '<div class="empty">Failed to load: ' + esc(e.message) + "</div>";
     }
@@ -1347,7 +1483,8 @@ $("search").addEventListener("input", () => {
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) { resyncView(); }
 });
-window.addEventListener("online", resyncView);
+window.addEventListener("online", () => { setOfflineNote(false); resyncView(); });
+window.addEventListener("offline", () => setOfflineNote(true));
 
 function initProvider() {
   const prefs = loadPrefs();
