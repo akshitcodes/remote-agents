@@ -58,6 +58,9 @@
   .chip { font-size: 11px; color: var(--fg-dim); background: var(--bg3); padding: 2px 8px; border-radius: 20px; white-space: nowrap; max-width: 45vw; overflow: hidden; text-overflow: ellipsis; }
   .chip.branch { color: var(--purple); }
   .chip.time { background: none; padding-left: 0; }
+  .chip.run-badge { display: inline-flex; align-items: center; gap: 5px; color: var(--accent); background: #2ea04322; }
+  .run-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: pulse 1.3s ease-in-out infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
   #loadMore { display: block; margin: 14px auto calc(env(safe-area-inset-bottom) + 20px); background: var(--bg3); border: 1px solid var(--border); color: var(--accent2); padding: 9px 22px; border-radius: 10px; font-size: 14px; cursor: pointer; }
   .empty { text-align: center; color: var(--fg-dim); padding: 40px 20px; }
 
@@ -283,6 +286,9 @@ const state = {
   sendMode: "queue",         // queue | steer — what happens when you send mid-turn
   busy: false,               // is a turn currently running
   pending: [],               // [{ text, chip }] messages waiting to send
+  running: new Set(),        // "provider:threadId" of threads with an active turn
+  sseErrored: false,         // did the event stream drop (for reconnect catch-up)
+  resyncing: false,          // guard against overlapping re-reads
   lastDiff: "",
 };
 
@@ -394,8 +400,11 @@ function renderRows(append) {
   for (const t of state.threads.slice(start)) {
     const div = document.createElement("div");
     div.className = "row";
+    div.dataset.tid = t.id;
     const dir = (t.cwd || "").split("/").pop() || "";
+    const runningNow = isRunning(t.provider, t.id);
     div.innerHTML = `<div class="preview"></div><div class="meta">
+      <span class="chip run-badge" style="display:${runningNow ? "inline-flex" : "none"}"><span class="run-dot"></span>running</span>
       <span class="chip prov"></span>
       <span class="chip dir"></span>
       ${t.gitInfo?.branch ? '<span class="chip branch"></span>' : ""}
@@ -608,6 +617,18 @@ function onNotify(method, params, provider) {
 
   const tid = params?.threadId;
 
+  // Track which threads are running, regardless of which one is open, so the
+  // list can badge them and opening one shows the correct running state.
+  if (method === "turn/started") { markRunning(provider, tid, true); }
+
+  if (method === "turn/completed" || method === "turn/failed" || method === "turn/aborted") { markRunning(provider, tid, false); }
+
+  if (method === "thread/status/changed") {
+    const st = params?.status;
+    const active = st === "active" || st?.type === "active" || st?.type === "running";
+    markRunning(provider, tid, active);
+  }
+
   if (!state.active || (tid !== state.active.id && tid !== state.active.draftId)) {
     if (method === "account/rateLimits/updated") { updateUsageLive(params.rateLimits); }
 
@@ -764,6 +785,10 @@ async function openThread(t) {
     const tu = res.thread?.tokenUsage?.total?.totalTokens ?? res.thread?.turns?.at?.(-1)?.tokenUsage?.total?.totalTokens;
 
     if (tu) { $("tokCount").textContent = fmtTokens(tu) + " tok"; }
+
+    // If a turn is already running on this thread (e.g. started on the Mac),
+    // reflect it: show the stop button and let live events stream in.
+    if (isRunning(t.provider, t.id)) { setBusy(true); }
   } catch (e) {
     const msg = String(e.message || "");
 
@@ -1169,11 +1194,85 @@ async function openUsageSheet() {
   lastUsageBar = $("sheetBody").querySelector(".bar > span");
 }
 
+// ---------- running-thread tracking ----------
+function runKey(provider, tid) { return (provider || "codex") + ":" + tid; }
+
+function isRunning(provider, tid) { return state.running.has(runKey(provider, tid)); }
+
+function markRunning(provider, tid, on) {
+  if (!tid) { return; }
+
+  const k = runKey(provider, tid);
+  const had = state.running.has(k);
+
+  if (on) { state.running.add(k); } else { state.running.delete(k); }
+
+  if (had !== on) { updateRowRunning(tid, on); }
+
+  // Keep the open thread's composer state honest if its run-state changed elsewhere.
+  if (state.active && (tid === state.active.id || tid === state.active.draftId) && !on && !state.pending.length) {
+    setBusy(false);
+  }
+}
+
+function updateRowRunning(tid, on) {
+  const badge = document.querySelector('#rows .row[data-tid="' + (window.CSS?.escape ? CSS.escape(tid) : tid) + '"] .run-badge');
+
+  if (badge) { badge.style.display = on ? "inline-flex" : "none"; }
+}
+
+// ---------- auto-sync (focus / reconnect / online) ----------
+// Re-fetch whatever's on screen so a backgrounded PWA shows the truth on return
+// and recovers any events missed while the stream was dropped.
+function resyncView() {
+  if (state.active && !state.active.draft) {
+    resyncOpenThread();
+  } else if (!state.active) {
+    loadThreads(false).catch(() => {});
+  }
+}
+
+async function resyncOpenThread() {
+  const t = state.active;
+
+  if (!t || t.draft || state.resyncing) { return; }
+
+  // Don't clobber a turn we're actively streaming — its live deltas are truth.
+  if (state.busy) {
+    return;
+  }
+
+  state.resyncing = true;
+
+  try {
+    const res = await api("/api/thread?id=" + encodeURIComponent(t.id) + "&provider=" + encodeURIComponent(t.provider || "codex"));
+    state.items = new Map();
+    renderHistory(res.thread);
+
+    if (isRunning(t.provider, t.id)) { setBusy(true); }
+  } catch {
+    // offline or transient — keep whatever's on screen
+  } finally {
+    state.resyncing = false;
+  }
+}
+
 // ---------- events ----------
 function connectEvents() {
   const es = new EventSource("/api/events");
-  es.onopen = () => $("connDot").classList.add("on");
-  es.onerror = () => $("connDot").classList.remove("on");
+  es.onopen = () => {
+    $("connDot").classList.add("on");
+
+    // Reconnected after a drop (e.g. resumed from background) — catch up.
+    if (state.sseErrored) {
+      state.sseErrored = false;
+      resyncView();
+    }
+  };
+  es.onerror = () => {
+    $("connDot").classList.remove("on");
+    state.sseErrored = true;
+  };
   es.addEventListener("approval", (e) => {
     const a = JSON.parse(e.data);
 
@@ -1234,6 +1333,13 @@ $("search").addEventListener("input", () => {
   clearTimeout(state.searchTimer);
   state.searchTimer = setTimeout(() => loadThreads(false), 350);
 });
+
+// Auto-sync: when the app returns to the foreground (or the network comes back),
+// re-fetch what's on screen so a home-screen PWA never shows stale state.
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) { resyncView(); }
+});
+window.addEventListener("online", resyncView);
 
 function initProvider() {
   const prefs = loadPrefs();
