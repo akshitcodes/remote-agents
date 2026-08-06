@@ -565,6 +565,11 @@ async function loadThreads(append) {
 
   try {
     const res = await api("/api/threads?" + q);
+
+    // A newer switch may have changed the provider while this was in flight —
+    // discard the stale response so it can't overwrite the current list.
+    if (state.provider !== provider) { return; }
+
     state.threads = append ? state.threads.concat(res.data) : res.data;
     state.nextCursor = res.nextCursor;
     renderRows(append);
