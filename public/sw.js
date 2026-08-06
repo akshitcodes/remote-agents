@@ -1,15 +1,18 @@
 // remote-agents service worker — app-shell caching for instant + offline launch.
 //
 // Strategy:
-//  - App shell (the HTML at "/") and vendored assets (/vendor, /icons, manifest)
-//    use stale-while-revalidate: serve the cached copy instantly, refresh in the
-//    background when online. Offline, the cached shell still boots the app.
+//  - App shell (the HTML at "/"): network-first with a fast timeout, falling back
+//    to cache. Online you always get the latest UI (no stale-update lag); on a
+//    slow or dead connection the cached shell boots instantly.
+//  - Vendored assets (/vendor, /icons, manifest): cache-first (they're static /
+//    versioned), refreshed in the background.
 //  - /api/* is NEVER cached here — it's dynamic, authenticated, and streamed.
 //    Offline thread reading is handled in the app layer (IndexedDB), not here.
 //
 // Bump CACHE_VERSION to force a refresh of the precached shell.
 
-const CACHE_VERSION = "remote-agents-v1";
+const CACHE_VERSION = "remote-agents-v2";
+const NAV_TIMEOUT_MS = 2500;
 
 const SHELL = [
   "/",
@@ -64,34 +67,60 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  const isNav = req.mode === "navigate";
   const isShellAsset =
     url.pathname.startsWith("/vendor/") ||
     url.pathname.startsWith("/icons/") ||
     url.pathname === "/manifest.webmanifest";
 
-  if (isNav || isShellAsset) {
-    event.respondWith(staleWhileRevalidate(req, isNav));
+  if (req.mode === "navigate") {
+    event.respondWith(navigationNetworkFirst(req));
+  } else if (isShellAsset) {
+    event.respondWith(cacheFirst(req));
   }
 });
 
-// Serve cached instantly, revalidate in the background. Navigations are keyed to
-// "/" so a launch with a "?t=token" query still matches the cached shell, and an
-// offline launch falls back to that shell.
-async function staleWhileRevalidate(req, isNav) {
+// Fresh-when-online shell. Race the network against a short timeout; whichever
+// wins renders, and a successful network response refreshes the cached shell
+// (keyed to "/" so a "?t=token" launch and an offline launch both match).
+async function navigationNetworkFirst(req) {
   const cache = await caches.open(CACHE_VERSION);
-  const key = isNav ? "/" : req;
-  const cached = await cache.match(key);
 
   const network = fetch(req)
     .then((res) => {
       if (res && res.ok) {
-        cache.put(key, res.clone());
+        cache.put("/", res.clone());
       }
 
       return res;
     })
     .catch(() => null);
 
-  return cached || (await network) || (await cache.match("/")) || Response.error();
+  const timeout = new Promise((resolve) => setTimeout(() => resolve(null), NAV_TIMEOUT_MS));
+  const winner = await Promise.race([network, timeout]);
+
+  if (winner) {
+    return winner;
+  }
+
+  // Network too slow or offline — serve the cached shell, let the fetch finish
+  // updating the cache for next time.
+  return (await cache.match("/")) || (await network) || Response.error();
+}
+
+// Static, versioned assets: serve cache, fill + refresh from network.
+async function cacheFirst(req) {
+  const cache = await caches.open(CACHE_VERSION);
+  const cached = await cache.match(req);
+
+  const network = fetch(req)
+    .then((res) => {
+      if (res && res.ok) {
+        cache.put(req, res.clone());
+      }
+
+      return res;
+    })
+    .catch(() => null);
+
+  return cached || (await network) || Response.error();
 }

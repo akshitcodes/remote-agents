@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 
 import { CodexProvider } from "./providers/codex.mjs";
 import { ClaudeProvider } from "./providers/claude.mjs";
+import { GrokProvider } from "./providers/grok.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -52,6 +53,7 @@ function makeEmit(name) {
 const providers = {
   codex: new CodexProvider(makeEmit("codex")),
   claude: new ClaudeProvider(makeEmit("claude")),
+  grok: new GrokProvider(makeEmit("grok")),
 };
 
 function pickProvider(name) {

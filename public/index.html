@@ -214,6 +214,7 @@
       <div class="seg" id="providerSeg">
         <button data-provider="codex" class="on">Codex</button>
         <button data-provider="claude">Claude</button>
+        <button data-provider="grok">Grok</button>
       </div>
       <input id="search" type="search" placeholder="Search sessions…" autocomplete="off">
     </div>
@@ -295,7 +296,7 @@ const state = {
   lastDiff: "",
 };
 
-const PROVIDER_LABELS = { codex: "Codex", claude: "Claude" };
+const PROVIDER_LABELS = { codex: "Codex", claude: "Claude", grok: "Grok" };
 
 function providerLabel() { return PROVIDER_LABELS[state.provider] || "Codex"; }
 
@@ -317,9 +318,13 @@ const MODE_SETS = {
     "plan":        { name: "Plan",                 desc: "Read-only — plans and explains without changing anything." },
     "bypass":      { name: "Bypass permissions",   desc: "No prompts at all. Full autonomy — use with care." },
   },
+  grok: {
+    "manual":      { name: "Manual approve",       desc: "Grok asks before running tools (handled by the Grok CLI)." },
+    "bypass":      { name: "Bypass permissions",   desc: "Auto-approves every tool. Full autonomy — use with care." },
+  },
 };
 
-const DEFAULT_MODE = { codex: "auto", claude: "manual" };
+const DEFAULT_MODE = { codex: "auto", claude: "manual", grok: "manual" };
 
 const SEND_MODES = {
   queue: { name: "Queue", desc: "Held and sent automatically when the current turn finishes." },

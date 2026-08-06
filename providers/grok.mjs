@@ -35,7 +35,7 @@ const MODELS = [
   {
     id: "grok-4.5",
     displayName: "Grok 4.5",
-    description: "SpaceXAI's frontier model for agentic coding and reasoning.",
+    description: "xAI's frontier model for agentic coding and reasoning.",
     isDefault: true,
   },
 ];
