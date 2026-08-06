@@ -10,7 +10,8 @@
 // Flags (serve): --host <ip> (default 0.0.0.0), --port <n> (default 8484),
 //                --token <secret> (default: generated once, saved to ~/.codex-phone)
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { connect } from "node:net";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { homedir, networkInterfaces, platform } from "node:os";
@@ -78,9 +79,23 @@ function parseArgs(argv) {
     if (a === "--host") { args.host = argv[++i]; }
     else if (a === "--port") { args.port = argv[++i]; }
     else if (a === "--token") { args.token = argv[++i]; }
+    else if (a === "--name") { args.name = argv[++i]; }
+    else if (a === "--hostname") { args.hostname = argv[++i]; }
   }
 
   return args;
+}
+
+function commandExists(bin) {
+  return spawnSync(platform() === "win32" ? "where" : "which", [bin], { stdio: "ignore" }).status === 0;
+}
+
+function portReachable(port) {
+  return new Promise((resolve) => {
+    const sock = connect({ host: "127.0.0.1", port, timeout: 1200 }, () => { sock.destroy(); resolve(true); });
+    sock.on("error", () => resolve(false));
+    sock.on("timeout", () => { sock.destroy(); resolve(false); });
+  });
 }
 
 // ---------- network discovery ----------
@@ -188,6 +203,76 @@ async function serve(args) {
 
   console.log(`\n  codex-phone is running (bound ${host}:${port}).`);
   printLinks(port, token);
+}
+
+// ---------- tunnel (Cloudflare, no Tailscale needed) ----------
+
+// Expose the local server over a public HTTPS URL via cloudflared.
+//   remote-agents tunnel                          quick tunnel (random URL)
+//   remote-agents tunnel --name <t> --hostname h  named tunnel (stable URL)
+// A named tunnel needs a one-time setup:
+//   cloudflared tunnel login
+//   cloudflared tunnel create <name>
+//   cloudflared tunnel route dns <name> <hostname>
+async function tunnel(args) {
+  const { port, token } = resolveConfig(args);
+
+  if (!commandExists("cloudflared")) {
+    console.error("\n  cloudflared is not installed. Install it, then re-run:");
+    console.error(platform() === "darwin" ? "    brew install cloudflared\n" : "    https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/\n");
+    process.exit(1);
+  }
+
+  if (!(await portReachable(port))) {
+    console.error(`\n  Nothing is listening on localhost:${port}. Start the server first:`);
+    console.error("    remote-agents start        (background service)");
+    console.error("    remote-agents              (foreground)\n");
+    process.exit(1);
+  }
+
+  const named = !!args.name;
+  const cfArgs = named
+    ? ["tunnel", "run", "--url", `http://localhost:${port}`, args.name]
+    : ["tunnel", "--url", `http://localhost:${port}`];
+
+  console.log(`\n  Starting Cloudflare tunnel → localhost:${port} ${named ? `(named: ${args.name})` : "(quick tunnel)"}…`);
+
+  const child = spawn("cloudflared", cfArgs, { stdio: ["ignore", "pipe", "pipe"] });
+  let announced = false;
+
+  function announce(base) {
+    if (announced) { return; }
+
+    announced = true;
+    const url = `${base.replace(/\/$/, "")}/?t=${token}`;
+    console.log("\n  Tunnel is live — open this from anywhere (cellular included):\n");
+    qrcode.generate(url, { small: true });
+    console.log(`    ${url}\n`);
+    console.log("  This is a PUBLIC HTTPS endpoint — the token is the only lock. Keep the");
+    console.log("  link private; for stronger auth put Cloudflare Access in front of the tunnel.");
+    console.log("  HTTPS here also means the installable PWA + offline mode work on your phone.\n");
+  }
+
+  // Named tunnels have a known hostname up front; quick tunnels print theirs.
+  if (named && args.hostname) {
+    announce(`https://${args.hostname}`);
+  }
+
+  function scan(buf) {
+    const m = String(buf).match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
+
+    if (m) { announce(m[0]); }
+  }
+
+  child.stdout.on("data", scan);
+  child.stderr.on("data", (d) => { scan(d); process.stderr.write(d); });
+
+  child.on("exit", (code) => {
+    console.log(`\n  cloudflared exited (${code ?? 0}).`);
+    process.exit(code ?? 0);
+  });
+
+  process.on("SIGINT", () => { child.kill("SIGINT"); });
 }
 
 // ---------- autostart: platform back-ends ----------
@@ -332,6 +417,10 @@ async function main() {
     return serve(args);
   }
 
+  if (cmd === "tunnel") {
+    return tunnel(args);
+  }
+
   const a = agent();
 
   if (["install", "uninstall", "start", "stop", "status"].includes(cmd) && !a) {
@@ -375,7 +464,7 @@ async function main() {
       break;
 
     default:
-      console.log("usage: remote-agents [serve|install|uninstall|start|stop|status|url]");
+      console.log("usage: remote-agents [serve|tunnel|install|uninstall|start|stop|status|url]");
   }
 }
 
