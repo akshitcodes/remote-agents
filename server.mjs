@@ -5,8 +5,8 @@
 // This module exports startServer(); the runnable entry point is bin/codex-phone.mjs.
 
 import { createServer } from "node:http";
-import { readFileSync, existsSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { readFileSync, existsSync, statSync, realpathSync } from "node:fs";
+import { basename, dirname, join, resolve, sep, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { CodexProvider } from "./providers/codex.mjs";
@@ -124,9 +124,73 @@ function providerFromBody(res, body) {
   return p;
 }
 
+// Read a file for the viewer, sandboxed to the thread's project directory.
+// The path may be absolute (as it appears in diffs) or relative to cwd; the
+// resolved real path must stay inside the real cwd. 2 MB cap; binary detected.
+const MAX_FILE_BYTES = 2 * 1024 * 1024;
+
+function readProjectFile(cwd, p) {
+  if (!cwd || !p) {
+    throw Object.assign(new Error("cwd and path are required"), { status: 400 });
+  }
+
+  const abs = isAbsolute(p) ? p : resolve(cwd, p);
+
+  let realCwd;
+  let realFile;
+
+  try {
+    realCwd = realpathSync(cwd);
+  } catch {
+    throw Object.assign(new Error("project directory not found"), { status: 400 });
+  }
+
+  try {
+    realFile = realpathSync(abs);
+  } catch {
+    throw Object.assign(new Error("file not found"), { status: 404 });
+  }
+
+  if (realFile !== realCwd && !realFile.startsWith(realCwd + sep)) {
+    throw Object.assign(new Error("file is outside the project directory"), { status: 403 });
+  }
+
+  const st = statSync(realFile);
+
+  if (!st.isFile()) {
+    throw Object.assign(new Error("not a file"), { status: 400 });
+  }
+
+  const truncated = st.size > MAX_FILE_BYTES;
+  const buf = readFileSync(realFile);
+  const slice = truncated ? buf.subarray(0, MAX_FILE_BYTES) : buf;
+  const binary = slice.subarray(0, 8000).includes(0);
+
+  return {
+    path: realFile,
+    name: basename(realFile),
+    size: st.size,
+    truncated,
+    binary,
+    content: binary ? "" : slice.toString("utf8"),
+  };
+}
+
 // ---------- routes ----------
 
 const routes = {
+  "GET /api/file": async (req, res, url) => {
+    if (!isAuthed(req)) {
+      return json(res, 401, { error: "unauthorized" });
+    }
+
+    try {
+      json(res, 200, readProjectFile(url.searchParams.get("cwd"), url.searchParams.get("path")));
+    } catch (e) {
+      json(res, e.status ?? 500, { error: String(e.message ?? e) });
+    }
+  },
+
   "GET /api/threads": async (req, res, url) => {
     const p = providerFromQuery(res, url);
 

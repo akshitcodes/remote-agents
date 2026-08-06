@@ -178,6 +178,28 @@
   .primary-btn:disabled { opacity: .4; }
   .field-input { width: 100%; background: var(--bg3); border: 1px solid var(--border); color: var(--fg); border-radius: 10px; padding: 10px 12px; font-size: 14px; outline: none; }
 
+  /* file viewer */
+  .file-tabs { display: flex; gap: 6px; margin: 4px 0 12px; }
+  .file-tabs button { background: var(--bg3); border: 1px solid var(--border); color: var(--fg-dim); font-size: 12.5px; font-weight: 600; padding: 6px 14px; border-radius: 8px; cursor: pointer; }
+  .file-tabs button.on { background: var(--accent2); color: #04121f; }
+  .filebody { font-size: 14px; }
+  .filecode { background: var(--bg); border: 1px solid var(--border); border-radius: 9px; padding: 12px; overflow-x: auto; max-height: 62dvh; overflow-y: auto; margin: 0; }
+  .filecode code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12.5px; line-height: 1.55; white-space: pre; background: none; padding: 0; }
+  /* highlight.js dark theme (compact, mapped to our palette) */
+  .hljs { color: var(--fg); background: transparent; }
+  .hljs-comment, .hljs-quote { color: var(--fg-faint); font-style: italic; }
+  .hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-doctag, .hljs-name { color: #ff7b72; }
+  .hljs-string, .hljs-regexp, .hljs-addition, .hljs-attribute, .hljs-meta .hljs-string { color: var(--add-fg); }
+  .hljs-number, .hljs-symbol, .hljs-bullet, .hljs-template-variable, .hljs-variable { color: #79c0ff; }
+  .hljs-title, .hljs-title.function_, .hljs-section, .hljs-built_in { color: #d2a8ff; }
+  .hljs-type, .hljs-class .hljs-title, .hljs-title.class_ { color: #ffa657; }
+  .hljs-attr, .hljs-property, .hljs-selector-attr, .hljs-selector-class, .hljs-selector-id { color: #79c0ff; }
+  .hljs-tag, .hljs-punctuation { color: var(--fg-dim); }
+  .hljs-meta { color: var(--accent2); }
+  .hljs-deletion { color: var(--del-fg); }
+  .hljs-emphasis { font-style: italic; }
+  .hljs-strong { font-weight: 700; }
+
   /* usage panel */
   .gauge { background: var(--bg3); border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin-bottom: 10px; }
   .gauge .top { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
@@ -257,6 +279,7 @@
 
 <script src="/vendor/marked.min.js"></script>
 <script src="/vendor/purify.min.js"></script>
+<script src="/vendor/highlight.min.js"></script>
 <script>
 const $ = (id) => document.getElementById(id);
 const esc = (s) => (s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
@@ -474,6 +497,13 @@ function fmtTokens(n) {
   return (n / 1e6).toFixed(1) + "M";
 }
 
+function fmtBytes(n) {
+  if (n == null) { return ""; }
+  if (n < 1024) { return n + " B"; }
+  if (n < 1048576) { return (n / 1024).toFixed(1) + " KB"; }
+  return (n / 1048576).toFixed(1) + " MB";
+}
+
 const ICONS = {
   cmd: '<svg class="ic" viewBox="0 0 24 24"><path d="M4 5l7 7-7 7M13 19h7"/></svg>',
   file: '<svg class="ic" viewBox="0 0 24 24"><path d="M14 3v5h5M14 3H6v18h12V8z"/></svg>',
@@ -689,11 +719,16 @@ function chip(iconHtml, text, onClick) {
 }
 
 function addFileChangeChip(item) {
-  const n = item.changes?.length ?? 0;
-  const label = n === 1 ? (item.changes[0].path.split("/").pop()) : `${n} files changed`;
+  const changes = item.changes ?? [];
+  const n = changes.length;
+  const label = n === 1 ? changes[0].path.split("/").pop() : `${n} files changed`;
   chip(ICONS.file, "✏️ " + label, () => {
-    const diff = (item.changes ?? []).map((c) => `--- ${c.path}\n${c.diff || ""}`).join("\n\n");
-    openDiffSheet(diff || "No diff available");
+    if (n === 1) {
+      openFileSheet(changes[0].path, changes[0].diff || "");
+    } else {
+      const diff = changes.map((c) => `--- ${c.path}\n${c.diff || ""}`).join("\n\n");
+      openDiffSheet(diff || "No diff available");
+    }
   });
 }
 
@@ -1101,6 +1136,74 @@ $("overlay").onclick = closeSheet;
 function openDiffSheet(diff) {
   openSheet(`<h2>Changes</h2><div class="hint">Unified diff</div><div class="block open" style="margin-top:6px"><div class="body"><pre></pre></div></div>`);
   renderDiffInto($("sheetBody").querySelector("pre"), diff);
+}
+
+const MD_FILE_RE = /\.(md|markdown|mdx)$/i;
+
+// View a file the agent created/edited — rendered markdown or syntax-highlighted
+// code, with an optional Diff tab. Content is fetched sandboxed to the thread cwd.
+async function openFileSheet(path, diff) {
+  const name = path.split("/").pop();
+  const tabs = diff
+    ? `<div class="file-tabs"><button data-tab="file" class="on">File</button><button data-tab="diff">Diff</button></div>`
+    : "";
+  openSheet(`<h2>${esc(name)}</h2><div class="hint">${esc(path)}</div>${tabs}<div id="fileBody"><div class="empty">Loading…</div></div>`);
+
+  function bodyEl() { return $("sheetBody").querySelector("#fileBody"); }
+
+  function showDiff() {
+    bodyEl().innerHTML = `<div class="block open"><div class="body"><pre></pre></div></div>`;
+    renderDiffInto(bodyEl().querySelector("pre"), diff || "No diff available");
+  }
+
+  let fileData = null;
+
+  async function showFile() {
+    if (!fileData) {
+      try {
+        fileData = await api("/api/file?cwd=" + encodeURIComponent(state.active?.cwd || "") + "&path=" + encodeURIComponent(path));
+      } catch (e) {
+        bodyEl().innerHTML = `<div class="hint">Couldn't open file: ${esc(e.message)}${diff ? " — try the Diff tab." : ""}</div>`;
+        return;
+      }
+    }
+
+    renderFileInto(bodyEl(), name, fileData);
+  }
+
+  if (diff) {
+    $("sheetBody").querySelectorAll("[data-tab]").forEach((b) => {
+      b.onclick = () => {
+        $("sheetBody").querySelectorAll("[data-tab]").forEach((x) => x.classList.toggle("on", x === b));
+
+        if (b.dataset.tab === "diff") { showDiff(); } else { showFile(); }
+      };
+    });
+  }
+
+  showFile();
+}
+
+function renderFileInto(el, name, d) {
+  if (d.binary) {
+    el.innerHTML = `<div class="hint">Binary file (${fmtBytes(d.size)}) — not viewable.</div>`;
+    return;
+  }
+
+  const note = d.truncated ? `<div class="hint">Showing the first 2 MB of ${fmtBytes(d.size)}.</div>` : "";
+
+  if (MD_FILE_RE.test(name)) {
+    el.innerHTML = note + `<div class="md filebody">${renderMarkdown(d.content)}</div>`;
+    return;
+  }
+
+  el.innerHTML = note + `<pre class="filecode"><code></code></pre>`;
+  const code = el.querySelector("code");
+  code.textContent = d.content;
+
+  if (window.hljs) {
+    try { hljs.highlightElement(code); } catch { /* leave as plain text */ }
+  }
 }
 
 function currentModel() { return state.models.find((m) => m.id === state.model); }

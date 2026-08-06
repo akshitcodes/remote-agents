@@ -18,6 +18,7 @@ const SHELL = [
   "/",
   "/vendor/marked.min.js",
   "/vendor/purify.min.js",
+  "/vendor/highlight.min.js",
   "/manifest.webmanifest",
   "/icons/icon-192.png",
   "/icons/icon-512.png",
