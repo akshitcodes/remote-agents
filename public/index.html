@@ -1013,6 +1013,7 @@ async function openThread(t) {
   state.lastDiff = "";
   state.threadFiles = new Map();
   $("filesBtn").style.display = "none";
+  sendPresence();
   setBusy(false);
   syncControls();
   $("listView").style.display = "none";
@@ -1082,6 +1083,7 @@ async function openThread(t) {
 
 function backToList() {
   state.active = null;
+  sendPresence();
   $("chatView").style.display = "none";
   $("listView").style.display = "block";
   $("backBtn").style.display = "none";
@@ -1766,6 +1768,31 @@ async function wireNotifications() {
   };
 }
 
+// Tell the bridge what is on screen, so a turn you are watching finish does not
+// also arrive as a notification. Reports go stale server-side after ~75s, so a
+// closed or backgrounded app stops suppressing on its own.
+function clientId() {
+  let id = localStorage.getItem("cxp_client_id");
+
+  if (!id) {
+    id = Math.random().toString(36).slice(2) + Date.now().toString(36);
+    localStorage.setItem("cxp_client_id", id);
+  }
+
+  return id;
+}
+
+function sendPresence() {
+  const ids = [state.active?.id, state.active?.draftId].filter(Boolean);
+
+  api("/api/presence", {
+    clientId: clientId(),
+    provider: state.provider,
+    ids,
+    visible: !document.hidden && ids.length > 0,
+  }).catch(() => {});
+}
+
 // Opened from a notification: jump straight to that thread.
 async function openLinkedThread() {
   const q = new URLSearchParams(location.search);
@@ -2026,8 +2053,15 @@ document.addEventListener("touchmove", (e) => {
 // Auto-sync: when the app returns to the foreground (or the network comes back),
 // re-fetch what's on screen so a home-screen PWA never shows stale state.
 document.addEventListener("visibilitychange", () => {
+  sendPresence();
+
   if (!document.hidden) { resyncView(); }
 });
+
+// Heartbeat so a long read keeps suppressing, and the report expires if we die.
+setInterval(() => {
+  if (!document.hidden && state.active) { sendPresence(); }
+}, 30000);
 window.addEventListener("online", () => { setOfflineNote(false); resyncView(); });
 window.addEventListener("offline", () => setOfflineNote(true));
 

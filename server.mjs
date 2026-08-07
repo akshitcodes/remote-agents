@@ -55,6 +55,44 @@ const lastAgentText = new Map(); // "provider:threadId" -> most recent reply tex
 const threadTitles = new Map(); // "provider:threadId" -> name/preview
 const adoptedIds = new Map(); // "provider:draftId" -> the real session id
 const recentlyPushed = new Map(); // dedupe key -> timestamp
+const presence = new Map(); // clientId -> { provider, ids:[], visible, at }
+
+// "Unread only": a turn you are watching on screen right now needs no push. A
+// client reports what it has open and whether it is visible; the report goes
+// stale on its own, so a backgrounded or closed app stops suppressing.
+const PRESENCE_TTL_MS = 75000;
+
+export function notePresence({ clientId, provider, ids, visible }) {
+  if (!clientId) {
+    throw Object.assign(new Error("clientId is required"), { status: 400 });
+  }
+
+  presence.set(clientId, {
+    provider: provider || "codex",
+    ids: Array.isArray(ids) ? ids.filter(Boolean) : [],
+    visible: !!visible,
+    at: Date.now(),
+  });
+
+  return { ok: true };
+}
+
+function isOnScreen(provider, candidateIds) {
+  const now = Date.now();
+
+  for (const [clientId, p] of presence) {
+    if (now - p.at > PRESENCE_TTL_MS) {
+      presence.delete(clientId);
+      continue;
+    }
+
+    if (p.visible && p.provider === (provider || "codex") && p.ids.some((id) => candidateIds.includes(id))) {
+      return true;
+    }
+  }
+
+  return false;
+}
 
 function metaKey(provider, threadId) {
   return `${provider || "codex"}:${threadId}`;
@@ -127,6 +165,13 @@ function trackForPush(event, data) {
 
   const label = PROVIDER_LABELS[provider] || "Agent";
   const realId = adoptedIds.get(key) || threadId;
+
+  // Already reading it? Then it is not unread — say nothing.
+  if (isOnScreen(provider, [threadId, realId])) {
+    lastAgentText.delete(key);
+    return;
+  }
+
   const reply = (lastAgentText.get(key) ?? "").trim().replace(/\s+/g, " ");
   const body = failed
     ? (errorText || "Turn failed")
@@ -348,6 +393,21 @@ const routes = {
 
     try {
       json(res, 200, push.subscribe(body?.subscription));
+    } catch (e) {
+      json(res, e.status ?? 500, { error: String(e.message ?? e) });
+    }
+  },
+
+  // What this device is looking at, so a turn on screen does not also buzz.
+  "POST /api/presence": async (req, res) => {
+    if (!isAuthed(req)) {
+      return json(res, 401, { error: "unauthorized" });
+    }
+
+    const body = await readBody(req);
+
+    try {
+      json(res, 200, notePresence(body));
     } catch (e) {
       json(res, e.status ?? 500, { error: String(e.message ?? e) });
     }
