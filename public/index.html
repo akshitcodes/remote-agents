@@ -358,12 +358,13 @@ function activeProvider() { return state.active ? (state.active.provider || "cod
 const MODE_SETS = {
   codex: {
     "read-only": { name: "Read Only",    sandbox: "read-only",          approvalPolicy: "untrusted",  desc: "Reads files and runs safe commands; asks before anything that writes." },
-    "auto":      { name: "Auto",          sandbox: "workspace-write",    approvalPolicy: "on-request", desc: "Edits files and runs commands in the project; asks before leaving the workspace." },
+    "auto":      { name: "Approve for me", sandbox: "workspace-write",   approvalPolicy: "on-request", desc: "Only asks for actions detected as potentially unsafe, or before leaving the workspace." },
     "full":      { name: "Full Access",   sandbox: "danger-full-access", approvalPolicy: "never",      desc: "No sandbox and no prompts — runs everything unattended. Use with care." },
   },
   claude: {
     "manual":      { name: "Manual approve",       desc: "Asks before running commands or editing files (approvals appear here)." },
-    "acceptEdits": { name: "Auto (accept edits)",  desc: "Auto-accepts file edits and runs tools without asking." },
+    "auto":        { name: "Auto",                 desc: "Approves actions that pass Claude's safety check and pauses for anything risky." },
+    "acceptEdits": { name: "Edit automatically",   desc: "Auto-accepts file edits and runs tools without asking." },
     "plan":        { name: "Plan",                 desc: "Read-only — plans and explains without changing anything." },
     "bypass":      { name: "Bypass permissions",   desc: "No prompts at all. Full autonomy — use with care." },
   },
@@ -373,7 +374,7 @@ const MODE_SETS = {
   },
 };
 
-const DEFAULT_MODE = { codex: "auto", claude: "manual", grok: "manual" };
+const DEFAULT_MODE = { codex: "auto", claude: "auto", grok: "manual" };
 
 const SEND_MODES = {
   queue: { name: "Queue", desc: "Held and sent automatically when the current turn finishes." },

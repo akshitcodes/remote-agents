@@ -96,8 +96,9 @@ const EFFORTS = [
   { reasoningEffort: "max", description: "Maximum thinking budget." },
 ];
 
-// Our permission modes -> Claude --permission-mode. Accepts the UI mode keys
-// (manual/acceptEdits/plan/bypass) plus legacy/Codex aliases for safety.
+// Our permission modes -> Claude --permission-mode. The CLI accepts
+// acceptEdits | auto | bypassPermissions | manual | dontAsk | plan. Accepts the
+// UI mode keys plus legacy/Codex aliases for safety.
 function permissionModeFor(value) {
   switch (value) {
     case "plan":
@@ -112,6 +113,14 @@ function permissionModeFor(value) {
     case "agent":
     case "workspace-write":
       return "acceptEdits";
+    // Claude's own safety check runs each action and pauses on anything risky —
+    // the mode the desktop/VS Code client defaults to. No phone-side hook here:
+    // gating every command would just turn this back into Manual.
+    case "auto":
+    case "on-request":
+      return "auto";
+    case "dontAsk":
+      return "dontAsk";
     case "manual":
     case "default":
     default:
