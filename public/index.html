@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -20,7 +20,11 @@
     --add: #2ea04326; --add-fg: #7ee787; --del: #f8514926; --del-fg: #ffa198;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
-  html, body { height: 100%; max-width: 100%; overflow-x: hidden; }
+  /* Never zoom: pinch is blocked in JS (iOS ignores user-scalable), double-tap
+     zoom by touch-action, and iOS text-inflation by text-size-adjust. Any input
+     below 16px would make iOS auto-zoom on focus and push the layout off-screen,
+     so every focusable field is >= 16px. */
+  html, body { height: 100%; max-width: 100%; overflow-x: hidden; touch-action: manipulation; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   body {
     background: var(--bg); color: var(--fg);
     font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -51,7 +55,7 @@
   /* list view */
   #listView { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; }
   #searchWrap { padding: 10px 12px; position: sticky; top: 0; background: var(--bg); z-index: 2; }
-  #search { width: 100%; padding: 9px 13px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg3); color: var(--fg); font-size: 15px; outline: none; }
+  #search { width: 100%; padding: 9px 13px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg3); color: var(--fg); font-size: 16px; outline: none; }
   .seg { display: flex; gap: 3px; background: var(--bg3); border: 1px solid var(--border); border-radius: 10px; padding: 3px; margin-bottom: 10px; }
   .seg button { flex: 1; background: none; border: none; color: var(--fg-dim); font-size: 13px; font-weight: 600; padding: 7px; border-radius: 8px; cursor: pointer; }
   .seg button.on { background: var(--accent2); color: #04121f; }
@@ -153,7 +157,7 @@
   .ctl b { color: var(--fg); font-weight: 600; }
   .ctl .ck { color: var(--fg-faint); font-size: 10px; }
   #composer { display: flex; gap: 8px; align-items: flex-end; min-width: 0; }
-  #input { flex: 1; min-width: 0; background: var(--bg3); border: 1px solid var(--border); color: var(--fg); border-radius: 18px; padding: 9px 14px; font-size: 15px; outline: none; resize: none; max-height: 120px; font-family: inherit; line-height: 1.4; }
+  #input { flex: 1; min-width: 0; background: var(--bg3); border: 1px solid var(--border); color: var(--fg); border-radius: 18px; padding: 9px 14px; font-size: 16px; outline: none; resize: none; max-height: 120px; font-family: inherit; line-height: 1.4; }
   #sendBtn, #stopBtn { width: 38px; height: 38px; border-radius: 50%; border: none; font-size: 17px; cursor: pointer; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
   #sendBtn { background: var(--accent); color: #04260f; }
   #sendBtn:disabled { opacity: .4; }
@@ -162,11 +166,12 @@
   /* sheets / modal */
   .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 50; display: none; }
   .overlay.show { display: block; }
-  .sheet { position: fixed; left: 0; right: 0; bottom: 0; z-index: 51; background: var(--bg2); border-top: 1px solid var(--border); border-radius: 16px 16px 0 0; padding: 8px 16px calc(env(safe-area-inset-bottom) + 20px); max-height: 82dvh; overflow-y: auto; transform: translateY(100%); transition: transform .22s ease; }
+  .sheet { position: fixed; left: 0; right: 0; bottom: 0; z-index: 51; background: var(--bg2); border-top: 1px solid var(--border); border-radius: 16px 16px 0 0; padding: 8px 16px calc(env(safe-area-inset-bottom) + 20px); max-height: 82dvh; overflow-y: auto; overflow-x: hidden; max-width: 100%; transform: translateY(100%); transition: transform .22s ease; }
   .sheet.show { transform: translateY(0); }
   .sheet .grip { width: 38px; height: 4px; background: var(--border); border-radius: 4px; margin: 8px auto 14px; }
-  .sheet h2 { font-size: 17px; margin-bottom: 4px; }
-  .sheet .hint { font-size: 12.5px; color: var(--fg-dim); margin-bottom: 14px; }
+  .sheet h2 { font-size: 17px; margin-bottom: 4px; overflow-wrap: anywhere; }
+  /* File paths are long unbreakable tokens — wrap them or they widen the sheet. */
+  .sheet .hint { font-size: 12.5px; color: var(--fg-dim); margin-bottom: 14px; overflow-wrap: anywhere; }
   .opt { display: flex; align-items: flex-start; gap: 10px; padding: 11px 12px; border: 1px solid var(--border); border-radius: 10px; margin-bottom: 8px; cursor: pointer; }
   .opt.sel { border-color: var(--accent); background: #2ea04314; }
   .opt .radio { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--fg-faint); flex-shrink: 0; margin-top: 1px; }
@@ -176,7 +181,7 @@
   .sheet .seclabel { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--fg-faint); margin: 16px 0 8px; font-family: ui-monospace, Menlo, monospace; }
   .primary-btn { width: 100%; background: var(--accent); color: #04260f; border: none; border-radius: 11px; padding: 13px; font-size: 15px; font-weight: 600; cursor: pointer; margin-top: 14px; }
   .primary-btn:disabled { opacity: .4; }
-  .field-input { width: 100%; background: var(--bg3); border: 1px solid var(--border); color: var(--fg); border-radius: 10px; padding: 10px 12px; font-size: 14px; outline: none; }
+  .field-input { width: 100%; background: var(--bg3); border: 1px solid var(--border); color: var(--fg); border-radius: 10px; padding: 10px 12px; font-size: 16px; outline: none; }
 
   /* file viewer */
   .file-tabs { display: flex; gap: 6px; margin: 4px 0 12px; }
@@ -1649,6 +1654,16 @@ document.addEventListener("click", (e) => {
   e.preventDefault();
   openFileSheet(target.path, "", target.line);
 });
+
+// iOS ignores user-scalable=no, so block the pinch gestures directly: a zoomed
+// page lays out wider than the screen and clips the right edge of the chat.
+["gesturestart", "gesturechange", "gestureend"].forEach((evt) => {
+  document.addEventListener(evt, (e) => e.preventDefault(), { passive: false });
+});
+
+document.addEventListener("touchmove", (e) => {
+  if (e.touches.length > 1) { e.preventDefault(); }
+}, { passive: false });
 
 // Auto-sync: when the app returns to the foreground (or the network comes back),
 // re-fetch what's on screen so a home-screen PWA never shows stale state.
