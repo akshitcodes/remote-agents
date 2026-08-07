@@ -212,7 +212,7 @@ another agent = one new `providers/<name>.mjs` implementing
 Session list (searchable, sorted by last activity) · full history · resume + live
 streaming · model & effort selectors · **provider-specific permission modes** ·
 reasoning · live command output · diffs · **markdown/code file viewer**
-(syntax-highlighted) · interactive approvals · **queue / steer** messages
+(syntax-highlighted — tap any file path an agent links) · interactive approvals · **queue / steer** messages
 mid-turn · stop · live token counter · usage & rate limits · new-session flow ·
 **live running-thread status** (incl. turns started on the Mac) · rich sanitized
 markdown. Codex, Claude, and Grok share all of it.

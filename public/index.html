@@ -300,7 +300,10 @@ function renderMarkdown(src) {
     return "<p>" + esc(src).replace(/\n/g, "<br>") + "</p>";
   }
 
-  const html = window.marked.parse(src);
+  // `file://` link targets are dropped by the sanitizer, so rewrite them to plain
+  // absolute paths first; the click handler opens those in the file viewer.
+  const normalized = src.replace(/(\]\(\s*)file:\/\/(?:localhost)?(\/)/gi, "$1$2");
+  const html = window.marked.parse(normalized);
   return window.DOMPurify.sanitize(html, { ADD_ATTR: ["target"] });
 }
 
@@ -1145,14 +1148,60 @@ function openDiffSheet(diff) {
 
 const MD_FILE_RE = /\.(md|markdown|mdx)$/i;
 
+// A link the agent wrote may point at a local file rather than a URL — e.g.
+// [notes](/Users/me/proj/notes.md) or [grok.mjs](providers/grok.mjs:812). The
+// browser resolves those against our own origin and 404s, so they open in the
+// built-in viewer instead. Returns { path, line } or null for real URLs/anchors.
+function localFileTarget(raw) {
+  if (!raw) { return null; }
+
+  let s = String(raw).trim();
+
+  if (!s || s.startsWith("#") || s.startsWith("//")) { return null; }
+
+  // A real URL scheme is followed by "//" (http://, file://) or is one of the
+  // schemeless-authority ones. Without that test, "foo.js:812" would read as a
+  // scheme named "foo.js" instead of a file with a line reference.
+  const scheme = s.match(/^([a-z][a-z0-9+.-]*):(\/\/)?/i);
+
+  if (scheme && (scheme[2] || /^(mailto|tel|sms|callto|data|javascript|cid|xmpp|about)$/i.test(scheme[1]))) {
+    if (scheme[1].toLowerCase() !== "file") { return null; }
+
+    s = s.replace(/^file:\/\/(?:localhost)?/i, "");
+
+    if (!s.startsWith("/")) { return null; }
+  }
+
+  // Trailing line references: foo.js:812, foo.js:812:5, foo.js#L812.
+  let line = null;
+  const at = s.match(/(?::(\d+)(?::\d+)?|#L(\d+))$/i);
+
+  if (at) {
+    line = Number(at[1] ?? at[2]);
+    s = s.slice(0, at.index);
+  }
+
+  s = s.replace(/^\.\//, "");
+
+  if (!s) { return null; }
+
+  try {
+    s = decodeURIComponent(s);
+  } catch {
+    // keep the raw form when percent-decoding fails
+  }
+
+  return { path: s, line };
+}
+
 // View a file the agent created/edited — rendered markdown or syntax-highlighted
 // code, with an optional Diff tab. Content is fetched sandboxed to the thread cwd.
-async function openFileSheet(path, diff) {
+async function openFileSheet(path, diff, line) {
   const name = path.split("/").pop();
   const tabs = diff
     ? `<div class="file-tabs"><button data-tab="file" class="on">File</button><button data-tab="diff">Diff</button></div>`
     : "";
-  openSheet(`<h2>${esc(name)}</h2><div class="hint">${esc(path)}</div>${tabs}<div id="fileBody"><div class="empty">Loading…</div></div>`);
+  openSheet(`<h2>${esc(name)}</h2><div class="hint">${esc(path)}${line ? ":" + line : ""}</div>${tabs}<div id="fileBody"><div class="empty">Loading…</div></div>`);
 
   function bodyEl() { return $("sheetBody").querySelector("#fileBody"); }
 
@@ -1584,6 +1633,21 @@ $("input").addEventListener("keydown", (e) => {
 $("search").addEventListener("input", () => {
   clearTimeout(state.searchTimer);
   state.searchTimer = setTimeout(() => loadThreads(false), 350);
+});
+
+// Local-path links (see localFileTarget) open in the file viewer instead of
+// navigating the browser to a path this server does not serve.
+document.addEventListener("click", (e) => {
+  const a = e.target.closest?.("a");
+
+  if (!a) { return; }
+
+  const target = localFileTarget(a.getAttribute("href"));
+
+  if (!target) { return; }
+
+  e.preventDefault();
+  openFileSheet(target.path, "", target.line);
 });
 
 // Auto-sync: when the app returns to the foreground (or the network comes back),
