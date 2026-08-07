@@ -192,6 +192,15 @@
   .file-tabs button { background: var(--bg3); border: 1px solid var(--border); color: var(--fg-dim); font-size: 12.5px; font-weight: 600; padding: 6px 14px; border-radius: 8px; cursor: pointer; }
   .file-tabs button.on { background: var(--accent2); color: #04121f; }
   .filebody { font-size: 14px; }
+  .filerow { display: flex; align-items: center; gap: 10px; padding: 9px 11px; border: 1px solid var(--border); border-radius: 10px; margin-bottom: 7px; cursor: pointer; }
+  .filerow.sel { border-color: var(--accent); background: #2ea04314; }
+  .filerow .cb { width: 19px; height: 19px; border-radius: 5px; border: 2px solid var(--fg-faint); flex-shrink: 0; }
+  .filerow.sel .cb { border-color: var(--accent); background: var(--accent); }
+  .filerow .fmeta { flex: 1; min-width: 0; }
+  .filerow .fname { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+  .filerow .fdir { font-size: 11.5px; color: var(--fg-faint); overflow-wrap: anywhere; }
+  .filerow .fbadge { font-size: 10.5px; color: var(--accent); border: 1px solid var(--accent); border-radius: 20px; padding: 1px 7px; flex-shrink: 0; }
+  .filerow .fbadge.edit { color: var(--accent2); border-color: var(--accent2); }
   .filecode { background: var(--bg); border: 1px solid var(--border); border-radius: 9px; padding: 12px; overflow-x: auto; max-height: 62dvh; overflow-y: auto; margin: 0; }
   .filecode code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12.5px; line-height: 1.55; white-space: pre; background: none; padding: 0; }
   /* highlight.js dark theme (compact, mapped to our palette) */
@@ -238,6 +247,7 @@
     <span id="offlinePill">Offline</span>
     <span id="tokCount" class="mono"></span>
     <button id="diffBtn" class="hbtn icon" aria-label="Diff" style="display:none"><svg viewBox="0 0 24 24"><path d="M12 3v18M5 8h4M5 12h4M5 16h4"/><path d="M15 12h4M17 10v4"/></svg></button>
+    <button id="filesBtn" class="hbtn icon" aria-label="Files" style="display:none"><svg viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg></button>
     <button id="usageBtn" class="hbtn icon" aria-label="Usage"><svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 18 0 9 9 0 0 0-18 0z"/><path d="M12 12l4-2"/><path d="M12 7v0"/></svg></button>
     <button id="newBtn" class="hbtn icon" aria-label="New session"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
     <div id="connDot" title="event stream"></div>
@@ -332,6 +342,7 @@ const state = {
   sseErrored: false,         // did the event stream drop (for reconnect catch-up)
   resyncing: false,          // guard against overlapping re-reads
   lastDiff: "",
+  threadFiles: new Map(), // path -> { path, edited } for the open thread
 };
 
 const PROVIDER_LABELS = { codex: "Codex", claude: "Claude", grok: "Grok" };
@@ -457,7 +468,48 @@ async function idbSet(key, val) {
   }
 }
 
+async function idbDel(key) {
+  try {
+    const db = await idbOpen();
+
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, "readwrite");
+      tx.objectStore(IDB_STORE).delete(key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch {
+    // storage unavailable — cache is best-effort
+  }
+}
+
 function threadCacheKey(provider, id) { return "th:" + (provider || "codex") + ":" + id; }
+
+function fileCacheKey(cwd, path) { return "file:" + (cwd || "") + ":" + path; }
+
+// Files you open are kept for offline reading, oldest evicted past the budget.
+const FILE_CACHE_MAX_BYTES = 5 * 1024 * 1024;
+
+async function cacheFile(cwd, path, data) {
+  if (!data || data.binary) { return; }
+
+  const key = fileCacheKey(cwd, path);
+  await idbSet(key, { ...data, cachedAt: Date.now() });
+
+  const idx = (await idbGet("fileidx")) || [];
+  const rest = idx.filter((e) => e.key !== key);
+  rest.push({ key, size: (data.content || "").length, at: Date.now() });
+  rest.sort((a, b) => a.at - b.at);
+  let total = rest.reduce((n, e) => n + (e.size || 0), 0);
+
+  while (total > FILE_CACHE_MAX_BYTES && rest.length > 1) {
+    const oldest = rest.shift();
+    total -= oldest.size || 0;
+    await idbDel(oldest.key);
+  }
+
+  await idbSet("fileidx", rest);
+}
 
 function listCacheKey(provider) { return "list:" + (provider || "codex"); }
 
@@ -627,6 +679,7 @@ function addAgent(text, streaming) {
   el.className = "msg agent md" + (streaming ? " streaming" : "");
   el._raw = text || "";
   el.innerHTML = renderMarkdown(el._raw);
+  registerFilesFromEl(el);
   box().appendChild(el);
   scrollDown();
   return el;
@@ -735,8 +788,33 @@ function chip(iconHtml, text, onClick) {
   return el;
 }
 
+// Files this thread touched — edited by the agent, or linked in a reply. Feeds
+// the Files sheet so you can reopen one without scrolling the whole chat.
+function registerThreadFile(path, edited) {
+  if (!path) { return; }
+
+  const cur = state.threadFiles.get(path) || { path, edited: false };
+  cur.edited = cur.edited || !!edited;
+  state.threadFiles.set(path, cur);
+  updateFilesBtn();
+}
+
+function registerFilesFromEl(el) {
+  el?.querySelectorAll?.("a[href]").forEach((a) => {
+    const target = localFileTarget(a.getAttribute("href"));
+
+    if (target) { registerThreadFile(target.path, false); }
+  });
+}
+
+function updateFilesBtn() {
+  const inChat = $("chatView").style.display !== "none";
+  $("filesBtn").style.display = inChat && state.threadFiles.size ? "flex" : "none";
+}
+
 function addFileChangeChip(item) {
   const changes = item.changes ?? [];
+  changes.forEach((c) => registerThreadFile(c.path, true));
   const n = changes.length;
   const label = n === 1 ? changes[0].path.split("/").pop() : `${n} files changed`;
   chip(ICONS.file, "✏️ " + label, () => {
@@ -757,6 +835,7 @@ function renderHistory(thread) {
 
     for (const item of turn.items ?? []) { renderItem(item); }
   });
+  registerFilesFromEl(box());
   scrollDown();
 }
 
@@ -874,6 +953,7 @@ function onNotify(method, params, provider) {
         rec.el.classList.remove("streaming");
         rec.el._raw = item.text ?? rec.el._raw;
         rec.el.innerHTML = renderMarkdown(rec.el._raw);
+        registerFilesFromEl(rec.el);
       } else if (item.type === "commandExecution" && rec) {
         const ok = item.exitCode === 0;
         setBlockStatus(rec.el, item.exitCode != null ? "exit " + item.exitCode : (item.status || "done"), item.exitCode != null ? (ok ? "ok" : "bad") : "");
@@ -930,6 +1010,8 @@ async function openThread(t) {
   state.items = new Map();
   state.pending = [];
   state.lastDiff = "";
+  state.threadFiles = new Map();
+  $("filesBtn").style.display = "none";
   setBusy(false);
   syncControls();
   $("listView").style.display = "none";
@@ -1005,6 +1087,7 @@ function backToList() {
   $("newBtn").style.display = "flex";
   $("usageBtn").style.display = "flex";
   $("diffBtn").style.display = "none";
+  $("filesBtn").style.display = "none";
   $("hTitle").textContent = providerLabel() + " Sessions";
   $("hSub").textContent = "";
   $("tokCount").textContent = "";
@@ -1221,17 +1304,35 @@ async function openFileSheet(path, diff, line) {
 
   let fileData = null;
 
+  // Cache-first, like threads: paint the saved copy instantly (works offline),
+  // then refresh from the network and keep the fresh copy for next time.
   async function showFile() {
-    if (!fileData) {
-      try {
-        fileData = await api("/api/file?cwd=" + encodeURIComponent(state.active?.cwd || "") + "&path=" + encodeURIComponent(path));
-      } catch (e) {
-        bodyEl().innerHTML = `<div class="hint">Couldn't open file: ${esc(e.message)}${diff ? " — try the Diff tab." : ""}</div>`;
-        return;
-      }
+    if (fileData) {
+      renderFileInto(bodyEl(), name, fileData);
+      return;
     }
 
-    renderFileInto(bodyEl(), name, fileData);
+    const cwd = state.active?.cwd;
+    const cached = await idbGet(fileCacheKey(cwd, path));
+
+    if (cached) {
+      renderFileInto(bodyEl(), name, cached);
+    }
+
+    try {
+      const fresh = await api("/api/file?cwd=" + encodeURIComponent(cwd || "") + "&path=" + encodeURIComponent(path));
+      fileData = fresh;
+      renderFileInto(bodyEl(), name, fresh);
+      cacheFile(cwd, path, fresh);
+    } catch (e) {
+      if (cached) {
+        fileData = cached;
+        renderFileInto(bodyEl(), name, cached, cached.cachedAt);
+        return;
+      }
+
+      bodyEl().innerHTML = `<div class="hint">Couldn't open file: ${esc(e.message)}${diff ? " — try the Diff tab." : ""}</div>`;
+    }
   }
 
   if (diff) {
@@ -1247,13 +1348,135 @@ async function openFileSheet(path, diff, line) {
   showFile();
 }
 
-function renderFileInto(el, name, d) {
+// Docs vs everything else, for the Files sheet filter.
+const DOC_FILE_RE = /\.(md|markdown|mdx|html?|txt|rst|adoc)$/i;
+
+async function openFilesSheet() {
+  const cwd = state.active?.cwd;
+  const files = [...state.threadFiles.values()].sort((a, b) => a.path.localeCompare(b.path));
+
+  openSheet(`<h2>Files</h2>
+    <div class="hint">Edited or linked in this session. Saved files open offline.</div>
+    <div class="file-tabs" id="fileFilter">
+      <button data-f="all" class="on">All</button>
+      <button data-f="docs">Docs</button>
+      <button data-f="code">Code</button>
+    </div>
+    <div id="filesList"></div>
+    <button class="primary-btn" id="saveFilesBtn" disabled>Select files to save</button>`);
+
+  const cachedPaths = new Set();
+  await Promise.all(files.map(async (f) => {
+    if (await idbGet(fileCacheKey(cwd, f.path))) { cachedPaths.add(f.path); }
+  }));
+
+  const selected = new Set();
+  let filter = "all";
+
+  function visible() {
+    return files.filter((f) => {
+      if (filter === "docs") { return DOC_FILE_RE.test(f.path); }
+      if (filter === "code") { return !DOC_FILE_RE.test(f.path); }
+
+      return true;
+    });
+  }
+
+  function syncSaveBtn() {
+    const btn = $("saveFilesBtn");
+
+    if (!btn) { return; }
+
+    btn.disabled = selected.size === 0;
+    btn.textContent = selected.size ? `Save ${selected.size} for offline` : "Select files to save";
+  }
+
+  function renderList() {
+    const list = $("filesList");
+    const rows = visible();
+
+    if (!rows.length) {
+      list.innerHTML = `<div class="hint">No ${filter === "all" ? "" : filter + " "}files in this session.</div>`;
+      return;
+    }
+
+    list.innerHTML = rows.map((f) => {
+      const name = f.path.split("/").pop();
+      const dir = f.path.split("/").slice(0, -1).join("/");
+      const badges = (cachedPaths.has(f.path) ? `<span class="fbadge">Saved</span>` : "")
+        + (f.edited ? `<span class="fbadge edit">Edited</span>` : "");
+
+      return `<div class="filerow${selected.has(f.path) ? " sel" : ""}" data-path="${esc(f.path)}">
+        <div class="cb" data-role="cb"></div>
+        <div class="fmeta" data-role="open">
+          <div class="fname">${esc(name)}</div>
+          <div class="fdir">${esc(dir || ".")}</div>
+        </div>${badges}</div>`;
+    }).join("");
+
+    list.querySelectorAll(".filerow").forEach((row) => {
+      const path = row.dataset.path;
+
+      row.querySelector('[data-role="cb"]').onclick = (e) => {
+        e.stopPropagation();
+
+        if (selected.has(path)) { selected.delete(path); } else { selected.add(path); }
+
+        row.classList.toggle("sel", selected.has(path));
+        syncSaveBtn();
+      };
+
+      row.querySelector('[data-role="open"]').onclick = () => openFileSheet(path, "");
+    });
+  }
+
+  $("sheetBody").querySelectorAll("#fileFilter button").forEach((b) => {
+    b.onclick = () => {
+      filter = b.dataset.f;
+      $("sheetBody").querySelectorAll("#fileFilter button").forEach((x) => x.classList.toggle("on", x === b));
+      renderList();
+    };
+  });
+
+  $("saveFilesBtn").onclick = async () => {
+    const btn = $("saveFilesBtn");
+    const targets = [...selected];
+    let done = 0;
+    let failed = 0;
+    btn.disabled = true;
+
+    for (const p of targets) {
+      btn.textContent = `Saving ${done + 1}/${targets.length}…`;
+
+      try {
+        const data = await api("/api/file?cwd=" + encodeURIComponent(cwd || "") + "&path=" + encodeURIComponent(p));
+        await cacheFile(cwd, p, data);
+        cachedPaths.add(p);
+        done++;
+      } catch {
+        failed++;
+      }
+    }
+
+    selected.clear();
+    renderList();
+    btn.textContent = failed ? `Saved ${done}, ${failed} failed` : `Saved ${done} for offline`;
+    setTimeout(syncSaveBtn, 2200);
+  };
+
+  renderList();
+  syncSaveBtn();
+}
+
+function renderFileInto(el, name, d, staleAt) {
   if (d.binary) {
     el.innerHTML = `<div class="hint">Binary file (${fmtBytes(d.size)}) — not viewable.</div>`;
     return;
   }
 
-  const note = d.truncated ? `<div class="hint">Showing the first 2 MB of ${fmtBytes(d.size)}.</div>` : "";
+  let note = d.truncated ? `<div class="hint">Showing the first 2 MB of ${fmtBytes(d.size)}.</div>` : "";
+
+  if (staleAt) { note = `<div class="hint">Offline copy · saved ${relTime(Math.floor(staleAt / 1000))}</div>` + note; }
 
   if (MD_FILE_RE.test(name)) {
     el.innerHTML = note + `<div class="md filebody">${renderMarkdown(d.content)}</div>`;
@@ -1628,6 +1851,7 @@ $("steerCtl").onclick = openSendModeSheet;
 $("newBtn").onclick = openNewSheet;
 $("usageBtn").onclick = openUsageSheet;
 $("diffBtn").onclick = () => openDiffSheet(state.lastDiff || "No diff");
+$("filesBtn").onclick = openFilesSheet;
 $("providerSeg").querySelectorAll("[data-provider]").forEach((b) => {
   b.onclick = () => switchProvider(b.dataset.provider);
 });
