@@ -23,6 +23,7 @@
   "dependencies": {
     "@zed-industries/agent-client-protocol": "^0.4.5",
     "qrcode-terminal": "^0.12.0",
+    "web-push": "^3.6.7",
     "zod": "^4.4.3"
   },
   "keywords": [

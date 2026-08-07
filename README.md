@@ -165,6 +165,10 @@ provider works).
 - **Token & port** live in `~/.codex-phone/config.json`. A random token is
   generated on first run and reused, so paired devices stay paired.
 - Override at launch: `remote-agents serve --host <ip> --port <n> --token <secret>`.
+- **Push keys** are generated once into the same file (`vapid`), so paired phones
+  stay subscribed. Set `pushSubject` there to your own `mailto:` or `https:` URL
+  if you like — it is the contact the push service sees. It must be real: Apple
+  rejects the whole request with `403 BadJwtToken` for a made-up domain.
 - Default bind is `0.0.0.0` (all interfaces) so localhost, LAN, and tailnet all
   work; the token is the security boundary.
 
@@ -216,6 +220,13 @@ reasoning · live command output · diffs · **markdown/code file viewer**
 mid-turn · stop · live token counter · usage & rate limits · new-session flow ·
 **live running-thread status** (incl. turns started on the Mac) · rich sanitized
 markdown. Codex, Claude, and Grok share all of it.
+
+**Notifications.** Turn them on in **Usage → Notifications** and your phone buzzes
+when a turn finishes — thread title plus the start of the reply, tap to jump
+straight into that chat. Works for all three providers, with the app closed. This
+is Web Push, so on iPhone it needs the **Home Screen install** (iOS 16.4+) — no
+native app, no third-party service; notifications go through Apple's own push
+service, signed with a VAPID key generated on first run.
 
 **Installable PWA + offline.** Add it to your home screen; it launches instantly
 and recently-opened chats are readable **offline** (cached in IndexedDB), then

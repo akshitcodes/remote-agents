@@ -1657,6 +1657,133 @@ function gaugeHtml(name, p) {
   return html;
 }
 
+// ---------- notifications (Web Push) ----------
+//
+// iOS delivers Web Push only to a Home-Screen install, via Apple's own push
+// service — so this needs no native app and no third-party service. The bridge
+// pushes when a turn finishes, with the thread title and a slice of the reply.
+
+const PUSH_SUPPORTED = "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+
+function isStandalone() {
+  return window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+}
+
+function isIOS() {
+  return /iPad|iPhone|iPod/.test(navigator.userAgent);
+}
+
+function urlB64ToUint8Array(base64) {
+  const padding = "=".repeat((4 - (base64.length % 4)) % 4);
+  const raw = atob((base64 + padding).replace(/-/g, "+").replace(/_/g, "/"));
+  return Uint8Array.from([...raw].map((c) => c.charCodeAt(0)));
+}
+
+function notificationsSectionHtml() {
+  return `<div class="seclabel">Notifications</div>
+    <div class="hint" id="pushHint">Checking…</div>
+    <button class="primary-btn" id="pushBtn" style="margin-top:6px" disabled>…</button>`;
+}
+
+async function currentPushSub() {
+  const reg = await navigator.serviceWorker?.getRegistration();
+  return reg ? reg.pushManager.getSubscription() : null;
+}
+
+async function wireNotifications() {
+  const btn = $("pushBtn");
+  const hint = $("pushHint");
+
+  if (!btn || !hint) { return; }
+
+  function show(text, label, enabled) {
+    hint.textContent = text;
+    btn.textContent = label;
+    btn.disabled = !enabled;
+  }
+
+  if (!PUSH_SUPPORTED) {
+    show("This browser can't receive push notifications.", "Unavailable", false);
+    return;
+  }
+
+  if (isIOS() && !isStandalone()) {
+    show("On iPhone these only work from the Home Screen app — tap Share → Add to Home Screen, then open it from there.", "Add to Home Screen first", false);
+    return;
+  }
+
+  if (Notification.permission === "denied") {
+    show("Notifications are blocked for this app in your browser settings.", "Blocked", false);
+    return;
+  }
+
+  const sub = await currentPushSub();
+
+  if (sub) {
+    show("On — you'll be notified when a turn finishes, with the reply.", "Turn off notifications", true);
+
+    btn.onclick = async () => {
+      btn.disabled = true;
+
+      try {
+        await api("/api/push/unsubscribe", { endpoint: sub.endpoint });
+        await sub.unsubscribe();
+      } catch {
+        // already gone — fall through and re-read the state
+      }
+
+      wireNotifications();
+    };
+
+    return;
+  }
+
+  show("Off. Get notified when Codex, Claude or Grok finishes a turn.", "Enable notifications", true);
+
+  btn.onclick = async () => {
+    btn.disabled = true;
+    hint.textContent = "Requesting permission…";
+
+    try {
+      const perm = await Notification.requestPermission();
+
+      if (perm !== "granted") {
+        show("Permission wasn't granted, so notifications stay off.", "Enable notifications", true);
+        return;
+      }
+
+      const { key } = await api("/api/push/key");
+
+      if (!key) { throw new Error("the bridge has no push key"); }
+
+      const reg = await navigator.serviceWorker.ready;
+      const fresh = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64ToUint8Array(key) });
+      await api("/api/push/subscribe", { subscription: fresh.toJSON() });
+      wireNotifications();
+    } catch (e) {
+      show("Couldn't enable notifications: " + (e.message || e), "Try again", true);
+    }
+  };
+}
+
+// Opened from a notification: jump straight to that thread.
+async function openLinkedThread() {
+  const q = new URLSearchParams(location.search);
+  const id = q.get("thread");
+
+  if (!id) { return; }
+
+  const prov = q.get("provider");
+  history.replaceState(null, "", "/");
+
+  if (prov && PROVIDER_LABELS[prov] && prov !== state.provider) {
+    await switchProvider(prov);
+  }
+
+  const found = state.threads.find((t) => t.id === id);
+  openThread(found || { id, provider: prov || state.provider, cwd: null, name: null, preview: "Session" });
+}
+
 async function openUsageSheet() {
   openSheet(`<h2>Usage & limits</h2><div class="hint">Loading…</div>`);
 
@@ -1724,8 +1851,10 @@ async function openUsageSheet() {
     }
   }
 
+  html += notificationsSectionHtml();
   openSheet(html);
   lastUsageBar = $("sheetBody").querySelector(".bar > span");
+  wireNotifications();
 }
 
 // ---------- running-thread tracking ----------
@@ -1921,7 +2050,7 @@ if ("serviceWorker" in navigator) {
 initProvider();
 connectEvents();
 initModels();
-loadThreads(false);
+loadThreads(false).then(() => openLinkedThread().catch(() => {}));
 </script>
 </body>
 </html>

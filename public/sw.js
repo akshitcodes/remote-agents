@@ -11,7 +11,7 @@
 //
 // Bump CACHE_VERSION to force a refresh of the precached shell.
 
-const CACHE_VERSION = "remote-agents-v2";
+const CACHE_VERSION = "remote-agents-v3";
 const NAV_TIMEOUT_MS = 2500;
 
 const SHELL = [
@@ -41,6 +41,53 @@ self.addEventListener("activate", (event) => {
       .then((keys) => Promise.all(keys.filter((k) => k !== CACHE_VERSION).map((k) => caches.delete(k))))
       .then(() => self.clients.claim()),
   );
+});
+
+// "Your agent finished" push. iOS only delivers these to a home-screen install,
+// and requires that every push shows a notification (userVisibleOnly), so there
+// is no silent path. Tapping one opens (or focuses) that thread.
+self.addEventListener("push", (event) => {
+  let payload = {};
+
+  try {
+    payload = event.data ? event.data.json() : {};
+  } catch {
+    payload = { title: "Remote Agents", body: event.data?.text?.() || "" };
+  }
+
+  const threadId = payload.threadId || "";
+  const provider = payload.provider || "codex";
+  const url = threadId ? `/?thread=${encodeURIComponent(threadId)}&provider=${encodeURIComponent(provider)}` : "/";
+
+  event.waitUntil(
+    self.registration.showNotification(payload.title || "Remote Agents", {
+      body: payload.body || "",
+      icon: "/icons/icon-192.png",
+      badge: "/icons/icon-192.png",
+      // One live notification per thread — a finished turn replaces its predecessor.
+      tag: `thread:${provider}:${threadId}`,
+      renotify: true,
+      data: { url },
+    }),
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  const url = event.notification.data?.url || "/";
+  event.notification.close();
+
+  event.waitUntil((async () => {
+    const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+
+    for (const client of windows) {
+      if ("navigate" in client) {
+        await client.navigate(url).catch(() => {});
+        return client.focus();
+      }
+    }
+
+    return self.clients.openWindow(url);
+  })());
 });
 
 // Let the page trigger an immediate activation after an update.

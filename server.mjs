@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { CodexProvider } from "./providers/codex.mjs";
 import { ClaudeProvider } from "./providers/claude.mjs";
 import { GrokProvider } from "./providers/grok.mjs";
+import * as push from "./push.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -34,10 +35,136 @@ const PWA_FILES = {
 const sseClients = new Set(); // http responses subscribed to events
 
 function broadcast(event, data) {
+  trackForPush(event, data);
   const frame = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 
   for (const res of sseClients) {
     res.write(frame);
+  }
+}
+
+// ---------- "agent finished" push ----------
+//
+// Every provider frame passes through broadcast(), so the reply text and the
+// end-of-turn signal are both already here — no provider changes needed. We keep
+// the last agent message per thread to use as the notification body, and the
+// thread's title from the last list response for the headline.
+
+const PROVIDER_LABELS = { codex: "Codex", claude: "Claude", grok: "Grok" };
+const lastAgentText = new Map(); // "provider:threadId" -> most recent reply text
+const threadTitles = new Map(); // "provider:threadId" -> name/preview
+const adoptedIds = new Map(); // "provider:draftId" -> the real session id
+const recentlyPushed = new Map(); // dedupe key -> timestamp
+
+function metaKey(provider, threadId) {
+  return `${provider || "codex"}:${threadId}`;
+}
+
+function rememberThreadTitles(provider, rows) {
+  for (const t of rows ?? []) {
+    if (t?.id) {
+      threadTitles.set(metaKey(provider, t.id), t.name || t.preview || "");
+    }
+  }
+}
+
+function trackForPush(event, data) {
+  if (event !== "notify" || !push.count()) {
+    return;
+  }
+
+  const { method, params = {}, provider } = data ?? {};
+  const threadId = params.threadId;
+
+  if (!method || !threadId) {
+    return;
+  }
+
+  const key = metaKey(provider, threadId);
+
+  // A new session streams under its draft id until it is adopted; remember the
+  // real id so the notification's title lookup and deep link both work.
+  if (method === "thread/adopted" && params.sessionId) {
+    adoptedIds.set(key, params.sessionId);
+    return;
+  }
+
+  if (method === "item/agentMessage/delta") {
+    lastAgentText.set(key, ((lastAgentText.get(key) ?? "") + (params.delta ?? "")).slice(-400));
+    return;
+  }
+
+  if (method === "item/completed" && params.item?.type === "agentMessage") {
+    lastAgentText.set(key, String(params.item.text ?? "").slice(-400));
+    return;
+  }
+
+  if (method !== "turn/completed" && method !== "turn/failed") {
+    return;
+  }
+
+  const failed = method === "turn/failed";
+  const errorText = String(params.turn?.error?.message ?? "");
+
+  // A turn you stopped yourself is not news.
+  if (failed && /cancel/i.test(errorText)) {
+    return;
+  }
+
+  // Providers can emit a terminal frame more than once per turn.
+  const dedupe = `${key}:${params.turn?.id ?? ""}:${method}`;
+  const now = Date.now();
+
+  for (const [k, at] of recentlyPushed) {
+    if (now - at > 60000) { recentlyPushed.delete(k); }
+  }
+
+  if (recentlyPushed.has(dedupe)) {
+    return;
+  }
+
+  recentlyPushed.set(dedupe, now);
+
+  const label = PROVIDER_LABELS[provider] || "Agent";
+  const realId = adoptedIds.get(key) || threadId;
+  const reply = (lastAgentText.get(key) ?? "").trim().replace(/\s+/g, " ");
+  const body = failed
+    ? (errorText || "Turn failed")
+    : (reply.slice(0, 180) || "Turn finished");
+
+  lastAgentText.delete(key);
+
+  (async () => {
+    let title = threadTitles.get(metaKey(provider, realId)) || "";
+
+    // A thread the client never listed (e.g. one just created) has no title yet.
+    if (!title) {
+      title = await lookupThreadTitle(provider, realId);
+    }
+
+    await push.send({
+      title: `${label}${failed ? " · failed" : " finished"}${title ? " · " + title.slice(0, 60) : ""}`,
+      body,
+      threadId: realId,
+      provider: provider || "codex",
+    });
+  })().catch(() => {});
+}
+
+// Best-effort title for a thread we have not seen in a list response.
+async function lookupThreadTitle(provider, threadId) {
+  const p = pickProvider(provider);
+
+  if (!p) {
+    return "";
+  }
+
+  try {
+    const listed = await p.listThreads({});
+    rememberThreadTitles(provider, listed.data);
+    return threadTitles.get(metaKey(provider, threadId)) || "";
+  } catch {
+    return "";
   }
 }
 
@@ -198,7 +325,41 @@ const routes = {
       return;
     }
 
-    json(res, 200, await p.listThreads({ search: url.searchParams.get("search"), cursor: url.searchParams.get("cursor") }));
+    const listed = await p.listThreads({ search: url.searchParams.get("search"), cursor: url.searchParams.get("cursor") });
+    rememberThreadTitles(p.name, listed.data);
+    json(res, 200, listed);
+  },
+
+  // Web Push: the key the browser needs to subscribe, plus (un)subscribe.
+  "GET /api/push/key": async (req, res) => {
+    if (!isAuthed(req)) {
+      return json(res, 401, { error: "unauthorized" });
+    }
+
+    json(res, 200, { key: push.publicKey(), subscribers: push.count() });
+  },
+
+  "POST /api/push/subscribe": async (req, res) => {
+    if (!isAuthed(req)) {
+      return json(res, 401, { error: "unauthorized" });
+    }
+
+    const body = await readBody(req);
+
+    try {
+      json(res, 200, push.subscribe(body?.subscription));
+    } catch (e) {
+      json(res, e.status ?? 500, { error: String(e.message ?? e) });
+    }
+  },
+
+  "POST /api/push/unsubscribe": async (req, res) => {
+    if (!isAuthed(req)) {
+      return json(res, 401, { error: "unauthorized" });
+    }
+
+    const body = await readBody(req);
+    json(res, 200, push.unsubscribe(body?.endpoint));
   },
 
   "GET /api/thread": async (req, res, url) => {
@@ -433,6 +594,8 @@ export function startServer({ host = "0.0.0.0", port = 8484, token } = {}) {
   HOST = host;
   PORT = Number(port);
   TOKEN = token || "";
+
+  push.init();
 
   for (const p of Object.values(providers)) {
     Promise.resolve(p.init()).catch((e) => console.error(`provider ${p.name} init failed:`, e));
