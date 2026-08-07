@@ -78,7 +78,9 @@
   #messages { flex: 1; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; padding: 14px 12px; }
   .msg { max-width: 88%; margin-bottom: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
   .msg.md { white-space: normal; }
-  .msg.user { margin-left: auto; background: var(--user-bubble); color: #fff; padding: 9px 13px; border-radius: 16px 16px 4px 16px; font-size: 14px; }
+  /* The bubble shrink-wraps its text (a block would stretch to the cap even for
+     "hi") and only grows to 80% of the column before wrapping. */
+  .msg.user { width: -webkit-fit-content; width: fit-content; max-width: 80%; margin-left: auto; background: var(--user-bubble); color: #fff; padding: 9px 13px; border-radius: 16px 16px 4px 16px; font-size: 14px; }
   /* The agent reply is plain text, not a bubble — give it the full column so
      code, tables and diffs get every pixel. The 88% cap stays for user bubbles. */
   .msg.agent { margin-right: auto; max-width: 100%; font-size: 14.5px; padding: 2px 2px 2px 0; }
