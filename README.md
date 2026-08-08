@@ -235,6 +235,14 @@ service, signed with a VAPID key generated on first run.
 and recently-opened chats are readable **offline** (cached in IndexedDB), then
 re-sync when you're back online. You only need the network to *send*.
 
+This covers **both** kinds of outage — your phone having no signal, *and* the Mac
+being asleep or its tunnel down. The second one is the sneaky case: a proxy like
+Cloudflare answers with a real HTTP error page ("tunnel not responding"), which
+looks like a perfectly successful response, so the app treats a 5xx from the
+proxy as an outage rather than rendering it. Either way you get the cached app
+and your saved chats, with a badge saying which side is down — `Offline` or
+`Mac offline` — and it reconnects and refreshes by itself when the Mac returns.
+
 **Permission modes** map to each CLI's real controls — Codex: Read Only /
 Auto / Full Access; Claude: Manual / Accept edits / Plan / Bypass; Grok: Manual /
 Bypass. **Known Claude limit:** approvals are gated via a PreToolUse hook in

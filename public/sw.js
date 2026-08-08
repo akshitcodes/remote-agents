@@ -11,8 +11,18 @@
 //
 // Bump CACHE_VERSION to force a refresh of the precached shell.
 
-const CACHE_VERSION = "remote-agents-v3";
+const CACHE_VERSION = "remote-agents-v4";
 const NAV_TIMEOUT_MS = 2500;
+
+// A reverse proxy in front of us (Cloudflare, a tunnel, nginx) answers with a
+// real HTTP response when the machine behind it is down — 502, or Cloudflare's
+// own 52x/53x error page. That is a *resolved* fetch, so `.catch()` never sees
+// it and we would render the proxy's "tunnel not responding" page instead of
+// falling back. Treat any 5xx as the host being unreachable; a 4xx is a genuine
+// answer (a rejected token, say) and must pass through untouched.
+function hostUnreachable(res) {
+  return !res || res.type === "error" || res.status >= 500;
+}
 
 const SHELL = [
   "/",
@@ -25,22 +35,29 @@ const SHELL = [
 ];
 
 self.addEventListener("install", (event) => {
-  event.waitUntil(
-    caches
-      .open(CACHE_VERSION)
-      .then((cache) => cache.addAll(SHELL))
-      .then(() => self.skipWaiting())
-      .catch(() => self.skipWaiting()),
-  );
+  event.waitUntil((async () => {
+    const cache = await caches.open(CACHE_VERSION);
+
+    // Per-item rather than addAll(): one asset failing must not leave us with no
+    // cached shell at all, which is precisely what the offline fallback needs.
+    await Promise.all(SHELL.map((path) => cache.add(path).catch(() => {})));
+    await self.skipWaiting();
+  })());
 });
 
 self.addEventListener("activate", (event) => {
-  event.waitUntil(
-    caches
-      .keys()
-      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE_VERSION).map((k) => caches.delete(k))))
-      .then(() => self.clients.claim()),
-  );
+  event.waitUntil((async () => {
+    const cache = await caches.open(CACHE_VERSION);
+
+    // Never drop the previous version's shell unless this one actually has one —
+    // otherwise a half-failed install leaves the app with nothing to boot from.
+    if (await cache.match("/")) {
+      const keys = await caches.keys();
+      await Promise.all(keys.filter((k) => k !== CACHE_VERSION).map((k) => caches.delete(k)));
+    }
+
+    await self.clients.claim();
+  })());
 });
 
 // "Your agent finished" push. iOS only delivers these to a home-screen install,
@@ -143,16 +160,28 @@ async function navigationNetworkFirst(req) {
     })
     .catch(() => null);
 
+  // Only a reachable host counts as a winner: an error page from the proxy is
+  // worth less than the shell we already have.
+  const usable = network.then((res) => (hostUnreachable(res) ? null : res));
   const timeout = new Promise((resolve) => setTimeout(() => resolve(null), NAV_TIMEOUT_MS));
-  const winner = await Promise.race([network, timeout]);
+  const winner = await Promise.race([usable, timeout]);
 
   if (winner) {
     return winner;
   }
 
-  // Network too slow or offline — serve the cached shell, let the fetch finish
-  // updating the cache for next time.
-  return (await cache.match("/")) || (await network) || Response.error();
+  // Too slow, phone offline, or the Mac is down — boot from the cached shell so
+  // the app can explain itself and serve saved threads. The fetch finishes in
+  // the background and refreshes the cache for next time.
+  const cached = await cache.match("/");
+
+  if (cached) {
+    return cached;
+  }
+
+  // Nothing cached (first ever launch): the proxy's own error page at least says
+  // something, so pass it through rather than showing a blank failure.
+  return (await network) || Response.error();
 }
 
 // Static, versioned assets: serve cache, fill + refresh from network.

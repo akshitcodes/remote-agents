@@ -398,8 +398,41 @@ function currentMode() {
 }
 
 // ---------- api ----------
+// Two outages are indistinguishable to a naive fetch, and both must fall back to
+// the cache: this phone having no network (fetch rejects), and the Mac or its
+// tunnel being down (the proxy in front answers 502/52x/53x with an error page,
+// which resolves like a normal response). Classify them here and tag the error
+// with `reach` so callers can fall back and say which one it is.
+function unreachable(kind) {
+  return Object.assign(new Error(kind === "host" ? "can't reach your Mac" : "your phone is offline"), { reach: kind });
+}
+
+// navigator.onLine can still read a stale `true` for a moment after a cold
+// launch, which would blame the Mac for the phone's own outage. Re-check when we
+// actually render: a phone that knows it has no network is the better answer.
+function effectiveReach(reach) {
+  return navigator.onLine ? reach : "phone";
+}
+
+function offlineWord(reach) {
+  return effectiveReach(reach) === "host" ? "Your Mac looks offline" : "You're offline";
+}
+
 async function api(path, body) {
-  const res = await fetch(path, body && { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  let res;
+
+  try {
+    res = await fetch(path, body && { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  } catch {
+    // The request never left the phone.
+    throw unreachable(navigator.onLine ? "host" : "phone");
+  }
+
+  // Our own server always answers JSON, so a non-JSON 5xx is the proxy reporting
+  // that the machine behind it is gone — not a failing handler.
+  if (res.status >= 500 && !(res.headers.get("content-type") || "").includes("json")) {
+    throw unreachable("host");
+  }
 
   if (!res.ok) {
     const b = await res.json().catch(() => ({}));
@@ -532,8 +565,10 @@ function trimThreadForCache(thread) {
   return { turns };
 }
 
-function setOfflineNote(on) {
-  document.body.classList.toggle("offline", on);
+function setOfflineNote(on, reach) {
+  document.body.classList.toggle("offline", !!on);
+
+  if (on) { $("offlinePill").textContent = effectiveReach(reach) === "host" ? "Mac offline" : "Offline"; }
 }
 
 // ---------- helpers ----------
@@ -652,9 +687,9 @@ async function loadThreads(append) {
       state.threads = cached.data;
       state.nextCursor = null;
       renderRows(false);
-      setOfflineNote(true);
+      setOfflineNote(true, e.reach);
     } else {
-      $("rows").innerHTML = '<div class="empty">Offline — no saved sessions for ' + esc(providerLabel()) + ".</div>";
+      $("rows").innerHTML = '<div class="empty">' + offlineWord(e.reach) + " — no saved sessions for " + esc(providerLabel()) + ".</div>";
     }
   }
 }
@@ -1068,13 +1103,14 @@ async function openThread(t) {
     const msg = String(e.message || "");
 
     if (cached?.thread) {
-      // Offline but we have a saved copy — keep it on screen, flag it.
-      setOfflineNote(true);
+      // Keep the saved copy on screen; flag it only when the reason we couldn't
+      // refresh was actually a lost phone/Mac, not a server-side error.
+      if (e.reach) { setOfflineNote(true, e.reach); }
     } else if (/not materialized|not found|before first user message/i.test(msg)) {
       // Brand-new session with no history yet — this is expected, not an error.
       box().innerHTML = '<div class="empty">New session — send a message to begin.</div>';
-    } else if (!navigator.onLine) {
-      box().innerHTML = '<div class="empty">Offline — no saved copy of this session yet.</div>';
+    } else if (e.reach) {
+      box().innerHTML = '<div class="empty">' + offlineWord(e.reach) + " — no saved copy of this session yet.</div>";
     } else {
       box().innerHTML = '<div class="empty">Failed to load: ' + esc(e.message) + "</div>";
     }
@@ -1940,18 +1976,58 @@ async function resyncOpenThread() {
     renderHistory(res.thread);
 
     if (isRunning(t.provider, t.id)) { setBusy(true); }
-  } catch {
-    // offline or transient — keep whatever's on screen
+  } catch (e) {
+    // Unreachable or transient — keep whatever's on screen, but say why it's stale.
+    if (e.reach) { setOfflineNote(true, e.reach); }
   } finally {
     state.resyncing = false;
   }
 }
 
 // ---------- events ----------
+// EventSource only retries by itself when the *connection* drops. If the server
+// answers at all with the wrong status or MIME type — a proxy's 530 error page
+// while the Mac is down — the spec calls that a fatal failure: the browser
+// closes the stream for good and live updates never return without a reload. So
+// we reconnect ourselves, backing off to a minute while the outage lasts.
+const SSE_RETRY_MIN_MS = 3000;
+const SSE_RETRY_MAX_MS = 60000;
+let sseRetryMs = SSE_RETRY_MIN_MS;
+let sseRetryTimer = null;
+let sse = null;
+
+// Bringing the app forward, or the phone regaining network, is a much better
+// hint than the backoff clock — retry at once instead of waiting it out.
+function reconnectNow() {
+  if (sse && sse.readyState !== EventSource.CLOSED) { return; }
+
+  clearTimeout(sseRetryTimer);
+  sseRetryTimer = null;
+  sseRetryMs = SSE_RETRY_MIN_MS;
+  connectEvents();
+}
+
+function scheduleReconnect() {
+  if (sseRetryTimer) { return; }
+
+  sseRetryTimer = setTimeout(() => {
+    sseRetryTimer = null;
+    connectEvents();
+  }, sseRetryMs);
+
+  sseRetryMs = Math.min(sseRetryMs * 2, SSE_RETRY_MAX_MS);
+}
+
 function connectEvents() {
   const es = new EventSource("/api/events");
+  sse = es;
   es.onopen = () => {
+    sseRetryMs = SSE_RETRY_MIN_MS;
     $("connDot").classList.add("on");
+
+    // The stream only opens if the Mac is answering, so this is the earliest
+    // and most reliable signal that an outage is over.
+    setOfflineNote(false);
 
     // Reconnected after a drop (e.g. resumed from background) — catch up.
     if (state.sseErrored) {
@@ -1962,6 +2038,12 @@ function connectEvents() {
   es.onerror = () => {
     $("connDot").classList.remove("on");
     state.sseErrored = true;
+
+    // CLOSED means the browser has given up; anything else it retries itself.
+    if (es.readyState === EventSource.CLOSED) {
+      setOfflineNote(true, navigator.onLine ? "host" : "phone");
+      scheduleReconnect();
+    }
   };
   es.addEventListener("approval", (e) => {
     const a = JSON.parse(e.data);
@@ -2055,15 +2137,15 @@ document.addEventListener("touchmove", (e) => {
 document.addEventListener("visibilitychange", () => {
   sendPresence();
 
-  if (!document.hidden) { resyncView(); }
+  if (!document.hidden) { reconnectNow(); resyncView(); }
 });
 
 // Heartbeat so a long read keeps suppressing, and the report expires if we die.
 setInterval(() => {
   if (!document.hidden && state.active) { sendPresence(); }
 }, 30000);
-window.addEventListener("online", () => { setOfflineNote(false); resyncView(); });
-window.addEventListener("offline", () => setOfflineNote(true));
+window.addEventListener("online", () => { setOfflineNote(false); reconnectNow(); resyncView(); });
+window.addEventListener("offline", () => setOfflineNote(true, "phone"));
 
 function initProvider() {
   const prefs = loadPrefs();
