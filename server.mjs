@@ -4,8 +4,10 @@
 //
 // This module exports startServer(); the runnable entry point is bin/codex-phone.mjs.
 
+import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
 import { readFileSync, existsSync, statSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
 import { basename, dirname, join, resolve, sep, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -296,10 +298,59 @@ function providerFromBody(res, body) {
   return p;
 }
 
-// Read a file for the viewer, sandboxed to the thread's project directory.
-// The path may be absolute (as it appears in diffs) or relative to cwd; the
-// resolved real path must stay inside the real cwd. 2 MB cap; binary detected.
+// Read a file for the viewer, scoped to the thread's project. "Project" means
+// the thread's cwd AND every git worktree of the same repository — an agent that
+// works in a worktree writes files that are genuinely part of your project, and
+// blocking those helped nobody. Set `fileAccess: "anywhere"` in
+// ~/.codex-phone/config.json to drop the scope check entirely (the pairing token
+// already lets anyone drive an agent in Full Access, so this is your call).
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
+const WORKTREE_TTL_MS = 30000;
+const worktreeCache = new Map(); // cwd -> { roots:[], at }
+
+function projectRoots(realCwd) {
+  const cached = worktreeCache.get(realCwd);
+
+  if (cached && Date.now() - cached.at < WORKTREE_TTL_MS) {
+    return cached.roots;
+  }
+
+  const roots = new Set([realCwd]);
+
+  try {
+    const out = execFileSync("git", ["-C", realCwd, "worktree", "list", "--porcelain"], {
+      encoding: "utf8",
+      timeout: 4000,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+
+    for (const line of out.split("\n")) {
+      if (line.startsWith("worktree ")) {
+        const p = line.slice("worktree ".length).trim();
+
+        try {
+          roots.add(realpathSync(p));
+        } catch {
+          // worktree recorded but no longer on disk
+        }
+      }
+    }
+  } catch {
+    // not a git repo, or git unavailable — the cwd alone stays in scope
+  }
+
+  const list = [...roots];
+  worktreeCache.set(realCwd, { roots: list, at: Date.now() });
+  return list;
+}
+
+function fileAccessMode() {
+  try {
+    return JSON.parse(readFileSync(join(homedir(), ".codex-phone", "config.json"), "utf8")).fileAccess || "project";
+  } catch {
+    return "project";
+  }
+}
 
 function readProjectFile(cwd, p) {
   if (!cwd || !p) {
@@ -323,8 +374,13 @@ function readProjectFile(cwd, p) {
     throw Object.assign(new Error("file not found"), { status: 404 });
   }
 
-  if (realFile !== realCwd && !realFile.startsWith(realCwd + sep)) {
-    throw Object.assign(new Error("file is outside the project directory"), { status: 403 });
+  if (fileAccessMode() !== "anywhere") {
+    const roots = projectRoots(realCwd);
+    const inScope = roots.some((root) => realFile === root || realFile.startsWith(root + sep));
+
+    if (!inScope) {
+      throw Object.assign(new Error("file is outside this project and its worktrees"), { status: 403 });
+    }
   }
 
   const st = statSync(realFile);

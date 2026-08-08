@@ -192,8 +192,11 @@ provider works).
   Access** for an identity gate.
 - Agent output is sanitized with DOMPurify, so untrusted HTML in a model reply
   can't run scripts in your browser.
-- The file viewer is sandboxed to each thread's project directory (path traversal
-  is rejected).
+- The file viewer is scoped to each thread's project — its `cwd` plus every git
+  worktree of the same repository, so files an agent wrote in a worktree open
+  normally. Anything else is rejected. This is a convenience boundary, not a
+  security one: the pairing token already lets anyone drive an agent in Full
+  Access. Set `fileAccess: "anywhere"` in `~/.codex-phone/config.json` to drop it.
 
 ---
 
