@@ -889,6 +889,36 @@ function renderHistory(thread) {
   });
   registerFilesFromEl(box());
   scrollDown();
+  // How far through the thread we've drawn, so appended items can be matched by
+  // position — see appendExternalItems.
+  state.renderedItems = turns.reduce((n, t) => n + (t.items?.length ?? 0), 0);
+}
+
+// New work appended to a thread someone else is driving. Only the items we
+// haven't drawn arrive, so this stays cheap no matter how long the thread is.
+function appendExternalItems(from, items) {
+  state.renderedItems = state.renderedItems ?? 0;
+
+  // A gap means we missed something — fall back to re-reading the whole thread.
+  if (from > state.renderedItems) {
+    scheduleExternalRefresh();
+    return;
+  }
+
+  const fresh = items.slice(state.renderedItems - from);
+
+  if (!fresh.length) { return; }
+
+  const b = box();
+  const wasAtBottom = b.scrollHeight - b.scrollTop - b.clientHeight < 120;
+
+  for (const item of fresh) { renderItem(item); }
+
+  state.renderedItems += fresh.length;
+  registerFilesFromEl(b);
+  setLivePill(state.externalTurn, "Running — following live");
+
+  if (wasAtBottom) { scrollDown(); }
 }
 
 // ---------- live streaming ----------
@@ -1095,7 +1125,7 @@ async function openThread(t) {
   // is a snapshot, and without this a busy thread reads as a finished one.
   if (t.running || isRunning(t.provider, t.id)) {
     setBusy(true, { external: true });
-    setLivePill(true, "Running — catching up…");
+    setLivePill(true, "Loading new messages…");
   }
 
   if (cached?.thread) {
@@ -2035,6 +2065,10 @@ async function resyncOpenThread() {
 
   state.resyncing = true;
 
+  // Say what's happening while the fetch is in flight — a thread being followed
+  // from elsewhere would otherwise just sit there looking stuck.
+  if (state.externalTurn) { setLivePill(true, "Loading new messages…"); }
+
   try {
     const res = await api("/api/thread?id=" + encodeURIComponent(t.id) + "&provider=" + encodeURIComponent(t.provider || "codex"));
     state.items = new Map();
@@ -2042,7 +2076,10 @@ async function resyncOpenThread() {
 
     if (wasAtBottom) { scrollDown(); } else { b.scrollTop = prevTop; }
 
-    if (isRunning(t.provider, t.id)) { setBusy(true, { external: state.externalTurn }); }
+    if (isRunning(t.provider, t.id)) {
+      setBusy(true, { external: state.externalTurn });
+      setLivePill(true, "Running — following live");
+    }
   } catch (e) {
     // Unreachable or transient — keep whatever's on screen, but say why it's stale.
     if (e.reach) { setOfflineNote(true, e.reach); }
@@ -2125,7 +2162,7 @@ function connectEvents() {
   // another device. The server watches the CLI's own session file and tells us
   // when it moves; re-reading the thread *is* the stream for those turns.
   es.addEventListener("external", (e) => {
-    const { provider, threadId, running, changed } = JSON.parse(e.data);
+    const { provider, threadId, running, changed, items, from } = JSON.parse(e.data);
     const open = state.active && (threadId === state.active.id || threadId === state.active.draftId);
 
     // A turn we started here is the authority on its own state. The session file
@@ -2139,7 +2176,13 @@ function connectEvents() {
 
     if (running) { setBusy(true, { external: true }); }
 
-    if (changed) { scheduleExternalRefresh(); }
+    // The server sends just what was appended; only fall back to re-reading the
+    // whole thread when it couldn't work out a delta.
+    if (Array.isArray(items) && items.length) {
+      appendExternalItems(from, items);
+    } else if (changed) {
+      scheduleExternalRefresh();
+    }
   });
 }
 

@@ -81,6 +81,48 @@ export function notePresence({ clientId, provider, ids, visible }) {
   return { ok: true };
 }
 
+// How far into each watched thread the app has already been told about, so a
+// moving thread costs only what the agent just wrote.
+//
+// Sending the whole thread on every change is what makes this unusable on a
+// phone: a long session is ~1MB, and re-fetching that every second is slower
+// than the interval itself, so it never looks live. These logs are append-only
+// records of completed work, so the delta is always *new items* — never
+// rewritten ones — and position is a stable identity even where the items
+// themselves have no id (Claude's have gaps and duplicates).
+const sentItems = new Map(); // "provider:threadId" -> items already delivered
+
+async function emitExternal({ provider, threadId, running, changed }) {
+  const key = metaKey(provider, threadId);
+
+  if (!changed) {
+    broadcast("external", { provider, threadId, running });
+    return;
+  }
+
+  let payload = { provider, threadId, running };
+
+  try {
+    const p = providers[provider];
+    const res = await p?.readThread(threadId);
+    const items = (res?.thread?.turns ?? []).flatMap((t) => t.items ?? []);
+
+    // First sighting establishes the baseline: the app just read the thread
+    // itself, so replaying its history back at it would only duplicate it.
+    const already = sentItems.get(key) ?? items.length;
+
+    if (items.length > already) {
+      payload = { ...payload, from: already, items: items.slice(already) };
+    }
+
+    sentItems.set(key, items.length);
+  } catch {
+    // Couldn't re-read it — the bare ping still tells the app to refresh.
+  }
+
+  broadcast("external", payload);
+}
+
 // The session-file watcher follows only what someone actually has open — the
 // same reports that drive unread-only push, reused so nothing extra is polled.
 function refreshInterest() {
@@ -99,6 +141,12 @@ function refreshInterest() {
   }
 
   watch.setInterest(wanted);
+
+  const live = new Set(wanted.map((w) => metaKey(w.provider, w.id)));
+
+  for (const k of sentItems.keys()) {
+    if (!live.has(k)) { sentItems.delete(k); }
+  }
 }
 
 function isOnScreen(provider, candidateIds) {
@@ -747,7 +795,7 @@ export function startServer({ host = "0.0.0.0", port = 8484, token } = {}) {
 
   // Turns nobody here started still move their session file; tell the app so it
   // can follow along instead of showing a snapshot.
-  watch.start((update) => broadcast("external", update));
+  watch.start(emitExternal);
   setInterval(refreshInterest, 30000).unref?.();
 
   for (const p of Object.values(providers)) {
