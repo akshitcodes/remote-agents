@@ -242,13 +242,11 @@ export class CodexProvider extends BaseProvider {
       throw Object.assign(new Error("thread not found"), { status: 404 });
     }
 
-    // Prewarm app-server for the *write* path, so the first send doesn't pay the
-    // resume cost. Fire-and-forget, and never awaited: reading must not depend
-    // on it being healthy.
-    if (!this.resumedThreads.has(id)) {
-      this.ready().then(() => this.ensureResumed(id)).catch(() => {});
-    }
-
+    // Deliberately no prewarm here. Resuming a thread makes app-server replay
+    // its history as live notifications, which the app renders on top of the
+    // transcript it has just drawn — the same duplicate-message bug Grok has a
+    // guard for. Opening a thread is now purely a file read; the resume happens
+    // on the first send, which is the only thing that needs it.
     return rollout.readRollout(path);
   }
 

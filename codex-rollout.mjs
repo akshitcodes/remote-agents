@@ -272,6 +272,11 @@ export function itemsFromLines(lines) {
 const parsed = new Map(); // path -> { offset, state, at }
 const MAX_PARSED = 4;
 
+// Read in slices: these logs reach a gigabyte, and one Buffer.toString() over
+// that throws outright (V8 caps strings near 512MB). Chunking also keeps peak
+// memory at one slice instead of the whole file.
+const CHUNK_BYTES = 16 * 1024 * 1024;
+
 function readFrom(path, start, end) {
   const length = end - start;
 
@@ -311,15 +316,26 @@ export function readRollout(path) {
     parsed.set(path, entry);
   }
 
-  if (entry.offset < size) {
-    const chunk = readFrom(path, entry.offset, size);
-    // A trailing partial line must wait for the rest of itself.
+  while (entry.offset < size) {
+    const end = Math.min(entry.offset + CHUNK_BYTES, size);
+    const chunk = readFrom(path, entry.offset, end);
+
+    if (!chunk) { break; }
+
+    // A trailing partial line waits for the rest of itself to be written.
     const cut = chunk.lastIndexOf("\n");
 
-    if (cut >= 0) {
-      feedLines(entry.state, chunk.slice(0, cut).split("\n").filter(Boolean));
-      entry.offset += Buffer.byteLength(chunk.slice(0, cut + 1), "utf8");
+    if (cut < 0) {
+      // A whole chunk with no line break is one colossal record; step past it
+      // rather than stalling here re-reading the same bytes forever.
+      if (end >= size) { break; }
+
+      entry.offset = end;
+      continue;
     }
+
+    feedLines(entry.state, chunk.slice(0, cut).split("\n").filter(Boolean));
+    entry.offset += Buffer.byteLength(chunk.slice(0, cut + 1), "utf8");
   }
 
   entry.at = Date.now();
