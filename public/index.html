@@ -69,6 +69,11 @@
   .chip.time { background: none; padding-left: 0; }
   .chip.run-badge { display: inline-flex; align-items: center; gap: 5px; color: var(--accent); background: #2ea04322; }
   .run-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: pulse 1.3s ease-in-out infinite; }
+  /* A message that didn't send stays visible and carries its own retry, so the
+     failure is attached to the thing that failed. */
+  .msg.user.failed { border: 1px solid var(--danger); opacity: .85; }
+  .msg.user .retry { display: block; margin: 7px 0 0 auto; background: transparent; border: 1px solid var(--danger); color: var(--danger); font-size: 11px; font-weight: 600; padding: 3px 10px; border-radius: 20px; cursor: pointer; }
+  .msg.user .retry:disabled { opacity: .6; cursor: default; }
   .loadearlier { display: block; margin: 4px auto 14px; background: var(--bg3); border: 1px solid var(--border); color: var(--accent2); padding: 7px 16px; border-radius: 10px; font-size: 13px; cursor: pointer; }
   .loadearlier:disabled { color: var(--fg-dim); cursor: default; }
   /* "this turn is being driven somewhere else" — sits above the transcript
@@ -726,6 +731,7 @@ function addUser(text) {
   el.textContent = text;
   box().appendChild(el);
   scrollDown();
+  return el;
 }
 
 function addAgent(text, streaming) {
@@ -915,6 +921,23 @@ function renderHistory(thread, window) {
   state.renderedItems = window ? window.end : turns.reduce((n, t) => n + (t.items?.length ?? 0), 0);
 }
 
+// Which file+parser the positions on screen belong to, and how far along that
+// file's change stream this view is. A fetch and the live stream race each
+// other, so deltas that arrive mid-fetch are held and replayed against the
+// response once it lands — otherwise the older response silently undoes them.
+function setCursor(res) {
+  state.generation = res?.generation ?? null;
+  state.revision = res?.revision ?? 0;
+  const held = state.opBuffer ?? [];
+  state.opBuffer = [];
+
+  for (const frame of held) {
+    if (frame.generation === state.generation && frame.revision > state.revision) {
+      applyExternalFrame(frame);
+    }
+  }
+}
+
 // Page backwards through a long thread, prepending older items above the button.
 async function loadEarlier(btn) {
   const t = state.active;
@@ -974,6 +997,39 @@ function renderItemAt(item, index) {
 
     if (node.nodeType === 1) { node.dataset.idx = String(index); }
   }
+}
+
+// One change frame from the server. Ordering and generation are checked here so
+// every path — live, buffered-during-a-fetch, replayed — obeys the same rules.
+function applyExternalFrame(frame) {
+  const { result, ops, generation, revision } = frame;
+
+  if (result !== "ops" && result !== "reset" && result !== "error") { return; }
+
+  if (result === "error") {
+    scheduleExternalRefresh();
+    return;
+  }
+
+  // Mid-fetch: hold it. The response about to land may already include this,
+  // and applying it first would have it overwritten a moment later.
+  if (state.fetching) {
+    state.opBuffer = (state.opBuffer ?? []).concat(frame);
+    return;
+  }
+
+  // A different file or parser: every position on screen means something else
+  // now, so nothing can be patched — only replaced.
+  if (result === "reset" || (generation && state.generation && generation !== state.generation)) {
+    scheduleExternalRefresh();
+    return;
+  }
+
+  // Already reflected in what we drew.
+  if (revision != null && revision <= (state.revision ?? 0)) { return; }
+
+  applyExternalOps(ops ?? []);
+  state.revision = revision ?? state.revision;
 }
 
 // Changes to a thread someone else is driving, as operations rather than "here
@@ -1248,12 +1304,16 @@ async function openThread(t) {
     if (cached.tokens) { $("tokCount").textContent = fmtTokens(cached.tokens) + " tok"; }
   }
 
+  state.fetching = true;
+
   try {
     const res = await api("/api/thread?id=" + encodeURIComponent(t.id) + "&provider=" + encodeURIComponent(t.provider || "codex"));
 
     if (state.active !== t) { return; }
 
     renderHistory(res.thread, res.itemWindow);
+    state.fetching = false;
+    setCursor(res);
     setOfflineNote(false);
     const tu = res.thread?.tokenUsage?.total?.totalTokens ?? res.thread?.turns?.at?.(-1)?.tokenUsage?.total?.totalTokens;
 
@@ -1270,6 +1330,8 @@ async function openThread(t) {
       setLivePill(true, "Running — following live");
     }
   } catch (e) {
+    state.fetching = false;
+
     if (state.active !== t) { return; }
 
     const msg = String(e.message || "");
@@ -1337,16 +1399,15 @@ async function send() {
     return;
   }
 
-  addUser(text);
-  doSend(text);
+  doSend(text, { bubble: addUser(text) });
 }
 
 function enqueue(text) {
-  addUser(text);
+  const bubble = addUser(text);
   const steering = state.sendMode === "steer";
   const c = chip("⏳", steering ? "Steering — interrupting the current turn…" : "Queued — sends when the current turn finishes");
   c.classList.add("pending");
-  state.pending.push({ text, chip: c });
+  state.pending.push({ text, chip: c, bubble });
 
   // Steer forces the running turn to end now; the turn-end handler flushes.
   if (steering) { interruptApi(); }
@@ -1360,13 +1421,19 @@ function flushPending() {
 
   if (next.chip) { next.chip.remove(); }
 
-  doSend(next.text);
+  doSend(next.text, { bubble: next.bubble });
 }
 
 // The actual API call for one message. The user bubble is already rendered.
-async function doSend(text) {
+//
+// requestId is generated once and reused by every retry of this same message, so
+// the ambiguous case — it arrived but the reply was lost on a flaky connection —
+// resolves to the original outcome instead of sending the message twice.
+async function doSend(text, { bubble, requestId } = {}) {
   const m = currentMode();
+  const id = requestId || newRequestId();
   setBusy(true);
+  markSendFailed(bubble, null);
 
   try {
     await api("/api/message", {
@@ -1375,12 +1442,43 @@ async function doSend(text) {
       model: state.model, effort: state.effort,
       mode: m.key, cwd: state.active.cwd, draft: state.active.draft,
       approvalPolicy: m.approvalPolicy, sandbox: m.sandbox,
+      requestId: id,
     });
   } catch (e) {
-    chip("⚠️", "send failed: " + e.message);
     setBusy(false);
+    markSendFailed(bubble, () => doSend(text, { bubble, requestId: id }));
+
+    if (!bubble) { chip("⚠️", "send failed: " + e.message); }
+
     flushPending();
   }
+}
+
+function newRequestId() {
+  return crypto.randomUUID?.() ?? (String(Date.now()) + Math.random().toString(16).slice(2));
+}
+
+// Mark the message that failed, rather than dropping a warning further down the
+// transcript — the thing that didn't send is the thing you tap to retry.
+function markSendFailed(bubble, onRetry) {
+  if (!bubble) { return; }
+
+  bubble.querySelector(".retry")?.remove();
+  bubble.classList.toggle("failed", !!onRetry);
+
+  if (!onRetry) { return; }
+
+  const btn = document.createElement("button");
+  btn.className = "retry";
+  btn.title = "Not sent — tap to retry";
+  btn.textContent = "⟳ Retry";
+  btn.onclick = () => {
+    btn.disabled = true;
+    btn.textContent = "⟳ Sending…";
+    onRetry();
+  };
+  bubble.appendChild(btn);
+  scrollDown();
 }
 
 function setBusy(busy, { external = false } = {}) {
@@ -2178,6 +2276,7 @@ async function resyncOpenThread() {
   const prevTop = b.scrollTop;
 
   state.resyncing = true;
+  state.fetching = true;
 
   // Say what's happening while the fetch is in flight — a thread being followed
   // from elsewhere would otherwise just sit there looking stuck.
@@ -2187,6 +2286,8 @@ async function resyncOpenThread() {
     const res = await api("/api/thread?id=" + encodeURIComponent(t.id) + "&provider=" + encodeURIComponent(t.provider || "codex"));
     state.items = new Map();
     renderHistory(res.thread, res.itemWindow);
+    state.fetching = false;
+    setCursor(res);
 
     if (wasAtBottom) { scrollDown(); } else { b.scrollTop = prevTop; }
 
@@ -2199,6 +2300,7 @@ async function resyncOpenThread() {
     if (e.reach) { setOfflineNote(true, e.reach); }
   } finally {
     state.resyncing = false;
+    state.fetching = false;
   }
 }
 
@@ -2292,13 +2394,7 @@ function connectEvents() {
 
     // The server says explicitly what happened, rather than leaving us to infer
     // it from a missing field — an inference that was quietly doing nothing.
-    if (result === "ops" && Array.isArray(ops) && ops.length) {
-      applyExternalOps(ops);
-    } else if (result === "reset" || result === "error") {
-      // The log was rewritten under us, or we couldn't read it: every position
-      // we hold is suspect, so start again from a fresh tail.
-      scheduleExternalRefresh();
-    }
+    applyExternalFrame(JSON.parse(e.data));
   });
 }
 

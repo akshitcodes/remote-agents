@@ -13,6 +13,7 @@
 // ping. That is far cheaper and less fragile than re-deriving three different
 // streaming formats from their on-disk logs.
 
+import { createHash } from "node:crypto";
 import { existsSync, readdirSync, statSync, openSync, readSync, closeSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -257,6 +258,44 @@ function runningFromFile(provider, path, stat) {
   }
 
   return marker && silentFor <= STALE_AFTER_MS;
+}
+
+// Identity of a thread's log *and* of the code that parses it.
+//
+// Item positions are only meaningful within one generation. A log that is
+// rotated, compacted, truncated-then-regrown, or replaced by a different file at
+// the same path reuses positions that a client already holds, which would splice
+// unrelated content into its transcript. Comparing size alone misses a same-size
+// rewrite, so this pins the inode and fingerprints the head of the file. The
+// schema tag is bumped whenever a parser changes what items a record produces,
+// since that also invalidates every position a client is holding.
+const PARSER_SCHEMA = "1";
+const FINGERPRINT_BYTES = 8192;
+
+export function generationOf(provider, id) {
+  const path = resolvePath(provider, id);
+
+  if (!path) { return null; }
+
+  let fd;
+
+  try {
+    const stat = statSync(path);
+    const length = Math.min(FINGERPRINT_BYTES, stat.size);
+    const buf = Buffer.allocUnsafe(length);
+
+    if (length > 0) {
+      fd = openSync(path, "r");
+      readSync(fd, buf, 0, length, 0);
+    }
+
+    const head = createHash("sha1").update(buf).digest("hex").slice(0, 12);
+    return `${PARSER_SCHEMA}:${stat.dev}:${stat.ino}:${head}`;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) { closeSync(fd); }
+  }
 }
 
 // Point-in-time answer for a set of threads, for the session list.

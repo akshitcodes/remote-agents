@@ -141,7 +141,7 @@ function signature(item) {
   ].join("|");
 }
 
-function snapshotOf(items) {
+function snapshotOf(items, generation, revision) {
   const sigs = new Map();
   const from = Math.max(0, items.length - SIG_WINDOW);
 
@@ -149,14 +149,23 @@ function snapshotOf(items) {
     sigs.set(i, signature(items[i]));
   }
 
-  return { total: items.length, sigs };
+  return { total: items.length, sigs, generation, revision };
 }
 
 // Called when a client is handed a thread, so the very first change afterwards
 // is measured against what it actually received. Without this the first growth
 // established the baseline and was itself thrown away.
+//
+// The reply carries {generation, revision}: generation says which file and
+// parser these positions belong to, revision orders this response against the
+// deltas that follow it — a delta arriving mid-fetch must not be undone by the
+// older response landing afterwards.
 function seedSnapshot(provider, threadId, items) {
-  snapshots.set(metaKey(provider, threadId), snapshotOf(items));
+  const key = metaKey(provider, threadId);
+  const generation = watch.generationOf(provider, threadId);
+  const revision = (snapshots.get(key)?.revision ?? 0) + 1;
+  snapshots.set(key, snapshotOf(items, generation, revision));
+  return { generation, revision };
 }
 
 function diffAgainstSnapshot(prev, items) {
@@ -224,24 +233,30 @@ async function emitExternal({ provider, threadId, running, changed }) {
     const res = await p?.readThread(threadId);
     const items = (res?.thread?.turns ?? []).flatMap((t) => t.items ?? []);
     const prev = snapshots.get(key);
+    const generation = watch.generationOf(provider, threadId);
 
     if (!prev) {
       // Nobody has been handed this thread yet, so there is nothing to diff
       // against. Record where it stands; the client's own read seeds the rest.
-      snapshots.set(key, snapshotOf(items));
+      snapshots.set(key, snapshotOf(items, generation, 1));
+    } else if (generation && prev.generation && generation !== prev.generation) {
+      // Different file, or a parser that now reads it differently. Every index
+      // the client holds refers to something else now.
+      const revision = prev.revision + 1;
+      payload = { ...payload, result: "reset", generation, revision };
+      snapshots.set(key, snapshotOf(items, generation, revision));
     } else {
       const ops = diffAgainstSnapshot(prev, items);
+      const shrank = items.length < prev.total;
+      const revision = prev.revision + (shrank || ops.length ? 1 : 0);
 
-      // Indices only ever grow while a log is appended to. Going backwards means
-      // the file was rewritten or compacted underneath us, and every index the
-      // client holds is now meaningless.
-      if (items.length < prev.total) {
-        payload = { ...payload, result: "reset" };
+      if (shrank) {
+        payload = { ...payload, result: "reset", generation, revision };
       } else if (ops.length) {
-        payload = { ...payload, result: "ops", ops };
+        payload = { ...payload, result: "ops", ops, generation, revision };
       }
 
-      snapshots.set(key, snapshotOf(items));
+      snapshots.set(key, snapshotOf(items, generation, revision));
     }
   } catch {
     // Say so explicitly rather than leaving the app to infer it from a missing
@@ -253,6 +268,47 @@ async function emitExternal({ provider, threadId, running, changed }) {
   }
 
   broadcast("external", payload);
+}
+
+// Sending a message is not safely repeatable, and a phone on a flaky connection
+// cannot tell "never arrived" from "arrived, reply lost". Retrying the second
+// case posts the message twice. So a send carries a client-generated requestId,
+// and a replay of one already accepted returns the original outcome instead of
+// sending again.
+const sendLedger = new Map(); // requestId -> { at, promise }
+const LEDGER_TTL_MS = 10 * 60 * 1000;
+
+async function sendOnce(provider, body) {
+  const requestId = body?.requestId;
+
+  if (!requestId) {
+    return provider.send(body);
+  }
+
+  const now = Date.now();
+
+  for (const [id, entry] of sendLedger) {
+    if (now - entry.at > LEDGER_TTL_MS) { sendLedger.delete(id); }
+  }
+
+  const seen = sendLedger.get(requestId);
+
+  // Await the original in-flight send rather than starting a second one: a
+  // retry that arrives while the first is still running is the common case.
+  if (seen) {
+    return seen.promise;
+  }
+
+  const promise = Promise.resolve(provider.send(body));
+  sendLedger.set(requestId, { at: now, promise });
+
+  try {
+    return await promise;
+  } catch (e) {
+    // A failed send is not a fact worth replaying — let a retry try again.
+    sendLedger.delete(requestId);
+    throw e;
+  }
 }
 
 // The session-file watcher follows only what someone actually has open — the
@@ -704,11 +760,11 @@ const routes = {
     // Seed the delta baseline from exactly what this client is being given, so
     // the next change is measured against it. Paging backwards is not a new
     // baseline — it doesn't move the client's view of the live tail.
-    if (before == null) {
-      seedSnapshot(p.name, id, (full?.thread?.turns ?? []).flatMap((t) => t.items ?? []));
-    }
+    const cursor = before == null
+      ? seedSnapshot(p.name, id, (full?.thread?.turns ?? []).flatMap((t) => t.items ?? []))
+      : { generation: snapshots.get(metaKey(p.name, id))?.generation ?? null, revision: snapshots.get(metaKey(p.name, id))?.revision ?? 0 };
 
-    json(res, 200, tailOfThread(full, before));
+    json(res, 200, { ...tailOfThread(full, before), ...cursor });
   },
 
   "GET /api/models": async (req, res, url) => {
@@ -760,7 +816,7 @@ const routes = {
       return;
     }
 
-    json(res, 200, await p.send(body));
+    json(res, 200, await sendOnce(p, body));
   },
 
   "POST /api/interrupt": async (req, res) => {
