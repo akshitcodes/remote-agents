@@ -81,6 +81,30 @@ export function notePresence({ clientId, provider, ids, visible }) {
   return { ok: true };
 }
 
+// A long session is enormous — one real Codex thread is 11,078 items and 27MB,
+// mostly command output — and sending all of it to a phone to show the last
+// screenful is hopeless on cellular. Serve the end of the thread and let the app
+// page backwards, the way every chat app does.
+const THREAD_PAGE_ITEMS = 150;
+
+function tailOfThread(full, before) {
+  const turns = full?.thread?.turns ?? [];
+  const flat = turns.flatMap((t) => t.items ?? []);
+  const end = before == null ? flat.length : Math.max(0, before);
+  const start = Math.max(0, end - THREAD_PAGE_ITEMS);
+
+  return {
+    ...full,
+    thread: {
+      ...full?.thread,
+      // One turn: the split point is an item index, and re-deriving turn
+      // boundaries for a slice would only be decoration.
+      turns: [{ items: flat.slice(start, end) }],
+    },
+    itemWindow: { start, end, total: flat.length, hasMore: start > 0 },
+  };
+}
+
 // How far into each watched thread the app has already been told about, so a
 // moving thread costs only what the agent just wrote.
 //
@@ -597,7 +621,8 @@ const routes = {
       return;
     }
 
-    json(res, 200, await p.readThread(url.searchParams.get("id")));
+    const full = await p.readThread(url.searchParams.get("id"));
+    json(res, 200, tailOfThread(full, Number(url.searchParams.get("before")) || null));
   },
 
   "GET /api/models": async (req, res, url) => {

@@ -12,7 +12,7 @@
 //
 // app-server stays in the *write* path, where it is genuinely required.
 
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -141,21 +141,30 @@ function commandLabel(payload) {
 }
 
 // Builds the same shapes renderItem() consumes, straight from the log.
-export function itemsFromLines(lines) {
-  const turns = [];
-  const pending = new Map(); // call_id -> item
-  let current = null;
-  let n = 0;
+export function newParseState() {
+  return {
+    turns: [],
+    pending: new Map(), // call_id -> the commandExecution awaiting its output
+    current: null,
+    n: 0,
+  };
+}
 
-  const id = () => `item-${++n}`;
+// Feeds more log lines into an existing parse, so a growing thread is only ever
+// parsed once.
+export function feedLines(st, lines) {
+  const turns = st.turns;
+  const pending = st.pending;
+
+  const id = () => `item-${++st.n}`;
 
   const turn = () => {
-    if (!current) {
-      current = { items: [] };
-      turns.push(current);
+    if (!st.current) {
+      st.current = { items: [] };
+      turns.push(st.current);
     }
 
-    return current;
+    return st.current;
   };
 
   const push = (item) => {
@@ -173,8 +182,8 @@ export function itemsFromLines(lines) {
     if (rec.type === "event_msg") {
       switch (p.type) {
         case "task_started":
-          current = { items: [] };
-          turns.push(current);
+          st.current = { items: [] };
+          turns.push(st.current);
           break;
 
         case "user_message":
@@ -251,16 +260,77 @@ export function itemsFromLines(lines) {
   return turns;
 }
 
-export function readRollout(path) {
-  let raw = "";
+export function itemsFromLines(lines) {
+  const st = newParseState();
+  feedLines(st, lines);
+  return st.turns;
+}
+
+// Parsing a 27MB rollout takes seconds, and a thread being followed is re-read
+// every few seconds. These logs only ever grow, so keep the parse and feed it
+// the appended bytes instead of starting over.
+const parsed = new Map(); // path -> { offset, state, at }
+const MAX_PARSED = 4;
+
+function readFrom(path, start, end) {
+  const length = end - start;
+
+  if (length <= 0) { return ""; }
+
+  const buf = Buffer.allocUnsafe(length);
+  let fd;
 
   try {
-    raw = readFileSync(path, "utf8");
+    fd = openSync(path, "r");
+    readSync(fd, buf, 0, length, start);
+  } catch {
+    return "";
+  } finally {
+    if (fd !== undefined) { closeSync(fd); }
+  }
+
+  return buf.toString("utf8");
+}
+
+export function readRollout(path) {
+  let size = 0;
+
+  try {
+    size = statSync(path).size;
   } catch {
     return { thread: { turns: [] } };
   }
 
-  return { thread: { turns: itemsFromLines(raw.split("\n").filter(Boolean)) } };
+  let entry = parsed.get(path);
+
+  // Shrunk or rewritten (rotation, truncation) — the cached parse is worthless.
+  if (entry && entry.offset > size) { entry = null; }
+
+  if (!entry) {
+    entry = { offset: 0, state: newParseState() };
+    parsed.set(path, entry);
+  }
+
+  if (entry.offset < size) {
+    const chunk = readFrom(path, entry.offset, size);
+    // A trailing partial line must wait for the rest of itself.
+    const cut = chunk.lastIndexOf("\n");
+
+    if (cut >= 0) {
+      feedLines(entry.state, chunk.slice(0, cut).split("\n").filter(Boolean));
+      entry.offset += Buffer.byteLength(chunk.slice(0, cut + 1), "utf8");
+    }
+  }
+
+  entry.at = Date.now();
+
+  if (parsed.size > MAX_PARSED) {
+    const oldest = [...parsed.entries()].sort((a, b) => (a[1].at ?? 0) - (b[1].at ?? 0))[0];
+
+    if (oldest) { parsed.delete(oldest[0]); }
+  }
+
+  return { thread: { turns: entry.state.turns } };
 }
 
 export function findRollout(id) {

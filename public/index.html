@@ -69,6 +69,8 @@
   .chip.time { background: none; padding-left: 0; }
   .chip.run-badge { display: inline-flex; align-items: center; gap: 5px; color: var(--accent); background: #2ea04322; }
   .run-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: pulse 1.3s ease-in-out infinite; }
+  .loadearlier { display: block; margin: 4px auto 14px; background: var(--bg3); border: 1px solid var(--border); color: var(--accent2); padding: 7px 16px; border-radius: 10px; font-size: 13px; cursor: pointer; }
+  .loadearlier:disabled { color: var(--fg-dim); cursor: default; }
   /* "this turn is being driven somewhere else" — sits above the transcript
      without covering it, so a running thread never looks frozen. */
   /* Floats over the transcript rather than living in it: #messages is the
@@ -879,8 +881,20 @@ function addFileChangeChip(item) {
   });
 }
 
-function renderHistory(thread) {
+function renderHistory(thread, window) {
   box().innerHTML = "";
+
+  // Only the end of a long thread is sent; offer the rest rather than pretending
+  // this is the whole conversation.
+  if (window?.hasMore) {
+    const more = document.createElement("button");
+    more.id = "loadEarlier";
+    more.className = "loadearlier";
+    more.textContent = "Load earlier messages";
+    more.onclick = () => loadEarlier(more);
+    box().appendChild(more);
+  }
+
   const turns = thread.turns ?? [];
   turns.forEach((turn, ti) => {
     if (ti > 0) { const s = document.createElement("div"); s.className = "turn-sep"; box().appendChild(s); }
@@ -889,9 +903,55 @@ function renderHistory(thread) {
   });
   registerFilesFromEl(box());
   scrollDown();
-  // How far through the thread we've drawn, so appended items can be matched by
-  // position — see appendExternalItems.
-  state.renderedItems = turns.reduce((n, t) => n + (t.items?.length ?? 0), 0);
+  // How far through the thread we've drawn. This is an *absolute* position in
+  // the whole thread, not a count of what's on screen, because that's what
+  // appended items are numbered against — see appendExternalItems.
+  state.itemWindow = window ?? null;
+  state.renderedItems = window ? window.end : turns.reduce((n, t) => n + (t.items?.length ?? 0), 0);
+}
+
+// Page backwards through a long thread, prepending older items above the button.
+async function loadEarlier(btn) {
+  const t = state.active;
+  const w = state.itemWindow;
+
+  if (!t || !w?.hasMore || btn.disabled) { return; }
+
+  btn.disabled = true;
+  btn.textContent = "Loading earlier messages…";
+
+  try {
+    const res = await api(`/api/thread?id=${encodeURIComponent(t.id)}&provider=${encodeURIComponent(t.provider || "codex")}&before=${w.start}`);
+    const older = (res.thread?.turns ?? []).flatMap((x) => x.items ?? []);
+    const b = box();
+    const anchorFromBottom = b.scrollHeight - b.scrollTop;
+
+    // Render into a fragment, then splice it in above the button so the reader's
+    // position doesn't jump.
+    const marker = document.createComment("older");
+    b.insertBefore(marker, btn.nextSibling);
+    const tail = [];
+
+    while (marker.nextSibling) { tail.push(b.removeChild(marker.nextSibling)); }
+
+    for (const item of older) { renderItem(item); }
+
+    for (const node of tail) { b.appendChild(node); }
+
+    marker.remove();
+    state.itemWindow = res.itemWindow ?? { ...w, start: 0, hasMore: false };
+    b.scrollTop = b.scrollHeight - anchorFromBottom;
+
+    if (state.itemWindow.hasMore) {
+      btn.disabled = false;
+      btn.textContent = "Load earlier messages";
+    } else {
+      btn.remove();
+    }
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = "Couldn't load earlier — tap to retry";
+  }
 }
 
 // New work appended to a thread someone else is driving. Only the items we
@@ -1139,7 +1199,7 @@ async function openThread(t) {
 
     if (state.active !== t) { return; }
 
-    renderHistory(res.thread);
+    renderHistory(res.thread, res.itemWindow);
     setOfflineNote(false);
     const tu = res.thread?.tokenUsage?.total?.totalTokens ?? res.thread?.turns?.at?.(-1)?.tokenUsage?.total?.totalTokens;
 
@@ -2072,7 +2132,7 @@ async function resyncOpenThread() {
   try {
     const res = await api("/api/thread?id=" + encodeURIComponent(t.id) + "&provider=" + encodeURIComponent(t.provider || "codex"));
     state.items = new Map();
-    renderHistory(res.thread);
+    renderHistory(res.thread, res.itemWindow);
 
     if (wasAtBottom) { scrollDown(); } else { b.scrollTop = prevTop; }
 
