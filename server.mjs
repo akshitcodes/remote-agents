@@ -114,7 +114,71 @@ function tailOfThread(full, before) {
 // records of completed work, so the delta is always *new items* — never
 // rewritten ones — and position is a stable identity even where the items
 // themselves have no id (Claude's have gaps and duplicates).
-const sentItems = new Map(); // "provider:threadId" -> items already delivered
+// What each watched thread looked like last time we told a client about it.
+//
+// An earlier design sent "everything past index N", assuming a change is always
+// an appended item. That is wrong: every provider's parser *mutates* an earlier
+// commandExecution when its output record arrives (codex-rollout.mjs:253,
+// claude.mjs:517, grok.mjs:713). The item count does not move, so no delta was
+// sent and a command stayed "running" with no output on the phone forever.
+//
+// So the stream carries operations — append and replace — and a cheap signature
+// per position is kept to notice in-place changes.
+const snapshots = new Map(); // "provider:threadId" -> { total, sigs: Map(index -> string) }
+
+// Only positions a client could still have on screen are worth tracking; the
+// window it was served is 150.
+const SIG_WINDOW = 400;
+
+function signature(item) {
+  return [
+    item?.type ?? "",
+    (item?.text ?? "").length,
+    (item?.aggregatedOutput ?? "").length,
+    item?.status ?? "",
+    item?.exitCode ?? "",
+    (item?.changes?.length ?? 0),
+  ].join("|");
+}
+
+function snapshotOf(items) {
+  const sigs = new Map();
+  const from = Math.max(0, items.length - SIG_WINDOW);
+
+  for (let i = from; i < items.length; i++) {
+    sigs.set(i, signature(items[i]));
+  }
+
+  return { total: items.length, sigs };
+}
+
+// Called when a client is handed a thread, so the very first change afterwards
+// is measured against what it actually received. Without this the first growth
+// established the baseline and was itself thrown away.
+function seedSnapshot(provider, threadId, items) {
+  snapshots.set(metaKey(provider, threadId), snapshotOf(items));
+}
+
+function diffAgainstSnapshot(prev, items) {
+  const ops = [];
+
+  for (let i = Math.max(0, items.length - SIG_WINDOW); i < items.length; i++) {
+    if (i >= prev.total) {
+      ops.push({ op: "append", index: i, item: items[i] });
+      continue;
+    }
+
+    const before = prev.sigs.get(i);
+
+    // Outside the tracked window we cannot tell, and the client has almost
+    // certainly scrolled past it anyway.
+    if (before !== undefined && before !== signature(items[i])) {
+      ops.push({ op: "replace", index: i, item: items[i] });
+    }
+  }
+
+  return ops;
+}
 
 // Reading a thread is NOT free, and for Codex it is not even local: it is a
 // JSON-RPC round trip to codex app-server that returns the entire thread. Doing
@@ -153,24 +217,36 @@ async function emitExternal({ provider, threadId, running, changed }) {
   }
 
   reading.add(key);
-  let payload = { provider, threadId, running };
+  let payload = { provider, threadId, running, result: "unchanged" };
 
   try {
     const p = providers[provider];
     const res = await p?.readThread(threadId);
     const items = (res?.thread?.turns ?? []).flatMap((t) => t.items ?? []);
+    const prev = snapshots.get(key);
 
-    // First sighting establishes the baseline: the app just read the thread
-    // itself, so replaying its history back at it would only duplicate it.
-    const already = sentItems.get(key) ?? items.length;
+    if (!prev) {
+      // Nobody has been handed this thread yet, so there is nothing to diff
+      // against. Record where it stands; the client's own read seeds the rest.
+      snapshots.set(key, snapshotOf(items));
+    } else {
+      const ops = diffAgainstSnapshot(prev, items);
 
-    if (items.length > already) {
-      payload = { ...payload, from: already, items: items.slice(already) };
+      // Indices only ever grow while a log is appended to. Going backwards means
+      // the file was rewritten or compacted underneath us, and every index the
+      // client holds is now meaningless.
+      if (items.length < prev.total) {
+        payload = { ...payload, result: "reset" };
+      } else if (ops.length) {
+        payload = { ...payload, result: "ops", ops };
+      }
+
+      snapshots.set(key, snapshotOf(items));
     }
-
-    sentItems.set(key, items.length);
   } catch {
-    // Couldn't re-read it — the bare ping still tells the app to refresh.
+    // Say so explicitly rather than leaving the app to infer it from a missing
+    // field — that inference was silently doing nothing.
+    payload = { ...payload, result: "error" };
   } finally {
     reading.delete(key);
     lastRead.set(key, Date.now());
@@ -200,8 +276,8 @@ function refreshInterest() {
 
   const live = new Set(wanted.map((w) => metaKey(w.provider, w.id)));
 
-  for (const k of sentItems.keys()) {
-    if (!live.has(k)) { sentItems.delete(k); }
+  for (const k of snapshots.keys()) {
+    if (!live.has(k)) { snapshots.delete(k); }
   }
 }
 
@@ -621,8 +697,18 @@ const routes = {
       return;
     }
 
-    const full = await p.readThread(url.searchParams.get("id"));
-    json(res, 200, tailOfThread(full, Number(url.searchParams.get("before")) || null));
+    const id = url.searchParams.get("id");
+    const full = await p.readThread(id);
+    const before = Number(url.searchParams.get("before")) || null;
+
+    // Seed the delta baseline from exactly what this client is being given, so
+    // the next change is measured against it. Paging backwards is not a new
+    // baseline — it doesn't move the client's view of the live tail.
+    if (before == null) {
+      seedSnapshot(p.name, id, (full?.thread?.turns ?? []).flatMap((t) => t.items ?? []));
+    }
+
+    json(res, 200, tailOfThread(full, before));
   },
 
   "GET /api/models": async (req, res, url) => {

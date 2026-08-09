@@ -896,10 +896,15 @@ function renderHistory(thread, window) {
   }
 
   const turns = thread.turns ?? [];
+
+  // Absolute positions in the whole thread, since only a window of it is served
+  // and later changes address items by absolute index.
+  let base = window?.start ?? 0;
+
   turns.forEach((turn, ti) => {
     if (ti > 0) { const s = document.createElement("div"); s.className = "turn-sep"; box().appendChild(s); }
 
-    for (const item of turn.items ?? []) { renderItem(item); }
+    for (const item of turn.items ?? []) { renderItemAt(item, base++); }
   });
   registerFilesFromEl(box());
   scrollDown();
@@ -934,7 +939,9 @@ async function loadEarlier(btn) {
 
     while (marker.nextSibling) { tail.push(b.removeChild(marker.nextSibling)); }
 
-    for (const item of older) { renderItem(item); }
+    let olderBase = res.itemWindow?.start ?? 0;
+
+    for (const item of older) { renderItemAt(item, olderBase++); }
 
     for (const node of tail) { b.appendChild(node); }
 
@@ -954,27 +961,74 @@ async function loadEarlier(btn) {
   }
 }
 
-// New work appended to a thread someone else is driving. Only the items we
-// haven't drawn arrive, so this stays cheap no matter how long the thread is.
-function appendExternalItems(from, items) {
-  state.renderedItems = state.renderedItems ?? 0;
+// Draw one item and label the elements it produced with its position in the
+// thread, so a later change to that item can find and replace them. One item can
+// render as several nodes, or none at all.
+function renderItemAt(item, index) {
+  const b = box();
+  const before = b.childNodes.length;
+  renderItem(item);
 
-  // A gap means we missed something — fall back to re-reading the whole thread.
-  if (from > state.renderedItems) {
-    scheduleExternalRefresh();
-    return;
+  for (let i = before; i < b.childNodes.length; i++) {
+    const node = b.childNodes[i];
+
+    if (node.nodeType === 1) { node.dataset.idx = String(index); }
   }
+}
 
-  const fresh = items.slice(state.renderedItems - from);
-
-  if (!fresh.length) { return; }
-
+// Changes to a thread someone else is driving, as operations rather than "here
+// is everything past N" — because a tool result *modifies* the command item that
+// is already on screen rather than appending anything. Blind appending left
+// those commands running forever with no output.
+function applyExternalOps(ops) {
   const b = box();
   const wasAtBottom = b.scrollHeight - b.scrollTop - b.clientHeight < 120;
+  let drew = false;
 
-  for (const item of fresh) { renderItem(item); }
+  for (const { op, index, item } of ops) {
+    if (op === "append") {
+      // Anything before what we've drawn is already there; a gap means we missed
+      // an event, so re-read rather than render out of order.
+      if (index < state.renderedItems) { continue; }
 
-  state.renderedItems += fresh.length;
+      if (index > state.renderedItems) {
+        scheduleExternalRefresh();
+        return;
+      }
+
+      renderItemAt(item, index);
+      state.renderedItems = index + 1;
+      drew = true;
+      continue;
+    }
+
+    if (op === "replace") {
+      const existing = [...b.querySelectorAll(`[data-idx="${index}"]`)];
+
+      // Not on screen — it's above the window this client loaded.
+      if (!existing.length) { continue; }
+
+      const anchor = existing[0];
+      const added = [];
+      const before = b.childNodes.length;
+      renderItem(item);
+
+      for (let i = before; i < b.childNodes.length; i++) { added.push(b.childNodes[i]); }
+
+      for (const node of added) {
+        if (node.nodeType === 1) { node.dataset.idx = String(index); }
+
+        b.insertBefore(node, anchor);
+      }
+
+      for (const node of existing) { node.remove(); }
+
+      drew = true;
+    }
+  }
+
+  if (!drew) { return; }
+
   registerFilesFromEl(b);
   setLivePill(state.externalTurn, "Running — following live");
 
@@ -2222,7 +2276,7 @@ function connectEvents() {
   // another device. The server watches the CLI's own session file and tells us
   // when it moves; re-reading the thread *is* the stream for those turns.
   es.addEventListener("external", (e) => {
-    const { provider, threadId, running, changed, items, from } = JSON.parse(e.data);
+    const { provider, threadId, running, result, ops } = JSON.parse(e.data);
     const open = state.active && (threadId === state.active.id || threadId === state.active.draftId);
 
     // A turn we started here is the authority on its own state. The session file
@@ -2236,11 +2290,13 @@ function connectEvents() {
 
     if (running) { setBusy(true, { external: true }); }
 
-    // The server sends just what was appended; only fall back to re-reading the
-    // whole thread when it couldn't work out a delta.
-    if (Array.isArray(items) && items.length) {
-      appendExternalItems(from, items);
-    } else if (changed) {
+    // The server says explicitly what happened, rather than leaving us to infer
+    // it from a missing field — an inference that was quietly doing nothing.
+    if (result === "ops" && Array.isArray(ops) && ops.length) {
+      applyExternalOps(ops);
+    } else if (result === "reset" || result === "error") {
+      // The log was rewritten under us, or we couldn't read it: every position
+      // we hold is suspect, so start again from a fresh tail.
       scheduleExternalRefresh();
     }
   });

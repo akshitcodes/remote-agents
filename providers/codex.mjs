@@ -6,11 +6,55 @@
 // so notifications are passed through unchanged.
 
 import { spawn } from "node:child_process";
-import { basename } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, join } from "node:path";
 
 import * as rollout from "../codex-rollout.mjs";
 
 const PAGE_SIZE = 25;
+
+// Which `codex` to talk to.
+//
+// Every Codex on this machine shares one state directory (~/.codex: sessions,
+// auth, model cache), but they are not interchangeable. Codex Desktop ships its
+// own build and writes that state in its own format; an older `codex` on PATH
+// then fails to parse it and dies during startup — "failed to load models cache:
+// missing field `base_instructions`" — taking every RPC down with it, while the
+// desktop app carries on working. Observed here: app 0.147.0-alpha.6.5 vs
+// Homebrew 0.145.0, with sessions recording the former.
+//
+// So prefer the binary that is actually writing the sessions we read.
+const APP_CODEX = "/Applications/ChatGPT.app/Contents/Resources/codex";
+let resolvedBinary = null;
+
+function codexBinary() {
+  if (resolvedBinary) { return resolvedBinary; }
+
+  const configured = readConfig().codexBinary;
+
+  if (configured) {
+    resolvedBinary = configured;
+  } else if (existsSync(APP_CODEX)) {
+    resolvedBinary = APP_CODEX;
+  } else {
+    resolvedBinary = "codex";
+  }
+
+  if (resolvedBinary !== "codex") {
+    console.error(`[codex] using ${resolvedBinary}`);
+  }
+
+  return resolvedBinary;
+}
+
+function readConfig() {
+  try {
+    return JSON.parse(readFileSync(join(homedir(), ".codex-phone", "config.json"), "utf8"));
+  } catch {
+    return {};
+  }
+}
 
 import { BaseProvider, makeLineReader } from "./base.mjs";
 
@@ -101,7 +145,7 @@ export class CodexProvider extends BaseProvider {
   }
 
   startChild() {
-    this.child = spawn("codex", ["app-server"], { stdio: ["pipe", "pipe", "pipe"] });
+    this.child = spawn(codexBinary(), ["app-server"], { stdio: ["pipe", "pipe", "pipe"] });
     this.feed = makeLineReader((line) => this.handleChildLine(line));
 
     // A missing/unlaunchable `codex` must not crash the bridge (Claude may still
