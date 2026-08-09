@@ -64,9 +64,25 @@ export function sessionHeldElsewhere(sessionId, { ownPid = process.pid } = {}) {
 
     const pid = Number(m[1]);
     const ppid = Number(m[2]);
+    const cmd = m[3];
 
     // Ours, or us.
     if (pid === ownPid || ppid === ownPid) {
+      continue;
+    }
+
+    // Only an agent CLI can hold a session. Plenty of unrelated processes
+    // mention a session id in passing — an HTTP request carrying it in the
+    // query string, a log tail, an editor — and counting those would refuse to
+    // warm anything. This caught itself in testing: the curl issuing the read
+    // was matching its own URL.
+    if (!/(^|\/)(claude|node)\b/.test(cmd) || !/claude/.test(cmd)) {
+      continue;
+    }
+
+    // The holder runs the session; a command that merely names it (a grep, a
+    // curl, an editor opening the transcript) does not.
+    if (!/--resume\b|--session-id\b|--continue\b/.test(cmd)) {
       continue;
     }
 
