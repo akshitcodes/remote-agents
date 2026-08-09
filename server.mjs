@@ -92,6 +92,17 @@ export function notePresence({ clientId, provider, ids, visible }) {
 // themselves have no id (Claude's have gaps and duplicates).
 const sentItems = new Map(); // "provider:threadId" -> items already delivered
 
+// Reading a thread is NOT free, and for Codex it is not even local: it is a
+// JSON-RPC round trip to codex app-server that returns the entire thread. Doing
+// that once a second per open thread saturates the pipe — the bridge sat at 75%
+// CPU and app-server stopped answering at all. So: one read at a time per
+// thread, no more often than this, with a trailing read so the last chunk of a
+// turn is never left behind.
+const MIN_READ_MS = 4000;
+const reading = new Set();
+const lastRead = new Map();
+const trailing = new Map();
+
 async function emitExternal({ provider, threadId, running, changed }) {
   const key = metaKey(provider, threadId);
 
@@ -100,6 +111,24 @@ async function emitExternal({ provider, threadId, running, changed }) {
     return;
   }
 
+  const since = Date.now() - (lastRead.get(key) ?? 0);
+
+  if (reading.has(key) || since < MIN_READ_MS) {
+    // Coalesce: report liveness now (without `changed`, so the app doesn't fall
+    // back to re-reading the whole thread) and pick the content up shortly.
+    broadcast("external", { provider, threadId, running });
+
+    if (!trailing.has(key)) {
+      trailing.set(key, setTimeout(() => {
+        trailing.delete(key);
+        emitExternal({ provider, threadId, running, changed: true });
+      }, Math.max(0, MIN_READ_MS - since) + 100));
+    }
+
+    return;
+  }
+
+  reading.add(key);
   let payload = { provider, threadId, running };
 
   try {
@@ -118,6 +147,9 @@ async function emitExternal({ provider, threadId, running, changed }) {
     sentItems.set(key, items.length);
   } catch {
     // Couldn't re-read it — the bare ping still tells the app to refresh.
+  } finally {
+    reading.delete(key);
+    lastRead.set(key, Date.now());
   }
 
   broadcast("external", payload);

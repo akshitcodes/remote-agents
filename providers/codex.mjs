@@ -8,6 +8,10 @@
 import { spawn } from "node:child_process";
 import { basename } from "node:path";
 
+import * as rollout from "../codex-rollout.mjs";
+
+const PAGE_SIZE = 25;
+
 import { BaseProvider, makeLineReader } from "./base.mjs";
 
 const APPROVAL_METHODS = new Set([
@@ -201,37 +205,51 @@ export class CodexProvider extends BaseProvider {
     this.resumedThreads.add(threadId);
   }
 
+  // Reading comes from the rollout logs, not app-server. Listing and reading a
+  // transcript need no auth, no model cache and no MCP servers, but app-server
+  // needs all three to start — so routing reads through it made the whole app
+  // hang whenever one of them stalled. See codex-rollout.mjs.
   async listThreads({ search, cursor } = {}) {
-    await this.ready();
-    const params = { limit: 25 };
-    params.sortKey = "recency_at";
+    const offset = Number(cursor) || 0;
+    const q = (search ?? "").toLowerCase();
+    const rows = [];
 
-    if (cursor) {
-      params.cursor = cursor;
+    for (const file of rollout.listRolloutFiles()) {
+      const summary = rollout.summarize(file);
+
+      if (!summary) { continue; }
+
+      if (q && !summary.preview.toLowerCase().includes(q) && !(summary.cwd ?? "").toLowerCase().includes(q)) {
+        continue;
+      }
+
+      rows.push(summary);
+
+      // Stop as soon as this page is filled; a full scan of every session ever
+      // is wasted work when 25 rows are on screen.
+      if (rows.length >= offset + PAGE_SIZE + 1) { break; }
     }
 
-    if (search) {
-      params.searchTerm = search;
-    }
-
-    const res = await this.rpc("thread/list", params);
-    const data = (res.data ?? []).map((t) => ({ ...t, provider: "codex" }));
-    return { ...res, data };
+    const page = rows.slice(offset, offset + PAGE_SIZE);
+    const nextCursor = rows.length > offset + PAGE_SIZE ? String(offset + PAGE_SIZE) : null;
+    return { data: page, nextCursor };
   }
 
   async readThread(id) {
-    await this.ready();
-    const result = await this.rpc("thread/read", { threadId: id, includeTurns: true });
+    const path = rollout.findRollout(id);
 
-    // Prewarm: resume the thread in the app-server as soon as it's opened, so the
-    // first send doesn't pay the resume/history-replay cost. Fire-and-forget;
-    // per-turn approvalPolicy/sandboxPolicy on turn/start still governs each turn
-    // (matches how brand-new threads are marked resumed without a session policy).
-    if (!this.resumedThreads.has(id)) {
-      this.ensureResumed(id).catch(() => {});
+    if (!path) {
+      throw Object.assign(new Error("thread not found"), { status: 404 });
     }
 
-    return result;
+    // Prewarm app-server for the *write* path, so the first send doesn't pay the
+    // resume cost. Fire-and-forget, and never awaited: reading must not depend
+    // on it being healthy.
+    if (!this.resumedThreads.has(id)) {
+      this.ready().then(() => this.ensureResumed(id)).catch(() => {});
+    }
+
+    return rollout.readRollout(path);
   }
 
   async models() {
