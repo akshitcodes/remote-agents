@@ -719,24 +719,10 @@ export class GrokProvider extends BaseProvider {
       }
     }
 
-    // Prewarm the ACP process so the first send on this thread is warm. Use the
-    // default model/effort the UI sends by default, so the common case reuses the
-    // prewarmed process instead of respawning on a model/effort mismatch. (If the
-    // user picked a non-default effort, the first send recreates — still correct.)
-    try {
-      if (!this.sessions.has(id)) {
-        const defaultModel = (MODELS.find((m) => m.isDefault) ?? MODELS[0])?.id;
-        this.ensureSession(id, {
-          cwd: this.cwdForSession(id),
-          model: defaultModel,
-          effort: "high",
-          isDraft: false,
-        });
-      }
-    } catch {
-      // ignore prewarm failures
-    }
-
+    // Deliberately no prewarm — same reason as Claude and Codex. Loading a
+    // session attaches a second controller to a thread that may be live in a
+    // terminal, and viewing a transcript should never touch the session it is
+    // showing. The first send pays the spawn instead.
     return { thread: { turns } };
   }
 

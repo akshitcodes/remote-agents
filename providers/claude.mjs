@@ -546,21 +546,13 @@ export class ClaudeProvider extends BaseProvider {
       }
     }
 
-    // Prewarm the stream-json process so the first send on this thread is warm.
-    try {
-      if (!this.sessions.has(id)) {
-        this.ensureSession(id, {
-          cwd: this.cwdForSession(id),
-          model: undefined,
-          effort: undefined,
-          modeKey: undefined,
-          isDraft: false,
-        });
-      }
-    } catch {
-      // ignore prewarm failures
-    }
-
+    // Deliberately no prewarm. Opening a thread used to spawn
+    // `claude -p --resume <id>` for it, which puts a *second* controller on a
+    // session that may be live in a terminal or the VS Code extension — and that
+    // process carries the PreToolUse approval hook, so the original session's
+    // tool calls started waiting on a phone approval nobody knew to give and
+    // came back denied. Simply viewing a thread must not touch it: reading is a
+    // file operation, and a writer is started only by an explicit send.
     return { thread: { turns } };
   }
 
