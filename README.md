@@ -221,8 +221,17 @@ streaming · model & effort selectors · **provider-specific permission modes** 
 reasoning · live command output · diffs · **markdown/code file viewer**
 (syntax-highlighted — tap any file path an agent links) · interactive approvals · **queue / steer** messages
 mid-turn · stop · live token counter · usage & rate limits · new-session flow ·
-**live running-thread status** (incl. turns started on the Mac) · rich sanitized
+**live running-thread status** · rich sanitized
 markdown. Codex, Claude, and Grok share all of it.
+
+**Turns you started somewhere else.** A turn begun in a terminal, in an IDE, or
+from another device belongs to a different process, so none of its output
+reaches this bridge. Instead the server watches that CLI's own session file for
+the threads you have open, and the app re-reads the thread whenever it moves —
+so a thread running on your Mac streams to your phone (about a second behind)
+instead of sitting frozen until you close and reopen it. Those threads are
+badged **running** in the session list too, which is read off disk, so it is
+right even for turns that started before you opened the app.
 
 **Notifications.** Turn them on in **Usage → Notifications** and your phone buzzes
 when a turn finishes — thread title plus the start of the reply, tap to jump

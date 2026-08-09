@@ -69,12 +69,18 @@
   .chip.time { background: none; padding-left: 0; }
   .chip.run-badge { display: inline-flex; align-items: center; gap: 5px; color: var(--accent); background: #2ea04322; }
   .run-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: pulse 1.3s ease-in-out infinite; }
+  /* "this turn is being driven somewhere else" — sits above the transcript
+     without covering it, so a running thread never looks frozen. */
+  /* Floats over the transcript rather than living in it: #messages is the
+     scroller and is rebuilt on every render, which would wipe the pill. */
+  #livePill { display: none; position: absolute; top: 8px; left: 50%; transform: translateX(-50%); z-index: 6; max-width: 92%; align-items: center; gap: 6px; font-size: 11px; font-weight: 600; color: var(--accent); background: #12351bee; border: 1px solid #2ea04366; border-radius: 20px; padding: 5px 12px; box-shadow: 0 2px 10px #0006; white-space: nowrap; }
+  body.livesync #livePill { display: flex; }
   @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
   #loadMore { display: block; margin: 14px auto calc(env(safe-area-inset-bottom) + 20px); background: var(--bg3); border: 1px solid var(--border); color: var(--accent2); padding: 9px 22px; border-radius: 10px; font-size: 14px; cursor: pointer; }
   .empty { text-align: center; color: var(--fg-dim); padding: 40px 20px; }
 
   /* chat view */
-  #chatView { flex: 1; display: none; flex-direction: column; min-height: 0; max-width: 100%; overflow-x: hidden; }
+  #chatView { flex: 1; display: none; flex-direction: column; min-height: 0; max-width: 100%; overflow-x: hidden; position: relative; }
   #messages { flex: 1; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; padding: 14px 12px; }
   .msg { max-width: 88%; margin-bottom: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
   .msg.md { white-space: normal; }
@@ -268,6 +274,7 @@
 
   <div id="chatView">
     <div id="messages"></div>
+    <div id="livePill"><span class="run-dot"></span><span id="livePillText">Running — following along…</span></div>
     <div id="approval">
       <div class="q" id="apprTitle">Approval requested</div>
       <div class="cmd mono" id="apprBody"></div>
@@ -672,6 +679,15 @@ async function loadThreads(append) {
 
     state.threads = append ? state.threads.concat(res.data) : res.data;
     state.nextCursor = res.nextCursor;
+
+    // The server read each thread's run state off disk, which is the only way to
+    // know about turns that were already under way before this app connected.
+    for (const t of res.data ?? []) {
+      const ourTurn = state.active && t.id === state.active.id && state.busy && !state.externalTurn;
+
+      if (!ourTurn) { markRunning(provider, t.id, !!t.running); }
+    }
+
     renderRows(append);
     setOfflineNote(false);
 
@@ -1075,6 +1091,13 @@ async function openThread(t) {
 
   if (state.active !== t) { return; }
 
+  // If it's mid-turn, say so before the fetch lands: the cached copy on screen
+  // is a snapshot, and without this a busy thread reads as a finished one.
+  if (t.running || isRunning(t.provider, t.id)) {
+    setBusy(true, { external: true });
+    setLivePill(true, "Running — catching up…");
+  }
+
   if (cached?.thread) {
     renderHistory(cached.thread);
 
@@ -1095,8 +1118,13 @@ async function openThread(t) {
     idbSet(cacheKey, { thread: trimThreadForCache(res.thread), updatedAt: t.updatedAt, tokens: tu ?? cached?.tokens ?? null, cachedAt: Date.now() });
 
     // If a turn is already running on this thread (e.g. started on the Mac),
-    // reflect it: show the stop button and let live events stream in.
-    if (isRunning(t.provider, t.id)) { setBusy(true); }
+    // reflect it: show the stop button and let the watcher stream it in.
+    // Opening a thread is never how one of our own turns starts, so anything
+    // running here is being driven elsewhere.
+    if (isRunning(t.provider, t.id)) {
+      setBusy(true, { external: true });
+      setLivePill(true, "Running — following live");
+    }
   } catch (e) {
     if (state.active !== t) { return; }
 
@@ -1211,10 +1239,22 @@ async function doSend(text) {
   }
 }
 
-function setBusy(busy) {
+function setBusy(busy, { external = false } = {}) {
   state.busy = busy;
+
+  // A turn driven elsewhere (a terminal, an IDE, another device) reaches us by
+  // re-reading the session file, not by streaming — so resync must stay allowed
+  // for it, unlike a turn we are streaming ourselves.
+  state.externalTurn = busy && external;
   // Send stays enabled while busy so messages can be queued or used to steer.
   $("stopBtn").style.display = busy ? "flex" : "none";
+  setLivePill(state.externalTurn);
+}
+
+function setLivePill(on, text) {
+  document.body.classList.toggle("livesync", !!on);
+
+  if (text) { $("livePillText").textContent = text; }
 }
 
 // Low-level interrupt (used by both Stop and Steer).
@@ -1921,6 +1961,24 @@ async function openUsageSheet() {
 }
 
 // ---------- running-thread tracking ----------
+// Re-reading the whole thread is how an external turn "streams", so it has to be
+// throttled — an agent mid-turn rewrites its log many times a second.
+const EXTERNAL_REFRESH_MS = 1500;
+let externalRefreshAt = 0;
+let externalRefreshTimer = null;
+
+function scheduleExternalRefresh() {
+  if (externalRefreshTimer) { return; }
+
+  const wait = Math.max(0, EXTERNAL_REFRESH_MS - (Date.now() - externalRefreshAt));
+
+  externalRefreshTimer = setTimeout(() => {
+    externalRefreshTimer = null;
+    externalRefreshAt = Date.now();
+    resyncOpenThread();
+  }, wait);
+}
+
 function runKey(provider, tid) { return (provider || "codex") + ":" + tid; }
 
 function isRunning(provider, tid) { return state.running.has(runKey(provider, tid)); }
@@ -1963,10 +2021,17 @@ async function resyncOpenThread() {
 
   if (!t || t.draft || state.resyncing) { return; }
 
-  // Don't clobber a turn we're actively streaming — its live deltas are truth.
-  if (state.busy) {
+  // Don't clobber a turn we're streaming ourselves — its live deltas are truth.
+  // An external turn is the opposite case: re-reading is the only way to see it.
+  if (state.busy && !state.externalTurn) {
     return;
   }
+
+  // Following along at the bottom should keep following; someone reading back
+  // through the transcript should stay where they are.
+  const b = box();
+  const wasAtBottom = b.scrollHeight - b.scrollTop - b.clientHeight < 120;
+  const prevTop = b.scrollTop;
 
   state.resyncing = true;
 
@@ -1975,7 +2040,9 @@ async function resyncOpenThread() {
     state.items = new Map();
     renderHistory(res.thread);
 
-    if (isRunning(t.provider, t.id)) { setBusy(true); }
+    if (wasAtBottom) { scrollDown(); } else { b.scrollTop = prevTop; }
+
+    if (isRunning(t.provider, t.id)) { setBusy(true, { external: state.externalTurn }); }
   } catch (e) {
     // Unreachable or transient — keep whatever's on screen, but say why it's stale.
     if (e.reach) { setOfflineNote(true, e.reach); }
@@ -2053,6 +2120,27 @@ function connectEvents() {
     if (!a.params?.threadId || (state.active && a.params.threadId === state.active.id)) { showApproval(a); }
   });
   es.addEventListener("notify", (e) => { const { method, params, provider } = JSON.parse(e.data); onNotify(method, params, provider); });
+
+  // A turn this bridge never started — begun in a terminal, an IDE, or on
+  // another device. The server watches the CLI's own session file and tells us
+  // when it moves; re-reading the thread *is* the stream for those turns.
+  es.addEventListener("external", (e) => {
+    const { provider, threadId, running, changed } = JSON.parse(e.data);
+    const open = state.active && (threadId === state.active.id || threadId === state.active.draftId);
+
+    // A turn we started here is the authority on its own state. The session file
+    // lags it — at the start of a turn it still holds the *previous* turn's end
+    // marker — and acting on that would tear down the live UI mid-stream.
+    if (open && state.busy && !state.externalTurn) { return; }
+
+    markRunning(provider, threadId, running);
+
+    if (!open) { return; }
+
+    if (running) { setBusy(true, { external: true }); }
+
+    if (changed) { scheduleExternalRefresh(); }
+  });
 }
 
 // ---------- init ----------

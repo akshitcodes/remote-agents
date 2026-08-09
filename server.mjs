@@ -11,6 +11,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve, sep, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import * as watch from "./watch.mjs";
 import { CodexProvider } from "./providers/codex.mjs";
 import { ClaudeProvider } from "./providers/claude.mjs";
 import { GrokProvider } from "./providers/grok.mjs";
@@ -76,7 +77,28 @@ export function notePresence({ clientId, provider, ids, visible }) {
     at: Date.now(),
   });
 
+  refreshInterest();
   return { ok: true };
+}
+
+// The session-file watcher follows only what someone actually has open — the
+// same reports that drive unread-only push, reused so nothing extra is polled.
+function refreshInterest() {
+  const now = Date.now();
+  const wanted = [];
+
+  for (const [clientId, p] of presence) {
+    if (now - p.at > PRESENCE_TTL_MS) {
+      presence.delete(clientId);
+      continue;
+    }
+
+    for (const id of p.ids) {
+      wanted.push({ provider: p.provider, id });
+    }
+  }
+
+  watch.setInterest(wanted);
 }
 
 function isOnScreen(provider, candidateIds) {
@@ -428,6 +450,16 @@ const routes = {
 
     const listed = await p.listThreads({ search: url.searchParams.get("search"), cursor: url.searchParams.get("cursor") });
     rememberThreadTitles(p.name, listed.data);
+
+    // Whether each thread is mid-turn, read off the CLI's own session file, so
+    // the list badges turns this bridge never started (and turns that were
+    // already under way before the app was opened).
+    const running = watch.runningStates(p.name, (listed.data ?? []).map((t) => t.id));
+
+    for (const t of listed.data ?? []) {
+      t.running = !!running[t.id];
+    }
+
     json(res, 200, listed);
   },
 
@@ -712,6 +744,11 @@ export function startServer({ host = "0.0.0.0", port = 8484, token } = {}) {
   TOKEN = token || "";
 
   push.init();
+
+  // Turns nobody here started still move their session file; tell the app so it
+  // can follow along instead of showing a snapshot.
+  watch.start((update) => broadcast("external", update));
+  setInterval(refreshInterest, 30000).unref?.();
 
   for (const p of Object.values(providers)) {
     Promise.resolve(p.init()).catch((e) => console.error(`provider ${p.name} init failed:`, e));
