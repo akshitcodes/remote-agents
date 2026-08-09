@@ -16,6 +16,8 @@
 
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
+
+import { sessionHeldElsewhere } from "../owners.mjs";
 import { readdirSync, statSync, openSync, readSync, closeSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -546,13 +548,30 @@ export class ClaudeProvider extends BaseProvider {
       }
     }
 
-    // Deliberately no prewarm. Opening a thread used to spawn
-    // `claude -p --resume <id>` for it, which puts a *second* controller on a
-    // session that may be live in a terminal or the VS Code extension — and that
-    // process carries the PreToolUse approval hook, so the original session's
-    // tool calls started waiting on a phone approval nobody knew to give and
-    // came back denied. Simply viewing a thread must not touch it: reading is a
-    // file operation, and a writer is started only by an explicit send.
+    // Warm the stream-json process so the first send on this thread is fast —
+    // but only if nothing else is already driving this session. Warming
+    // unconditionally spawned `claude --resume <id>` for a session that might be
+    // live in a terminal or the VS Code extension, putting a second controller
+    // on one transcript; because that process carries the PreToolUse approval
+    // hook, the *original* session's tool calls began waiting on an approval
+    // nobody knew to give, and came back denied.
+    //
+    // Claude refuses outright for background agents ("currently running as a
+    // background agent"), so this is the second of two layers, not the only one.
+    try {
+      if (!this.sessions.has(id) && !sessionHeldElsewhere(id)) {
+        this.ensureSession(id, {
+          cwd: this.cwdForSession(id),
+          model: undefined,
+          effort: undefined,
+          modeKey: undefined,
+          isDraft: false,
+        });
+      }
+    } catch {
+      // ignore prewarm failures
+    }
+
     return { thread: { turns } };
   }
 

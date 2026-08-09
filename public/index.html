@@ -1482,6 +1482,13 @@ function markSendFailed(bubble, onRetry) {
 }
 
 function setBusy(busy, { external = false } = {}) {
+  // A turn we streamed ourselves was rendered optimistically from live events.
+  // The session file is the canonical record of it, and the watcher's trailing
+  // read lands *after* the turn ends — at which point the guard that suppressed
+  // file ops mid-turn no longer applies, so that content gets drawn a second
+  // time. Reconcile against the file once the turn is over instead.
+  const ownTurnEnding = state.busy && !state.externalTurn && !busy;
+
   state.busy = busy;
 
   // A turn driven elsewhere (a terminal, an IDE, another device) reaches us by
@@ -1491,6 +1498,8 @@ function setBusy(busy, { external = false } = {}) {
   // Send stays enabled while busy so messages can be queued or used to steer.
   $("stopBtn").style.display = busy ? "flex" : "none";
   setLivePill(state.externalTurn);
+
+  if (ownTurnEnding) { scheduleExternalRefresh(); }
 }
 
 function setLivePill(on, text) {
