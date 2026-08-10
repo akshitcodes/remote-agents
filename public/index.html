@@ -951,8 +951,18 @@ function activityLabel(item) {
   switch (item?.type) {
     case "reasoning":
       return latestSummaryLine(reasoningText(item)) || "Thinking…";
-    case "commandExecution":
-      return summaryOf(item) || clipActivity(item.command || "Running command");
+    case "commandExecution": {
+      const why = summaryOf(item);
+
+      if (why) { return why; }
+
+      // A bare command reads as a code snippet dropped between messages, which
+      // is what made a whole tool stretch look like "the agent ran this one
+      // line". A verb makes it an action, and its tense says whether it is
+      // still going.
+      const done = item.exitCode != null || item.status === "completed";
+      return clipActivity(`${done ? "Ran" : "Running"} ${item.command || "a command"}`);
+    }
     case "fileChange": {
       const changes = item.changes ?? [];
 
@@ -989,6 +999,36 @@ function activityRows(group) {
   return [...(group?._body?.children ?? [])].filter((el) => el.dataset.activityRow === "true");
 }
 
+// What a finished stretch of tool work amounted to.
+//
+// Showing the newest activity is right while it is happening, but once the run
+// is over that reads as though the agent did only that one thing — a single
+// command sitting between two messages. So a settled group describes its
+// composition instead.
+function activityDigest(rows) {
+  if (rows.length === 1) { return rows[0].dataset.activityLabel || "Working…"; }
+
+  const n = {};
+
+  for (const row of rows) { n[row.dataset.activityKind] = (n[row.dataset.activityKind] ?? 0) + 1; }
+
+  const plural = (count, word) => `${count} ${word}${count === 1 ? "" : "s"}`;
+  const parts = [];
+
+  if (n.commandExecution) { parts.push(`ran ${plural(n.commandExecution, "command")}`); }
+  if (n.fileChange) { parts.push(`edited ${plural(n.fileChange, "file")}`); }
+  if (n.mcpToolCall) { parts.push(plural(n.mcpToolCall, "tool call")); }
+  if (n.webSearch) { parts.push(plural(n.webSearch, "search")); }
+
+  // Thinking alone is still worth naming; alongside real work it is noise.
+  if (!parts.length && n.reasoning) { parts.push("thought it through"); }
+
+  if (!parts.length) { return `${rows.length} steps`; }
+
+  const text = parts.join(" · ");
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
 function refreshActivityGroup(group, { live = group?.dataset.live === "true" } = {}) {
   const rows = activityRows(group);
 
@@ -996,12 +1036,11 @@ function refreshActivityGroup(group, { live = group?.dataset.live === "true" } =
 
   const newest = rows.at(-1);
   const label = newest.dataset.activityLabel || "Working…";
-  const count = rows.length;
   const header = group.querySelector(".activity-label");
 
   group.dataset.live = live ? "true" : "false";
   group.querySelector(".activity-icon").innerHTML = newest._activityIcon || "";
-  header.textContent = live ? label : `${label} · ${count} ${count === 1 ? "step" : "steps"}`;
+  header.textContent = live ? label : activityDigest(rows);
   header.classList.toggle("shimmer", live);
 }
 
@@ -1025,6 +1064,7 @@ function ensureActivityGroup(live) {
 
 function setActivityRow(el, item, { group, live }) {
   el.dataset.activityRow = "true";
+  el.dataset.activityKind = item.type || "";
   el.dataset.activityLabel = activityLabel(item);
   el._activityIcon = activityIcon(item);
   refreshActivityGroup(group, { live });
@@ -1035,6 +1075,7 @@ function updateActivityRow(el, item, { live = true } = {}) {
 
   if (!group) { return; }
 
+  el.dataset.activityKind = item.type || el.dataset.activityKind || "";
   el.dataset.activityLabel = activityLabel(item);
   el._activityIcon = activityIcon(item);
   refreshActivityGroup(group, { live });

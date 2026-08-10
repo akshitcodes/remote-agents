@@ -28,7 +28,7 @@ const PAGE_SIZE = 25;
 const APP_CODEX = "/Applications/ChatGPT.app/Contents/Resources/codex";
 let resolvedBinary = null;
 
-function codexBinary() {
+export function codexBinary() {
   if (resolvedBinary) { return resolvedBinary; }
 
   const configured = readConfig().codexBinary;
