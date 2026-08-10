@@ -26,6 +26,8 @@ import { BaseProvider, toEpochSec, makeLineReader } from "./base.mjs";
 
 const PROJECTS_DIR = join(homedir(), ".claude", "projects");
 const HEAD_BYTES = 65536; // enough to reach the first user line + cwd
+// Enough to reach the newest ai-title record without reading a whole transcript.
+const TITLE_TAIL_BYTES = 64 * 1024;
 const PAGE_SIZE = 25;
 
 // Bookkeeping line types in the transcript that are not conversation content.
@@ -148,6 +150,59 @@ function readHead(path, bytes = HEAD_BYTES) {
   }
 }
 
+// Claude's own name for a session.
+//
+// Claude Code writes `{"type":"ai-title","aiTitle":"...","sessionId":"..."}`
+// into the transcript and shows that in its UI, so the phone should too — the
+// alternative is the raw opening prompt, which for an IDE session is a context
+// dump rather than anything a human would recognise.
+//
+// The record appears early and is then re-emitted, occasionally with a refined
+// title. The last one is what Claude itself displays, so this reads a bounded
+// tail rather than trusting the first — unbounded would mean reading whole
+// multi-megabyte transcripts just to build a list.
+function readTailTitle(path, bytes = TITLE_TAIL_BYTES) {
+  let fd;
+
+  try {
+    const size = statSync(path).size;
+
+    if (!size) { return ""; }
+
+    fd = openSync(path, "r");
+
+    const want = Math.min(bytes, size);
+    const buf = Buffer.alloc(want);
+    const read = readSync(fd, buf, 0, want, size - want);
+    const lines = buf.toString("utf8", 0, read).split("\n");
+
+    // Backwards: the newest title wins.
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (!lines[i].includes('"ai-title"')) {
+        continue;
+      }
+
+      try {
+        const title = String(JSON.parse(lines[i]).aiTitle ?? "").replace(/\s+/g, " ").trim();
+
+        if (title) {
+          return title.slice(0, 200);
+        }
+      } catch {
+        continue; // a torn first line from the windowed read
+      }
+    }
+
+    return "";
+  } catch {
+    return "";
+  } finally {
+    if (fd !== undefined) {
+      closeSync(fd);
+    }
+  }
+}
+
 // Flatten a message.content value (string | block[]) into a block array.
 function toBlocks(content) {
   if (typeof content === "string") {
@@ -175,12 +230,49 @@ function toolResultText(content) {
 }
 
 // Map a Claude tool_use block to a normalized item.
+// A short human account of what a tool call is for.
+//
+// Claude Code shows one of these above every tool call — "Sync stickiness after
+// manual scroll restores" over the bash line — and on a phone that sentence is
+// worth more than the command itself, which can be read by expanding the row.
+// Only Bash and the subagent tool carry an author-written `description`; for the
+// rest the intent lives in their arguments, so it is composed here. Returning ""
+// is normal and means the caller falls back to showing the raw call.
+function toolSummary(name, input = {}) {
+  const file = (p) => basename(String(p ?? "")) || String(p ?? "");
+  const quote = (s) => `"${String(s ?? "")}"`;
+  const where = input.path ? ` in ${file(input.path)}` : "";
+
+  switch (name) {
+    // Written by the model specifically to be read by a human.
+    case "Bash":
+    case "Task":
+    case "Agent":
+      return String(input.description ?? "").trim();
+    case "Read":
+      return input.file_path ? `Read ${file(input.file_path)}` : "";
+    case "Grep":
+      return input.pattern ? `Search ${quote(input.pattern)}${where}` : "";
+    case "Glob":
+      return input.pattern ? `Find ${input.pattern}${where}` : "";
+    case "WebFetch":
+      return String(input.prompt ?? "").trim() || (input.url ? `Fetch ${input.url}` : "");
+    case "WebSearch":
+      return String(input.query ?? "").trim();
+    case "TodoWrite":
+      return "Updated the plan";
+    default:
+      return "";
+  }
+}
+
 function toolUseToItem(block) {
   const name = block.name ?? "";
   const input = block.input ?? {};
+  const description = toolSummary(name, input);
 
   if (name === "Bash") {
-    return { type: "commandExecution", id: block.id, command: input.command ?? "", status: "running" };
+    return { type: "commandExecution", id: block.id, command: input.command ?? "", description, status: "running" };
   }
 
   if (FILE_TOOLS.has(name)) {
@@ -206,11 +298,14 @@ function toolUseToItem(block) {
         .join("\n\n");
     }
 
-    return { type: "fileChange", id: block.id, changes: [{ path, diff }] };
+    return { type: "fileChange", id: block.id, changes: [{ path, diff }], description };
   }
 
+  // Everything else — Read, Grep, Glob, WebFetch, real MCP tools — shares one
+  // shape. Without a description these render as "tool · Read", which says
+  // nothing; with one they read like Claude's own transcript.
   const server = name.includes("__") ? name.split("__")[1] : "tool";
-  return { type: "mcpToolCall", id: block.id, server, tool: name };
+  return { type: "mcpToolCall", id: block.id, server, tool: name, description };
 }
 
 export class ClaudeProvider extends BaseProvider {
@@ -404,7 +499,7 @@ export class ClaudeProvider extends BaseProvider {
     const summary = {
       id: file.id,
       preview: preview || "(no prompt)",
-      name: null,
+      name: readTailTitle(file.path) || null,
       cwd,
       gitInfo: null,
       updatedAt: Math.floor(mtime / 1000),
@@ -707,6 +802,9 @@ export class ClaudeProvider extends BaseProvider {
       blockKinds: new Map(), // block index -> "text" | "thinking" | "tool_use"
       toolKinds: new Map(), // tool_use_id -> "cmd" | "file" | "mcp"
       toolCommands: new Map(), // tool_use_id -> command string
+      // tool_use_id -> the model's own one-line account of the call, needed
+      // again when the result arrives and the completed item is rebuilt.
+      toolDescriptions: new Map(),
       sawResult: false,
     };
   }
@@ -718,6 +816,7 @@ export class ClaudeProvider extends BaseProvider {
     ctx.blockKinds = new Map();
     ctx.toolKinds = new Map();
     ctx.toolCommands = new Map();
+    ctx.toolDescriptions = new Map();
     ctx.sawResult = false;
   }
 
@@ -955,6 +1054,40 @@ export class ClaudeProvider extends BaseProvider {
     return { ok: true, threadId: emitThreadId };
   }
 
+  async steer({ threadId, text } = {}) {
+    if (!text) {
+      throw Object.assign(new Error("text required"), { status: 409, code: "empty_input" });
+    }
+
+    const session = this.sessions.get(threadId);
+
+    // Native steering only exists on the persistent process that owns the live
+    // turn. Spawning/resuming here would create a new turn instead.
+    if (!session || session.dead || !session.child?.stdin?.writable) {
+      throw Object.assign(new Error("the active turn is not owned by this bridge"), { status: 409, code: "not_our_turn" });
+    }
+
+    if (!session.busy) {
+      throw Object.assign(new Error("no active turn"), { status: 409, code: "no_active_turn" });
+    }
+
+    const frame = JSON.stringify({
+      type: "user",
+      message: { role: "user", content: [{ type: "text", text }] },
+    });
+
+    try {
+      // A second user frame is absorbed by the current turn at a tool boundary.
+      // Do not reset or replace any of send()'s in-flight turn bookkeeping.
+      session.child.stdin.write(frame + "\n");
+    } catch (e) {
+      throw Object.assign(new Error("failed to steer claude: " + (e.message ?? e)), { status: 409, code: "not_our_turn" });
+    }
+
+    session.lastUsed = Date.now();
+    return { ok: true, threadId: session.emitThreadId };
+  }
+
   handleStreamLine(line, session) {
     const ctx = session.ctx;
     let obj;
@@ -1108,7 +1241,8 @@ export class ClaudeProvider extends BaseProvider {
         if (item.type === "commandExecution") {
           ctx.toolKinds.set(block.id, "cmd");
           ctx.toolCommands.set(block.id, item.command);
-          this.notify("item/started", { threadId: tid, item: { type: "commandExecution", id: block.id, command: item.command, status: "running" } });
+          ctx.toolDescriptions.set(block.id, item.description ?? "");
+          this.notify("item/started", { threadId: tid, item });
         } else if (item.type === "fileChange") {
           ctx.toolKinds.set(block.id, "file");
           this.notify("item/completed", { threadId: tid, item });
@@ -1150,6 +1284,7 @@ export class ClaudeProvider extends BaseProvider {
             type: "commandExecution",
             id: block.tool_use_id,
             command: ctx.toolCommands.get(block.tool_use_id) ?? "",
+            description: ctx.toolDescriptions.get(block.tool_use_id) ?? "",
             aggregatedOutput: output,
             exitCode: block.is_error ? 1 : 0,
             status: "completed",

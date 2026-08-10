@@ -449,9 +449,18 @@ export class GrokProvider extends BaseProvider {
           cwd = infoCwd;
         }
 
-        // name stays null (UI uses preview); fall back titles only for preview.
+        // Grok names the session itself, and that name is what its own UI
+        // shows — so it belongs in the row title rather than being discarded in
+        // favour of the opening prompt. It stays a preview fallback too, for
+        // sessions whose history head cannot be read.
+        const generated = String(meta.generated_title || meta.session_summary || "").replace(/\s+/g, " ").trim();
+
+        if (generated) {
+          name = generated.slice(0, 200);
+        }
+
         if (!preview) {
-          preview = (meta.generated_title || meta.session_summary || "").trim().slice(0, 300);
+          preview = generated.slice(0, 300);
         }
 
         if (meta.updated_at) {
@@ -1315,6 +1324,11 @@ export class GrokProvider extends BaseProvider {
       .catch((err) => this.failTurn(session, err));
 
     return { ok: true, threadId: emitThreadId };
+  }
+
+  async steer() {
+    // ACP has prompt and cancel, but no primitive that injects into a live turn.
+    throw Object.assign(new Error("Grok does not support native steering"), { status: 409, code: "steer_unsupported" });
   }
 
   async interrupt({ threadId } = {}) {

@@ -66,6 +66,52 @@ const APPROVAL_METHODS = new Set([
   "execCommandApproval",
 ]);
 
+const STEER_ERROR_CODES = {
+  NoActiveTurn: "no_active_turn",
+  ExpectedTurnMismatch: "turn_mismatch",
+  ActiveTurnNotSteerable: "not_steerable",
+  EmptyInput: "empty_input",
+};
+
+function steerErrorTag(value) {
+  if (value == null) {
+    return null;
+  }
+
+  if (typeof value === "string") {
+    return Object.hasOwn(STEER_ERROR_CODES, value) ? value : null;
+  }
+
+  if (typeof value !== "object") {
+    return null;
+  }
+
+  for (const [key, nested] of Object.entries(value)) {
+    if (Object.hasOwn(STEER_ERROR_CODES, key)) {
+      return key;
+    }
+
+    const found = steerErrorTag(nested);
+
+    if (found) {
+      return found;
+    }
+  }
+
+  return null;
+}
+
+function mapSteerError(error) {
+  const tag = steerErrorTag(error?.rpc);
+
+  if (!tag) {
+    return error;
+  }
+
+  const code = STEER_ERROR_CODES[tag];
+  return Object.assign(new Error(error.message), { status: 409, code, rpc: error.rpc });
+}
+
 function sandboxPolicyFor(name) {
   switch (name) {
     case "read-only": return { type: "readOnly" };
@@ -84,6 +130,7 @@ export class CodexProvider extends BaseProvider {
     this.pendingRequests = new Map(); // our request id -> {resolve, reject}
     this.pendingApprovals = new Map(); // server->client request id -> {method, params}
     this.resumedThreads = new Set();
+    this.activeTurns = new Map(); // thread id -> turn id owned by this app-server
     this.initializePromise = null;
     this.cache = { models: null, account: null };
     this.feed = null;
@@ -130,6 +177,15 @@ export class CodexProvider extends BaseProvider {
     if (msg.method) {
       if (msg.method === "account/rateLimits/updated" && this.cache.account) {
         this.cache.account.rateLimits = msg.params?.rateLimits ?? this.cache.account.rateLimits;
+      }
+
+      const threadId = msg.params?.threadId;
+      const turnId = msg.params?.turn?.id ?? msg.params?.turnId;
+
+      if (msg.method === "turn/started" && threadId && turnId) {
+        this.activeTurns.set(threadId, turnId);
+      } else if ((msg.method === "turn/completed" || msg.method === "turn/failed") && threadId) {
+        this.activeTurns.delete(threadId);
       }
 
       this.notify(msg.method, msg.params ?? {});
@@ -187,6 +243,7 @@ export class CodexProvider extends BaseProvider {
       this.pendingRequests.clear();
       this.pendingApprovals.clear();
       this.resumedThreads.clear();
+      this.activeTurns.clear();
       this.cache.models = null;
       this.cache.account = null;
       this.initializePromise = null;
@@ -395,7 +452,42 @@ export class CodexProvider extends BaseProvider {
       params.sandboxPolicy = sandboxPolicyFor(sandbox);
     }
 
-    return this.rpc("turn/start", params);
+    const result = await this.rpc("turn/start", params);
+    const turnId = result?.turn?.id ?? result?.turnId;
+
+    if (turnId) {
+      this.activeTurns.set(threadId, turnId);
+    }
+
+    return result;
+  }
+
+  async steer({ threadId, text, expectedTurnId } = {}) {
+    await this.ready();
+
+    if (!text) {
+      throw Object.assign(new Error("text required"), { status: 409, code: "empty_input" });
+    }
+
+    const activeTurnId = this.activeTurns.get(threadId);
+
+    if (!activeTurnId) {
+      const code = expectedTurnId ? "not_our_turn" : "no_active_turn";
+      const message = expectedTurnId ? "the active turn is not owned by this bridge" : "no active turn";
+      throw Object.assign(new Error(message), { status: 409, code });
+    }
+
+    const expected = expectedTurnId ?? activeTurnId;
+
+    try {
+      return await this.rpc("turn/steer", {
+        threadId,
+        input: [{ type: "text", text }],
+        expectedTurnId: expected,
+      });
+    } catch (e) {
+      throw mapSteerError(e);
+    }
   }
 
   async interrupt({ threadId, turnId } = {}) {

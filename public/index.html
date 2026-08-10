@@ -82,12 +82,21 @@
      scroller and is rebuilt on every render, which would wipe the pill. */
   #livePill { display: none; position: absolute; top: 8px; left: 50%; transform: translateX(-50%); z-index: 6; max-width: 92%; align-items: center; gap: 6px; font-size: 11px; font-weight: 600; color: var(--accent); background: #12351bee; border: 1px solid #2ea04366; border-radius: 20px; padding: 5px 12px; box-shadow: 0 2px 10px #0006; white-space: nowrap; }
   body.livesync #livePill { display: flex; }
+  /* Shown only when the transcript is scrolled away from the bottom, so a
+     running turn never yanks the view out from under you — see stickToBottom. */
+  #jumpBtn { display: none; position: absolute; right: 12px; bottom: 12px; z-index: 6; align-items: center; justify-content: center; width: 34px; height: 34px; border: 1px solid var(--border); border-radius: 50%; background: var(--bg2); color: var(--fg); font-size: 15px; line-height: 1; box-shadow: 0 2px 10px #0007; cursor: pointer; }
+  #jumpBtn.on { display: flex; }
+  #jumpBtn.unread { border-color: #2ea04366; color: var(--accent); }
   @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
   #loadMore { display: block; margin: 14px auto calc(env(safe-area-inset-bottom) + 20px); background: var(--bg3); border: 1px solid var(--border); color: var(--accent2); padding: 9px 22px; border-radius: 10px; font-size: 14px; cursor: pointer; }
   .empty { text-align: center; color: var(--fg-dim); padding: 40px 20px; }
 
   /* chat view */
   #chatView { flex: 1; display: none; flex-direction: column; min-height: 0; max-width: 100%; overflow-x: hidden; position: relative; }
+  /* Overlays (live pill, jump button) anchor to the transcript rather than the
+     whole chat view, which also contains the composer — anchoring to the view
+     put the jump button on top of the text input. */
+  #transcript { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
   #messages { flex: 1; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; padding: 14px 12px; }
   .msg { max-width: 88%; margin-bottom: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
   .msg.md { white-space: normal; }
@@ -129,7 +138,16 @@
   .block { border: 1px solid var(--border); background: var(--bg2); border-radius: 10px; margin: 0 0 10px; overflow: hidden; max-width: 100%; }
   .block .bhead { display: flex; align-items: center; gap: 8px; padding: 8px 11px; cursor: pointer; font-size: 13px; }
   .block .bhead .ic { flex-shrink: 0; }
-  .block .bhead .lbl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .block .bhead .ttl { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .block .bhead .lbl { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* The raw command, shown under its human-readable summary. */
+  .block .bhead .sub { display: none; min-width: 0; font-size: 11px; color: var(--fg-dim); font-family: ui-monospace, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .block .bhead .sub.on { display: block; }
+  /* Codex emits reasoning *summaries*, so the header carries the latest one
+     rather than a static word, and shimmers while more is still arriving. */
+  .lbl.shimmer { background: linear-gradient(90deg, var(--fg-faint) 20%, var(--fg) 45%, var(--fg) 55%, var(--fg-faint) 80%); background-size: 220% 100%; -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; animation: shimmerSweep 2.4s linear infinite; }
+  @keyframes shimmerSweep { from { background-position: 220% 0; } to { background-position: -220% 0; } }
+  @media (prefers-reduced-motion: reduce) { .lbl.shimmer { animation: none; -webkit-text-fill-color: var(--fg-dim); } }
   .block .bhead .st { font-size: 11px; color: var(--fg-dim); font-family: ui-monospace, Menlo, monospace; }
   .block .bhead .chev { color: var(--fg-faint); transition: transform .15s; }
   .block.open .bhead .chev { transform: rotate(90deg); }
@@ -140,6 +158,16 @@
   .block.reasoning .bhead { color: var(--purple); }
   .block.reasoning .body { padding: 4px 11px 10px; font-size: 13px; color: var(--fg-dim); font-style: italic; white-space: pre-wrap; border-top: none; }
   .block.cmd .bhead .lbl { font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; }
+  .activity-group { border: 1px solid var(--border); background: var(--bg2); border-radius: 10px; margin: 0 0 10px; overflow: hidden; max-width: 100%; }
+  .activity-head { display: flex; align-items: center; gap: 8px; padding: 9px 11px; cursor: pointer; font-size: 13px; }
+  .activity-head .activity-icon { display: flex; flex-shrink: 0; }
+  .activity-head .activity-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .activity-head .chev { color: var(--fg-faint); transition: transform .15s; }
+  .activity-group.open > .activity-head .chev { transform: rotate(90deg); }
+  .activity-body { display: none; padding: 8px 8px 0; border-top: 1px solid var(--border); }
+  .activity-group.open > .activity-body { display: block; }
+  .activity-body > .block, .activity-body > .item-chip { margin-bottom: 8px; }
+  .activity-body > .item-chip { display: flex; width: fit-content; }
   .st.ok { color: var(--accent) !important; }
   .st.bad { color: var(--danger) !important; }
   .st.run { color: var(--accent2) !important; }
@@ -280,8 +308,11 @@
   </div>
 
   <div id="chatView">
-    <div id="messages"></div>
-    <div id="livePill"><span class="run-dot"></span><span id="livePillText">Running — following along…</span></div>
+    <div id="transcript">
+      <div id="messages"></div>
+      <div id="livePill"><span class="run-dot"></span><span id="livePillText">Running — following along…</span></div>
+      <button id="jumpBtn" title="Jump to latest" aria-label="Jump to latest">↓</button>
+    </div>
     <div id="approval">
       <div class="q" id="apprTitle">Approval requested</div>
       <div class="cmd mono" id="apprBody"></div>
@@ -357,6 +388,7 @@ const state = {
   resyncing: false,          // guard against overlapping re-reads
   lastDiff: "",
   threadFiles: new Map(), // path -> { path, edited } for the open thread
+  activityGroup: null,    // newest contiguous Codex activity run
 };
 
 const PROVIDER_LABELS = { codex: "Codex", claude: "Claude", grok: "Grok" };
@@ -720,21 +752,79 @@ async function loadThreads(append) {
 // ---------- chat rendering ----------
 function box() { return $("messages"); }
 
-function scrollDown() {
+// Auto-scroll is *sticky*, not forced: a running turn appends constantly, and
+// yanking the view to the bottom while you are reading further up makes a live
+// thread unusable. Stickiness is tracked from the scroll event rather than
+// measured at append time — by the time these callers run, the new content is
+// already in the DOM, so scrollHeight has grown and "are we at the bottom?" no
+// longer answers "were we at the bottom before this arrived?".
+const STICK_PX = 120;
+let stickToBottom = true;
+// Bumped by anything that positions the transcript deliberately, so an
+// auto-scroll queued a frame earlier cannot land on top of it.
+let scrollSeq = 0;
+
+function atBottom() {
   const b = box();
-  requestAnimationFrame(() => { b.scrollTop = b.scrollHeight; });
+  return b.scrollHeight - b.scrollTop - b.clientHeight < STICK_PX;
 }
 
-function addUser(text) {
+// force is for scrolls the user themselves caused — sending a message, opening
+// a thread — where landing at the bottom is the whole point.
+function scrollDown({ force = false } = {}) {
+  if (!force && !stickToBottom) {
+    $("jumpBtn").classList.add("unread");
+    return;
+  }
+
+  const b = box();
+  const seq = ++scrollSeq;
+
+  requestAnimationFrame(() => {
+    // Superseded: something restored a saved position after this was queued,
+    // and that restore is the newer intent.
+    if (seq !== scrollSeq) { return; }
+
+    b.scrollTop = b.scrollHeight;
+    // Only once the scroll has actually happened. Setting it up front left a
+    // window in which a caller that restores a saved position afterwards —
+    // resync, loadEarlier — had already been recorded as following the bottom,
+    // so the next delta would yank the reader down.
+    stickToBottom = true;
+    updateJumpBtn();
+  });
+}
+
+function updateJumpBtn() {
+  const btn = $("jumpBtn");
+  btn.classList.toggle("on", !stickToBottom);
+
+  if (stickToBottom) { btn.classList.remove("unread"); }
+}
+
+// After code moves the scroll position itself, rather than waiting for the
+// scroll event to catch up.
+function syncStick() {
+  scrollSeq++;
+  stickToBottom = atBottom();
+  updateJumpBtn();
+}
+
+// own: this device just sent it, so jumping to it is what the user asked for.
+// A user message arriving from the transcript — replayed history, or another
+// device typing into the same thread — must not move anyone's viewport.
+function addUser(text, { own = false } = {}) {
+  resetActivityGroup();
   const el = document.createElement("div");
   el.className = "msg user";
   el.textContent = text;
   box().appendChild(el);
-  scrollDown();
+  scrollDown({ force: own });
   return el;
 }
 
 function addAgent(text, streaming) {
+  resetActivityGroup();
   const el = document.createElement("div");
   el.className = "msg agent md" + (streaming ? " streaming" : "");
   el._raw = text || "";
@@ -754,10 +844,18 @@ function appendAgent(el, delta) {
 function makeBlock(cls, iconHtml, label, opts = {}) {
   const el = document.createElement("div");
   el.className = "block " + cls + (opts.open ? " open" : "");
-  el.innerHTML = `<div class="bhead">${iconHtml}<span class="lbl"></span><span class="st"></span><span class="chev">›</span></div><div class="body"></div>`;
+  el.innerHTML = `<div class="bhead">${iconHtml}<span class="ttl"><span class="lbl"></span><span class="sub"></span></span><span class="st"></span><span class="chev">›</span></div><div class="body"></div>`;
   el.querySelector(".lbl").textContent = label;
+
+  // A secondary line under the label — used to keep the raw command visible
+  // beneath the summary of what it is for.
+  if (opts.sub) {
+    const sub = el.querySelector(".sub");
+    sub.textContent = opts.sub;
+    sub.classList.add("on");
+  }
   el.querySelector(".bhead").onclick = () => el.classList.toggle("open");
-  box().appendChild(el);
+  (opts.parent || box()).appendChild(el);
   scrollDown();
   return el;
 }
@@ -780,17 +878,270 @@ function renderDiffInto(pre, diff) {
 }
 
 // render one finalized item (history or item/completed)
-function renderItem(item) {
+// The agent's own one-line account of what a tool call is for. Providers that
+// carry it use different field names, and plenty of calls have none at all.
+function summaryOf(item) {
+  const raw = item.description ?? item.title ?? item.summary;
+  const s = (typeof raw === "string" ? raw : "").replace(/\s+/g, " ").trim();
+
+  // Not a summary if it is just the command repeated back.
+  if (!s || s === (item.command ?? "").trim()) { return ""; }
+
+  return s.length > 120 ? s.slice(0, 119) + "…" : s;
+}
+
+// Codex reasoning arrives as summary prose, often several paragraphs with a
+// bold heading per section. The header shows the most recent heading — the
+// closest thing to "what it is thinking about right now".
+function latestSummaryLine(text) {
+  const lines = (text || "").split("\n").map((l) => l.trim()).filter(Boolean);
+  const clip = (s) => (s.length > 90 ? s.slice(0, 89) + "…" : s);
+
+  // Codex writes each summary section as a bold heading followed by prose, and
+  // the heading is what reads as "what it is working on". Prose caught mid-
+  // stream is a sentence fragment, so headings win when there is one.
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = /^\*\*(.+?)\*\*[.:]?$/.exec(lines[i]) || /^#+\s*(.+)$/.exec(lines[i]);
+
+    if (m) { return clip(m[1].trim()); }
+  }
+
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const bare = lines[i].replace(/\*\*/g, "").replace(/^#+\s*/, "").trim();
+
+    if (bare) { return clip(bare); }
+  }
+
+  return "";
+}
+
+const ACTIVITY_TYPES = new Set(["reasoning", "commandExecution", "fileChange", "mcpToolCall", "webSearch"]);
+
+function isCodexActivity(item) {
+  return activeProvider() === "codex" && ACTIVITY_TYPES.has(item?.type);
+}
+
+function clipActivity(text, length = 110) {
+  const s = (text || "").replace(/\s+/g, " ").trim();
+  return s.length > length ? s.slice(0, length - 1) + "…" : s;
+}
+
+function reasoningText(item) {
+  return Array.isArray(item.summary) ? item.summary.join("\n\n") : (item.content || "");
+}
+
+function diffCounts(changes) {
+  let added = 0;
+  let removed = 0;
+
+  for (const change of changes ?? []) {
+    for (const line of (change.diff || "").split("\n")) {
+      if (line.startsWith("+") && !line.startsWith("+++")) { added++; }
+      if (line.startsWith("-") && !line.startsWith("---")) { removed++; }
+    }
+  }
+
+  return { added, removed };
+}
+
+// This is the one shared description used by replay, live updates, and the
+// settled digest. Keeping it independent of the row renderer prevents the
+// collapsed view from drifting away from what the expanded item contains.
+function activityLabel(item) {
+  switch (item?.type) {
+    case "reasoning":
+      return latestSummaryLine(reasoningText(item)) || "Thinking…";
+    case "commandExecution":
+      return summaryOf(item) || clipActivity(item.command || "Running command");
+    case "fileChange": {
+      const changes = item.changes ?? [];
+
+      if (!changes.length) { return "Editing files…"; }
+
+      const target = changes.length === 1 ? changes[0].path?.split("/").pop() : `${changes.length} files`;
+      const { added, removed } = diffCounts(changes);
+      const stats = `${added ? ` +${added}` : ""}${removed ? ` -${removed}` : ""}`;
+      return `Edited ${target || "files"}${stats}`;
+    }
+    case "mcpToolCall":
+      // Claude's built-in tools land here too, where "tool · Read" says nothing.
+      // Its own account of the call wins whenever there is one.
+      return summaryOf(item) || clipActivity([item.server, item.tool].filter(Boolean).join(" · ") || "Using tool");
+    case "webSearch":
+      return clipActivity(item.query || "Searching the web");
+    default:
+      return "Working…";
+  }
+}
+
+function activityIcon(item) {
+  switch (item?.type) {
+    case "reasoning": return "🧠";
+    case "commandExecution": return ICONS.cmd;
+    case "fileChange": return ICONS.file;
+    case "mcpToolCall": return ICONS.tool;
+    case "webSearch": return ICONS.web;
+    default: return "";
+  }
+}
+
+function activityRows(group) {
+  return [...(group?._body?.children ?? [])].filter((el) => el.dataset.activityRow === "true");
+}
+
+function refreshActivityGroup(group, { live = group?.dataset.live === "true" } = {}) {
+  const rows = activityRows(group);
+
+  if (!group || !rows.length) { return; }
+
+  const newest = rows.at(-1);
+  const label = newest.dataset.activityLabel || "Working…";
+  const count = rows.length;
+  const header = group.querySelector(".activity-label");
+
+  group.dataset.live = live ? "true" : "false";
+  group.querySelector(".activity-icon").innerHTML = newest._activityIcon || "";
+  header.textContent = live ? label : `${label} · ${count} ${count === 1 ? "step" : "steps"}`;
+  header.classList.toggle("shimmer", live);
+}
+
+function createActivityGroup(live) {
+  const group = document.createElement("div");
+  group.className = "activity-group";
+  group.innerHTML = `<div class="activity-head"><span class="activity-icon"></span><span class="lbl activity-label">Working…</span><span class="chev">›</span></div><div class="activity-body"></div>`;
+  group._body = group.querySelector(".activity-body");
+  group.dataset.live = live ? "true" : "false";
+  group.querySelector(".activity-head").onclick = () => group.classList.toggle("open");
+  box().appendChild(group);
+  state.activityGroup = group;
+  scrollDown();
+  return group;
+}
+
+function ensureActivityGroup(live) {
+  if (state.activityGroup?.isConnected) { return state.activityGroup; }
+  return createActivityGroup(live);
+}
+
+function setActivityRow(el, item, { group, live }) {
+  el.dataset.activityRow = "true";
+  el.dataset.activityLabel = activityLabel(item);
+  el._activityIcon = activityIcon(item);
+  refreshActivityGroup(group, { live });
+}
+
+function updateActivityRow(el, item, { live = true } = {}) {
+  const group = el?.closest?.(".activity-group");
+
+  if (!group) { return; }
+
+  el.dataset.activityLabel = activityLabel(item);
+  el._activityIcon = activityIcon(item);
+  refreshActivityGroup(group, { live });
+}
+
+function settleActivityGroup(group = state.activityGroup) {
+  if (!group) { return; }
+
+  refreshActivityGroup(group, { live: false });
+  group.classList.remove("open");
+}
+
+function resetActivityGroup() {
+  settleActivityGroup();
+  state.activityGroup = null;
+}
+
+function restoreCurrentActivityGroup() {
+  const last = box().lastElementChild;
+  state.activityGroup = last?.classList.contains("activity-group") ? last : null;
+}
+
+function setReasoningHeader(el, text, { live = true } = {}) {
+  const lbl = el.querySelector(".lbl");
+  const line = latestSummaryLine(text);
+
+  lbl.textContent = line || (live ? "Thinking…" : "Thought process");
+  lbl.classList.toggle("shimmer", live);
+}
+
+// A turn is over: nothing more is coming, so stop every reasoning header
+// shimmering and let it settle back to a static label.
+function settleReasoning() {
+  for (const lbl of document.querySelectorAll(".block.reasoning .lbl.shimmer")) {
+    lbl.classList.remove("shimmer");
+  }
+}
+
+function renderActivityItem(item, { group = null, live = false, started = false } = {}) {
+  const summary = item.type === "reasoning" ? reasoningText(item) : "";
+
+  if (item.type === "reasoning" && !started && !summary.trim()) { return []; }
+
+  const activity = group || ensureActivityGroup(live);
+  const parent = activity._body || activity.querySelector(".activity-body");
+  activity._body = parent;
+  let el;
+
+  switch (item.type) {
+    case "reasoning":
+      el = makeBlock("reasoning", "🧠", "Thinking…", { parent });
+      el.querySelector(".body").textContent = summary;
+      setReasoningHeader(el, summary, { live: false });
+
+      if (started && !summary.trim()) { el.querySelector(".lbl").textContent = "Thinking…"; }
+
+      break;
+    case "commandExecution": {
+      const why = summaryOf(item);
+      el = makeBlock("cmd", ICONS.cmd, why || item.command || "command", { parent, open: started, sub: why ? item.command : "" });
+      const ok = item.exitCode === 0;
+      setBlockStatus(el, started ? "running" : (item.exitCode != null ? "exit " + item.exitCode : (item.status || "")), started ? "run" : (item.exitCode != null ? (ok ? "ok" : "bad") : ""));
+
+      if (started || item.aggregatedOutput) {
+        el.querySelector(".body").innerHTML = `<pre>${esc(item.aggregatedOutput || "")}</pre>`;
+      }
+
+      break;
+    }
+    case "fileChange":
+      el = addFileChangeChip(item, { parent, started });
+      break;
+    case "mcpToolCall":
+      // Same rule as the group header: Claude's built-in tools arrive as
+      // mcpToolCall, and "tool · Read" tells you nothing that "Read
+      // heroController.js" does not.
+      el = chip(ICONS.tool, summaryOf(item) || `${item.server || "tool"} · ${item.tool || "call"}`, null, { parent });
+      break;
+    case "webSearch":
+      el = chip(ICONS.web, item.query || "web search", null, { parent });
+      break;
+    default:
+      return [];
+  }
+
+  setActivityRow(el, item, { group: activity, live });
+  return [el];
+}
+
+function renderItem(item, opts = {}) {
+  if (isCodexActivity(item)) { return renderActivityItem(item, opts); }
+
+  // Conversation and standalone items are hard boundaries. The group is a
+  // contiguous run, so allowing it to survive a message would reorder later
+  // activity into a block above that message.
+  resetActivityGroup();
+
   switch (item.type) {
     case "userMessage": {
       const t = (item.content ?? []).map((c) => c.text ?? "").join("");
 
-      if (t.trim()) { addUser(t); }
+      if (t.trim()) { return [addUser(t)]; }
 
       break;
     }
     case "agentMessage": {
-      if ((item.text ?? "").trim()) { addAgent(item.text); }
+      if ((item.text ?? "").trim()) { return [addAgent(item.text)]; }
 
       break;
     }
@@ -800,42 +1151,47 @@ function renderItem(item) {
       if (summary.trim()) {
         const el = makeBlock("reasoning", "🧠", "Thought process");
         el.querySelector(".body").textContent = summary;
+        // Replayed from the transcript, so it is finished by definition.
+        setReasoningHeader(el, summary, { live: false });
+        return [el];
       }
 
       break;
     }
     case "commandExecution": {
-      const el = makeBlock("cmd", ICONS.cmd, item.command || "command");
+      // When the agent said what the command is for, that reads better as the
+      // heading than the command itself, which moves to the line below.
+      const why = summaryOf(item);
+      const el = makeBlock("cmd", ICONS.cmd, why || item.command || "command", { sub: why ? item.command : "" });
       const ok = item.exitCode === 0;
       setBlockStatus(el, item.exitCode != null ? "exit " + item.exitCode : (item.status || ""), item.exitCode != null ? (ok ? "ok" : "bad") : "");
 
       if (item.aggregatedOutput) { el.querySelector(".body").innerHTML = `<pre>${esc(item.aggregatedOutput)}</pre>`; }
 
-      break;
+      return [el];
     }
     case "fileChange": {
-      addFileChangeChip(item);
-      break;
+      return [addFileChangeChip(item)];
     }
     case "mcpToolCall": {
-      chip(ICONS.tool, `${item.server} · ${item.tool}`);
-      break;
+      return [chip(ICONS.tool, summaryOf(item) || `${item.server} · ${item.tool}`)];
     }
     case "webSearch": {
-      chip(ICONS.web, item.query || "web search");
-      break;
+      return [chip(ICONS.web, item.query || "web search")];
     }
     case "plan":
     case "todoList": {
       const el = makeBlock("plan", ICONS.plan, "Plan");
       el.querySelector(".body").innerHTML = `<pre>${esc(item.text || JSON.stringify(item, null, 1))}</pre>`;
-      break;
+      return [el];
     }
     default: break;
   }
+
+  return [];
 }
 
-function chip(iconHtml, text, onClick) {
+function chip(iconHtml, text, onClick, opts = {}) {
   const el = document.createElement("div");
   el.className = "item-chip" + (onClick ? " link" : "");
   el.innerHTML = iconHtml + "<span></span>";
@@ -843,7 +1199,7 @@ function chip(iconHtml, text, onClick) {
 
   if (onClick) { el.onclick = onClick; }
 
-  box().appendChild(el);
+  (opts.parent || box()).appendChild(el);
   scrollDown();
   return el;
 }
@@ -872,22 +1228,23 @@ function updateFilesBtn() {
   $("filesBtn").style.display = inChat && state.threadFiles.size ? "flex" : "none";
 }
 
-function addFileChangeChip(item) {
+function addFileChangeChip(item, { parent = null, started = false } = {}) {
   const changes = item.changes ?? [];
   changes.forEach((c) => registerThreadFile(c.path, true));
   const n = changes.length;
-  const label = n === 1 ? changes[0].path.split("/").pop() : `${n} files changed`;
-  chip(ICONS.file, "✏️ " + label, () => {
+  const label = started ? "Editing files…" : (n === 1 ? changes[0].path.split("/").pop() : `${n} files changed`);
+  return chip(ICONS.file, "✏️ " + label, started ? null : () => {
     if (n === 1) {
       openFileSheet(changes[0].path, changes[0].diff || "");
     } else {
       const diff = changes.map((c) => `--- ${c.path}\n${c.diff || ""}`).join("\n\n");
       openDiffSheet(diff || "No diff available");
     }
-  });
+  }, { parent });
 }
 
 function renderHistory(thread, window) {
+  resetActivityGroup();
   box().innerHTML = "";
 
   // Only the end of a long thread is sent; offer the rest rather than pretending
@@ -908,12 +1265,21 @@ function renderHistory(thread, window) {
   let base = window?.start ?? 0;
 
   turns.forEach((turn, ti) => {
-    if (ti > 0) { const s = document.createElement("div"); s.className = "turn-sep"; box().appendChild(s); }
+    if (ti > 0) {
+      resetActivityGroup();
+      const s = document.createElement("div");
+      s.className = "turn-sep";
+      box().appendChild(s);
+    }
 
-    for (const item of turn.items ?? []) { renderItemAt(item, base++); }
+    const live = state.externalTurn && ti === turns.length - 1;
+
+    for (const item of turn.items ?? []) { renderItemAt(item, base++, { live }); }
   });
   registerFilesFromEl(box());
-  scrollDown();
+  // Deliberately does not scroll. Opening a thread wants the bottom; a resync
+  // mid-turn wants to stay put. Only the caller knows which, and a scroll
+  // queued from here would land after the caller's restore and undo it.
   // How far through the thread we've drawn. This is an *absolute* position in
   // the whole thread, not a count of what's on screen, because that's what
   // appended items are numbered against — see appendExternalItems.
@@ -962,6 +1328,10 @@ async function loadEarlier(btn) {
 
     while (marker.nextSibling) { tail.push(b.removeChild(marker.nextSibling)); }
 
+    // The previous current group is now detached in `tail`; rendering through
+    // it would put the older rows in the wrong half of the transcript.
+    state.activityGroup = null;
+
     let olderBase = res.itemWindow?.start ?? 0;
 
     for (const item of older) { renderItemAt(item, olderBase++); }
@@ -969,8 +1339,10 @@ async function loadEarlier(btn) {
     for (const node of tail) { b.appendChild(node); }
 
     marker.remove();
+    restoreCurrentActivityGroup();
     state.itemWindow = res.itemWindow ?? { ...w, start: 0, hasMore: false };
     b.scrollTop = b.scrollHeight - anchorFromBottom;
+    syncStick();
 
     if (state.itemWindow.hasMore) {
       btn.disabled = false;
@@ -987,16 +1359,14 @@ async function loadEarlier(btn) {
 // Draw one item and label the elements it produced with its position in the
 // thread, so a later change to that item can find and replace them. One item can
 // render as several nodes, or none at all.
-function renderItemAt(item, index) {
-  const b = box();
-  const before = b.childNodes.length;
-  renderItem(item);
+function renderItemAt(item, index, opts = {}) {
+  const nodes = renderItem(item, opts);
 
-  for (let i = before; i < b.childNodes.length; i++) {
-    const node = b.childNodes[i];
-
-    if (node.nodeType === 1) { node.dataset.idx = String(index); }
+  for (const node of nodes) {
+    node.dataset.idx = String(index);
   }
+
+  return nodes;
 }
 
 // One change frame from the server. Ordering and generation are checked here so
@@ -1038,7 +1408,9 @@ function applyExternalFrame(frame) {
 // those commands running forever with no output.
 function applyExternalOps(ops) {
   const b = box();
-  const wasAtBottom = b.scrollHeight - b.scrollTop - b.clientHeight < 120;
+  // Captured before the ops mutate the DOM: a `replace` can reset scrollTop,
+  // which would otherwise be mistaken for the user scrolling away.
+  const wasAtBottom = atBottom();
   let drew = false;
 
   for (const { op, index, item } of ops) {
@@ -1052,7 +1424,7 @@ function applyExternalOps(ops) {
         return;
       }
 
-      renderItemAt(item, index);
+      renderItemAt(item, index, { live: state.externalTurn });
       state.renderedItems = index + 1;
       drew = true;
       continue;
@@ -1065,19 +1437,17 @@ function applyExternalOps(ops) {
       if (!existing.length) { continue; }
 
       const anchor = existing[0];
-      const added = [];
-      const before = b.childNodes.length;
-      renderItem(item);
-
-      for (let i = before; i < b.childNodes.length; i++) { added.push(b.childNodes[i]); }
+      const oldGroup = anchor.closest(".activity-group");
+      const added = renderItem(item, { group: isCodexActivity(item) ? oldGroup : null, live: oldGroup?.dataset.live === "true" });
 
       for (const node of added) {
-        if (node.nodeType === 1) { node.dataset.idx = String(index); }
-
-        b.insertBefore(node, anchor);
+        node.dataset.idx = String(index);
+        anchor.parentNode.insertBefore(node, anchor);
       }
 
       for (const node of existing) { node.remove(); }
+
+      if (oldGroup) { refreshActivityGroup(oldGroup); }
 
       drew = true;
     }
@@ -1088,7 +1458,7 @@ function applyExternalOps(ops) {
   registerFilesFromEl(b);
   setLivePill(state.externalTurn, "Running — following live");
 
-  if (wasAtBottom) { scrollDown(); }
+  if (wasAtBottom) { scrollDown({ force: true }); }
 }
 
 // ---------- live streaming ----------
@@ -1138,6 +1508,7 @@ function onNotify(method, params, provider) {
 
   switch (method) {
     case "turn/started":
+      resetActivityGroup();
       state.activeTurnId = params.turn?.id ?? params.turnId;
       state.lastDiff = "";
       $("diffBtn").style.display = "none";
@@ -1148,16 +1519,28 @@ function onNotify(method, params, provider) {
       const item = params.item ?? {};
       const id = item.id;
 
-      if (item.type === "commandExecution") {
+      if (isCodexActivity(item)) {
         liveItem(id, () => {
-          const el = makeBlock("cmd", ICONS.cmd, item.command || "command", { open: true });
+          const [el] = renderActivityItem(item, { live: true, started: true });
+          return {
+            el,
+            body: el?.querySelector(".body"),
+            pre: el?.querySelector("pre"),
+            summaryText: reasoningText(item),
+          };
+        });
+      } else if (item.type === "commandExecution") {
+        liveItem(id, () => {
+          const why = summaryOf(item);
+          const el = makeBlock("cmd", ICONS.cmd, why || item.command || "command", { open: true, sub: why ? item.command : "" });
           setBlockStatus(el, "running", "run");
           el.querySelector(".body").innerHTML = "<pre></pre>";
           return { el, pre: el.querySelector("pre") };
         });
       } else if (item.type === "reasoning") {
         liveItem(id, () => {
-          const el = makeBlock("reasoning", "🧠", "Thinking…", { open: true });
+          const el = makeBlock("reasoning", "🧠", "Thinking…", { open: false });
+          el.querySelector(".lbl").classList.add("shimmer");
           return { el, body: el.querySelector(".body") };
         });
       } else if (item.type === "fileChange") {
@@ -1181,10 +1564,31 @@ function onNotify(method, params, provider) {
     case "item/reasoning/summaryTextDelta":
     case "item/reasoning/textDelta": {
       const rec = liveItem(params.itemId, () => {
-        const el = makeBlock("reasoning", "🧠", "Thinking…", { open: true });
-        return { el, body: el.querySelector(".body") };
+        // Collapsed: the header itself now carries the live summary, so opening
+        // it is for reading the detail rather than seeing that anything is
+        // happening at all.
+        if (activeProvider() === "codex") {
+          const [el] = renderActivityItem({ type: "reasoning", content: "" }, { live: true, started: true });
+          return { el, body: el.querySelector(".body"), summaryText: "" };
+        }
+
+        const el = makeBlock("reasoning", "🧠", "Thinking…", { open: false });
+        return { el, body: el.querySelector(".body"), summaryText: "" };
       });
       rec.body.textContent += params.delta ?? "";
+
+      // Only the summary stream is a human-readable précis of the reasoning.
+      // textDelta carries raw content and lands in the header as mid-sentence
+      // fragments, so it updates the body but never the label.
+      if (method === "item/reasoning/summaryTextDelta") {
+        rec.summaryText = (rec.summaryText || "") + (params.delta ?? "");
+        setReasoningHeader(rec.el, rec.summaryText, { live: activeProvider() !== "codex" });
+
+        if (activeProvider() === "codex") {
+          updateActivityRow(rec.el, { type: "reasoning", content: rec.summaryText }, { live: true });
+        }
+      }
+
       scrollDown();
       break;
     }
@@ -1207,16 +1611,43 @@ function onNotify(method, params, provider) {
         rec.el.innerHTML = renderMarkdown(rec.el._raw);
         registerFilesFromEl(rec.el);
       } else if (item.type === "commandExecution" && rec) {
+        // The summary can arrive with the completed item rather than the
+        // started one, so promote it here too if it turned up late.
+        const why = summaryOf(item);
+        const sub = rec.el.querySelector(".sub");
+
+        if (why && sub && !sub.classList.contains("on")) {
+          rec.el.querySelector(".lbl").textContent = why;
+          sub.textContent = item.command || "";
+          sub.classList.add("on");
+        }
+
         const ok = item.exitCode === 0;
         setBlockStatus(rec.el, item.exitCode != null ? "exit " + item.exitCode : (item.status || "done"), item.exitCode != null ? (ok ? "ok" : "bad") : "");
         rec.el.classList.remove("open");
 
         if (item.aggregatedOutput && rec.pre && !rec.pre.textContent) { rec.pre.textContent = item.aggregatedOutput; }
+
+        updateActivityRow(rec.el, item, { live: true });
       } else if (item.type === "reasoning" && rec) {
-        rec.el.querySelector(".lbl").textContent = "Thought process";
+        // Keep the summary as the heading — it says more than "Thought process"
+        // — but stop it shimmering now that nothing further is coming.
+        const done = Array.isArray(item.summary) ? item.summary.join("\n\n") : (rec.summaryText || "");
+        setReasoningHeader(rec.el, done, { live: false });
         rec.el.classList.remove("open");
+        updateActivityRow(rec.el, { ...item, summary: null, content: done || "Thought process" }, { live: true });
       } else if (item.type === "fileChange") {
-        addFileChangeChip(item);
+        if (rec?.el?.closest(".activity-group")) {
+          const group = rec.el.closest(".activity-group");
+          const [el] = renderActivityItem(item, { group, live: true });
+          rec.el.replaceWith(el);
+          state.items.set(item.id, { el });
+          refreshActivityGroup(group, { live: true });
+        } else if (isCodexActivity(item)) {
+          renderActivityItem(item, { live: true });
+        } else {
+          addFileChangeChip(item);
+        }
       } else if (item.type === "plan" || item.type === "todoList") {
         renderItem(item);
       }
@@ -1257,6 +1688,7 @@ function onNotify(method, params, provider) {
 
 // ---------- navigation ----------
 async function openThread(t) {
+  resetActivityGroup();
   state.active = t;
   state.activeTurnId = null;
   state.items = new Map();
@@ -1300,6 +1732,7 @@ async function openThread(t) {
 
   if (cached?.thread) {
     renderHistory(cached.thread);
+    scrollDown({ force: true });
 
     if (cached.tokens) { $("tokCount").textContent = fmtTokens(cached.tokens) + " tok"; }
   }
@@ -1312,6 +1745,7 @@ async function openThread(t) {
     if (state.active !== t) { return; }
 
     renderHistory(res.thread, res.itemWindow);
+    scrollDown({ force: true });
     state.fetching = false;
     setCursor(res);
     setOfflineNote(false);
@@ -1399,11 +1833,11 @@ async function send() {
     return;
   }
 
-  doSend(text, { bubble: addUser(text) });
+  doSend(text, { bubble: addUser(text, { own: true }) });
 }
 
 function enqueue(text) {
-  const bubble = addUser(text);
+  const bubble = addUser(text, { own: true });
   const steering = state.sendMode === "steer";
   const c = chip("⏳", steering ? "Steering — interrupting the current turn…" : "Queued — sends when the current turn finishes");
   c.classList.add("pending");
@@ -1489,12 +1923,21 @@ function setBusy(busy, { external = false } = {}) {
   // time. Reconcile against the file once the turn is over instead.
   const ownTurnEnding = state.busy && !state.externalTurn && !busy;
 
+  if (!busy) {
+    settleReasoning();
+    settleActivityGroup();
+  }
+
   state.busy = busy;
 
   // A turn driven elsewhere (a terminal, an IDE, another device) reaches us by
   // re-reading the session file, not by streaming — so resync must stay allowed
   // for it, unlike a turn we are streaming ourselves.
   state.externalTurn = busy && external;
+
+  if (state.externalTurn && activeProvider() === "codex") {
+    refreshActivityGroup(state.activityGroup, { live: true });
+  }
   // Send stays enabled while busy so messages can be queued or used to steer.
   $("stopBtn").style.display = busy ? "flex" : "none";
   setLivePill(state.externalTurn);
@@ -2244,9 +2687,20 @@ function markRunning(provider, tid, on) {
 
   if (had !== on) { updateRowRunning(tid, on); }
 
-  // Keep the open thread's composer state honest if its run-state changed elsewhere.
-  if (state.active && (tid === state.active.id || tid === state.active.draftId) && !on && !state.pending.length) {
+  // Keep the open thread's composer state honest if its run-state changed
+  // elsewhere — and deliver anything queued behind that turn.
+  //
+  // A turn driven from the Mac or another device ends by file observation:
+  // there is no turn/completed notification for it, because we are not the one
+  // running it. That made this the only code that could release the composer,
+  // and it used to refuse to whenever something was queued — so a message typed
+  // during such a turn stayed pending forever, was never sent, and vanished on
+  // reload. Our own turns still end via turn/completed, which flushes there.
+  const ownTurnRunning = state.busy && !state.externalTurn;
+
+  if (state.active && (tid === state.active.id || tid === state.active.draftId) && !on && !ownTurnRunning) {
     setBusy(false);
+    flushPending();
   }
 }
 
@@ -2281,7 +2735,7 @@ async function resyncOpenThread() {
   // Following along at the bottom should keep following; someone reading back
   // through the transcript should stay where they are.
   const b = box();
-  const wasAtBottom = b.scrollHeight - b.scrollTop - b.clientHeight < 120;
+  const wasAtBottom = atBottom();
   const prevTop = b.scrollTop;
 
   state.resyncing = true;
@@ -2298,7 +2752,7 @@ async function resyncOpenThread() {
     state.fetching = false;
     setCursor(res);
 
-    if (wasAtBottom) { scrollDown(); } else { b.scrollTop = prevTop; }
+    if (wasAtBottom) { scrollDown({ force: true }); } else { b.scrollTop = prevTop; syncStick(); }
 
     if (isRunning(t.provider, t.id)) {
       setBusy(true, { external: state.externalTurn });
@@ -2446,6 +2900,15 @@ $("filesBtn").onclick = openFilesSheet;
 $("providerSeg").querySelectorAll("[data-provider]").forEach((b) => {
   b.onclick = () => switchProvider(b.dataset.provider);
 });
+
+// The only place stickiness is decided. Scrolling away turns auto-follow off;
+// scrolling back to the bottom turns it on again.
+$("messages").addEventListener("scroll", () => {
+  stickToBottom = atBottom();
+  updateJumpBtn();
+}, { passive: true });
+
+$("jumpBtn").onclick = () => scrollDown({ force: true });
 
 $("input").addEventListener("input", function () {
   this.style.height = "auto";

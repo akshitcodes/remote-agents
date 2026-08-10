@@ -16,6 +16,8 @@ import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { titleFor } from "./codex-titles.mjs";
+
 const SESSIONS = join(homedir(), ".codex", "sessions");
 
 function parse(line) {
@@ -101,11 +103,15 @@ export function summarize(file) {
 
   if (!meta?.id && !meta?.session_id) { return null; }
 
+  const id = meta.id ?? meta.session_id;
+
   return {
-    id: meta.id ?? meta.session_id,
+    id,
     provider: "codex",
     cwd: meta.cwd ?? "",
-    name: preview,
+    // Codex's own name for the thread when it has one; the opening message is
+    // only a stand-in until it does.
+    name: titleFor(id) || preview,
     preview,
     updatedAt: Math.floor(file.mtimeMs / 1000),
     gitInfo: meta.git?.branch ? { branch: meta.git.branch } : null,

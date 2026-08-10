@@ -270,19 +270,19 @@ async function emitExternal({ provider, threadId, running, changed }) {
   broadcast("external", payload);
 }
 
-// Sending a message is not safely repeatable, and a phone on a flaky connection
-// cannot tell "never arrived" from "arrived, reply lost". Retrying the second
-// case posts the message twice. So a send carries a client-generated requestId,
-// and a replay of one already accepted returns the original outcome instead of
-// sending again.
+// Sending or steering a message is not safely repeatable, and a phone on a
+// flaky connection cannot tell "never arrived" from "arrived, reply lost".
+// Retrying the second case posts the message twice. So each operation carries a
+// client-generated requestId, and a replay of one already accepted returns the
+// original outcome instead of sending again.
 const sendLedger = new Map(); // requestId -> { at, promise }
 const LEDGER_TTL_MS = 10 * 60 * 1000;
 
-async function sendOnce(provider, body) {
+async function sendOnce(provider, body, method = "send") {
   const requestId = body?.requestId;
 
   if (!requestId) {
-    return provider.send(body);
+    return provider[method](body);
   }
 
   const now = Date.now();
@@ -293,19 +293,19 @@ async function sendOnce(provider, body) {
 
   const seen = sendLedger.get(requestId);
 
-  // Await the original in-flight send rather than starting a second one: a
+  // Await the original in-flight operation rather than starting a second one: a
   // retry that arrives while the first is still running is the common case.
   if (seen) {
     return seen.promise;
   }
 
-  const promise = Promise.resolve(provider.send(body));
+  const promise = Promise.resolve(provider[method](body));
   sendLedger.set(requestId, { at: now, promise });
 
   try {
     return await promise;
   } catch (e) {
-    // A failed send is not a fact worth replaying — let a retry try again.
+    // A failed operation is not a fact worth replaying — let a retry try again.
     sendLedger.delete(requestId);
     throw e;
   }
@@ -819,6 +819,17 @@ const routes = {
     json(res, 200, await sendOnce(p, body));
   },
 
+  "POST /api/steer": async (req, res) => {
+    const body = await readBody(req);
+    const p = providerFromBody(res, body);
+
+    if (!p) {
+      return;
+    }
+
+    json(res, 200, await sendOnce(p, body, "steer"));
+  },
+
   "POST /api/interrupt": async (req, res) => {
     const body = await readBody(req);
     const p = providerFromBody(res, body);
@@ -979,7 +990,7 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    json(res, e.status ?? 500, { error: String(e.message ?? e), rpc: e.rpc });
+    json(res, e.status ?? 500, { error: String(e.message ?? e), code: e.code, rpc: e.rpc });
   }
 });
 
