@@ -383,6 +383,7 @@ const state = {
   sendMode: "queue",         // queue | steer — what happens when you send mid-turn
   busy: false,               // is a turn currently running
   pending: [],               // [{ text, chip }] messages waiting to send
+  failedSends: [],           // [{ threadId, text, requestId }] sends that never landed
   running: new Set(),        // "provider:threadId" of threads with an active turn
   sseErrored: false,         // did the event stream drop (for reconnect catch-up)
   resyncing: false,          // guard against overlapping re-reads
@@ -482,7 +483,8 @@ async function api(path, body) {
 
   if (!res.ok) {
     const b = await res.json().catch(() => ({}));
-    throw new Error(b.error || res.statusText);
+    // code lets callers decide (steer -> queue, say) without matching prose.
+    throw Object.assign(new Error(b.error || res.statusText), { code: b.code, status: res.status });
   }
 
   return res.json();
@@ -823,10 +825,17 @@ function addUser(text, { own = false } = {}) {
   return el;
 }
 
-function addAgent(text, streaming) {
+// A message can be rendered twice: once from the session file, once from the
+// live delta stream. Without a shared identity the second render appends a
+// duplicate bubble whose "streaming" class nothing can ever clear, leaving a
+// blinking caret behind forever. The newer render is the truth, so it replaces
+// any earlier bubble for the same item.
+function addAgent(text, streaming, itemId) {
   resetActivityGroup();
+  if (itemId) { findItemEl(itemId)?.remove(); }
   const el = document.createElement("div");
   el.className = "msg agent md" + (streaming ? " streaming" : "");
+  if (itemId) { el.dataset.itemId = itemId; }
   el._raw = text || "";
   el.innerHTML = renderMarkdown(el._raw);
   registerFilesFromEl(el);
@@ -1182,7 +1191,7 @@ function renderItem(item, opts = {}) {
       break;
     }
     case "agentMessage": {
-      if ((item.text ?? "").trim()) { return [addAgent(item.text)]; }
+      if ((item.text ?? "").trim()) { return [addAgent(item.text, false, item.id)]; }
 
       break;
     }
@@ -1326,6 +1335,10 @@ function renderHistory(thread, window) {
   // appended items are numbered against — see appendExternalItems.
   state.itemWindow = window ?? null;
   state.renderedItems = window ? window.end : turns.reduce((n, t) => n + (t.items?.length ?? 0), 0);
+  // Re-attach anything the session file cannot carry: sends that failed, and
+  // messages still waiting to go out.
+  restoreFailedSends();
+  restorePending();
 }
 
 // Which file+parser the positions on screen belong to, and how far along that
@@ -1503,6 +1516,17 @@ function applyExternalOps(ops) {
 }
 
 // ---------- live streaming ----------
+function findItemEl(itemId) {
+  return box().querySelector('[data-item-id="' + CSS.escape(String(itemId)) + '"]');
+}
+
+// Clear carets from the DOM, not from state.items: openThread and every thread
+// refetch replace that map, so a bubble orphaned by one of those resets is
+// unreachable through it and would blink for the rest of the session.
+function clearCarets() {
+  box().querySelectorAll(".msg.agent.streaming").forEach((el) => el.classList.remove("streaming"));
+}
+
 function liveItem(itemId, factory) {
   let rec = state.items.get(itemId);
 
@@ -1596,7 +1620,7 @@ function onNotify(method, params, provider) {
     }
 
     case "item/agentMessage/delta": {
-      const rec = liveItem(params.itemId, () => ({ el: addAgent("", true) }));
+      const rec = liveItem(params.itemId, () => ({ el: addAgent("", true, params.itemId) }));
       appendAgent(rec.el, params.delta ?? "");
       scrollDown();
       break;
@@ -1718,7 +1742,7 @@ function onNotify(method, params, provider) {
     case "turn/failed":
       setBusy(false);
       state.activeTurnId = null;
-      state.items.forEach((r) => r.el?.classList.remove("streaming"));
+      clearCarets();
 
       if (method === "turn/failed") { chip("⚠️", "Turn failed" + (params.error?.message ? ": " + params.error.message : "")); }
 
@@ -1731,6 +1755,9 @@ function onNotify(method, params, provider) {
 async function openThread(t) {
   resetActivityGroup();
   state.active = t;
+  // Reopening a thread should come back on the model and effort it was last run
+  // with, not on whatever was picked in some other thread since.
+  applyThreadPrefs();
   state.activeTurnId = null;
   state.items = new Map();
   state.pending = [];
@@ -1877,15 +1904,110 @@ async function send() {
   doSend(text, { bubble: addUser(text, { own: true }) });
 }
 
+// Queued and steered-but-not-yet-landed messages used to live only in
+// state.pending, which is memory. A steer that cannot land (the turn belongs to
+// another writer) deliberately stays pending — so on reload the message was
+// silently dropped, with no bubble, no chip and no record anywhere. Persist the
+// queue per thread so nothing you typed can disappear.
+const PENDING_KEY = "cxp_pending";
+
+function pendingStore() {
+  try { return JSON.parse(localStorage.getItem(PENDING_KEY)) || {}; } catch { return {}; }
+}
+
+function savePending() {
+  const tid = state.active?.id;
+
+  if (!tid) { return; }
+
+  const all = pendingStore();
+  const key = runKey(state.active.provider, tid);
+  const texts = state.pending.map((e) => e.text).filter(Boolean);
+
+  if (texts.length) { all[key] = texts; } else { delete all[key]; }
+
+  try { localStorage.setItem(PENDING_KEY, JSON.stringify(all)); } catch {}
+}
+
+function restorePending() {
+  const tid = state.active?.id;
+
+  if (!tid || state.pending.length) { return; }
+
+  const texts = pendingStore()[runKey(state.active.provider, tid)] ?? [];
+
+  for (const text of texts) {
+    const bubble = addUser(text);
+    const c = chip("⏳", "Not sent yet — waiting for the current turn to end");
+    c.classList.add("pending");
+    state.pending.push({ text, chip: c, bubble });
+  }
+}
+
 function enqueue(text) {
   const bubble = addUser(text, { own: true });
   const steering = state.sendMode === "steer";
-  const c = chip("⏳", steering ? "Steering — interrupting the current turn…" : "Queued — sends when the current turn finishes");
+  const c = chip("⏳", steering ? "Steering — lands at the next tool call…" : "Queued — sends when the current turn finishes");
   c.classList.add("pending");
-  state.pending.push({ text, chip: c, bubble });
+  const entry = { text, chip: c, bubble };
+  state.pending.push(entry);
+  savePending();
 
-  // Steer forces the running turn to end now; the turn-end handler flushes.
-  if (steering) { interruptApi(); }
+  // Queued messages wait for the turn to end. Steering does not: it goes into
+  // the turn that is already running.
+  if (steering) { trySteer(entry); }
+}
+
+// Why steering was not possible, in the user's terms. Each maps to a code the
+// provider returns; anything unrecognised just says it will wait.
+function steerFallbackReason(code) {
+  switch (code) {
+    case "steer_unsupported":
+      return `${PROVIDER_LABELS[activeProvider()] || "This agent"} can't steer — sending when the turn finishes`;
+    case "not_our_turn":
+      return "This turn is running elsewhere — sending when it finishes";
+    case "not_steerable":
+      return "This turn can't be steered — sending when it finishes";
+    default:
+      return "Queued — sends when the current turn finishes";
+  }
+}
+
+// Native steer: hand the message to the turn that is already running and let the
+// agent absorb it at its next tool-call boundary. This is deliberately neither
+// of the two things it could be mistaken for — it does not interrupt, and it
+// does not wait for the turn to end. If the provider cannot do it, the message
+// stays queued and the chip explains why rather than silently doing nothing.
+async function trySteer(entry) {
+  const t = state.active;
+
+  if (!t) { return; }
+
+  const id = newRequestId();
+
+  try {
+    await api("/api/steer", {
+      provider: t.provider || "codex",
+      threadId: t.id,
+      turnId: state.activeTurnId,
+      expectedTurnId: state.activeTurnId,
+      text: entry.text,
+      requestId: id,
+    });
+  } catch (e) {
+    const label = entry.chip?.querySelector("span");
+
+    if (label) { label.textContent = steerFallbackReason(e.code); }
+
+    return; // still pending: flushPending sends it when the turn ends
+  }
+
+  // It is part of the running turn now, so it must not also be sent later.
+  const at = state.pending.indexOf(entry);
+
+  if (at >= 0) { state.pending.splice(at, 1); savePending(); }
+
+  entry.chip?.remove();
 }
 
 // Send the next queued message once the turn has ended.
@@ -1893,10 +2015,11 @@ function flushPending() {
   if (state.busy || !state.pending.length || !state.active) { return; }
 
   const next = state.pending.shift();
+  savePending();
 
   if (next.chip) { next.chip.remove(); }
 
-  doSend(next.text, { bubble: next.bubble });
+  doSend(next.text, { bubble: next.bubble ?? addUser(next.text) });
 }
 
 // The actual API call for one message. The user bubble is already rendered.
@@ -1904,9 +2027,36 @@ function flushPending() {
 // requestId is generated once and reused by every retry of this same message, so
 // the ambiguous case — it arrived but the reply was lost on a flaky connection —
 // resolves to the original outcome instead of sending the message twice.
+// A failed send lives only in the DOM, and every re-render rebuilds the
+// transcript from the session file — which by definition does not contain a
+// message that never landed. Without this, the bubble and its Retry button are
+// destroyed moments after they appear and the typed text is lost.
+function recordFailedSend(threadId, text, requestId) {
+  dropFailedSend(requestId);
+  state.failedSends.push({ threadId, text, requestId });
+}
+
+function dropFailedSend(requestId) {
+  state.failedSends = state.failedSends.filter((f) => f.requestId !== requestId);
+}
+
+function restoreFailedSends() {
+  const tid = state.active?.id;
+
+  if (!tid) { return; }
+
+  for (const f of state.failedSends) {
+    if (f.threadId !== tid) { continue; }
+
+    const bubble = addUser(f.text);
+    markSendFailed(bubble, () => doSend(f.text, { bubble, requestId: f.requestId }));
+  }
+}
+
 async function doSend(text, { bubble, requestId } = {}) {
   const m = currentMode();
   const id = requestId || newRequestId();
+  const threadId = state.active?.id;
   setBusy(true);
   markSendFailed(bubble, null);
 
@@ -1919,8 +2069,10 @@ async function doSend(text, { bubble, requestId } = {}) {
       approvalPolicy: m.approvalPolicy, sandbox: m.sandbox,
       requestId: id,
     });
+    dropFailedSend(id);
   } catch (e) {
     setBusy(false);
+    recordFailedSend(threadId, text, id);
     markSendFailed(bubble, () => doSend(text, { bubble, requestId: id }));
 
     if (!bubble) { chip("⚠️", "send failed: " + e.message); }
@@ -1967,6 +2119,9 @@ function setBusy(busy, { external = false } = {}) {
   if (!busy) {
     settleReasoning();
     settleActivityGroup();
+    // Nothing is in flight, so nothing should be blinking — this also catches a
+    // bubble orphaned by a turn that ended before it was drawn.
+    clearCarets();
   }
 
   state.busy = busy;
@@ -2330,7 +2485,7 @@ function openEffortSheet() {
     </div>`).join("");
   openSheet(`<h2>Reasoning effort</h2><div class="hint">Higher effort thinks longer and uses more of your quota.</div>${html}`);
   $("sheetBody").querySelectorAll("[data-effort]").forEach((el) => {
-    el.onclick = () => { state.effort = el.dataset.effort; persistPrefs(); syncControls(); closeSheet(); };
+    el.onclick = () => { state.effort = el.dataset.effort; persistPrefs(); saveThreadPrefs(); syncControls(); closeSheet(); };
   });
 }
 
@@ -2370,6 +2525,7 @@ function setModel(id) {
   if (!efforts.includes(state.effort)) { state.effort = m?.defaultReasoningEffort ?? efforts[0] ?? null; }
 
   persistPrefs();
+  saveThreadPrefs();
   syncControls();
 }
 
@@ -2379,6 +2535,52 @@ function syncControls() {
   $("effortName").textContent = state.effort || "—";
   $("modeName").textContent = currentMode().name;
   $("steerName").textContent = SEND_MODES[state.sendMode].name;
+}
+
+// Model and effort were global, so a thread you were running on one model came
+// back on whatever you last picked elsewhere and had to be re-set every time.
+// Remember the pair per thread, and keep the global choice as the default for
+// threads that have no memory of their own.
+const THREAD_PREFS_KEY = "cxp_thread_prefs";
+
+function threadPrefsStore() {
+  try { return JSON.parse(localStorage.getItem(THREAD_PREFS_KEY)) || {}; } catch { return {}; }
+}
+
+function saveThreadPrefs() {
+  const tid = state.active?.id;
+
+  if (!tid || !state.model) { return; }
+
+  const all = threadPrefsStore();
+  all[runKey(state.active.provider, tid)] = { model: state.model, effort: state.effort };
+
+  // Keep this from growing without bound; the newest entries are the ones that
+  // matter, and a forgotten thread simply falls back to the global default.
+  const keys = Object.keys(all);
+
+  if (keys.length > 200) { delete all[keys[0]]; }
+
+  try { localStorage.setItem(THREAD_PREFS_KEY, JSON.stringify(all)); } catch {}
+}
+
+// Apply a thread's remembered model/effort, validated against what this provider
+// actually offers — a stale entry must never leave the composer on a model the
+// backend would reject.
+function applyThreadPrefs() {
+  const tid = state.active?.id;
+
+  if (!tid || !state.models.length) { return; }
+
+  const saved = threadPrefsStore()[runKey(state.active.provider, tid)];
+
+  if (!saved || !state.models.some((m) => m.id === saved.model)) { return; }
+
+  state.model = saved.model;
+  const m = currentModel();
+  const efforts = (m?.supportedReasoningEfforts ?? []).map((e) => e.reasoningEffort);
+  state.effort = efforts.includes(saved.effort) ? saved.effort : m?.defaultReasoningEffort ?? efforts[0] ?? null;
+  syncControls();
 }
 
 function persistPrefs() {
@@ -2918,6 +3120,8 @@ async function initModels() {
 
     if (prefs.sendMode && SEND_MODES[prefs.sendMode]) { state.sendMode = prefs.sendMode; }
 
+    // The global prefs above are the default; a thread with its own memory wins.
+    applyThreadPrefs();
     syncControls();
   } catch {}
 }

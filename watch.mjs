@@ -20,9 +20,18 @@ import { join } from "node:path";
 
 const POLL_MS = 1000;
 
-// How long after its last write a thread with no explicit end-of-turn marker is
-// still assumed to be working. Only used for providers that don't log one.
-const ASSUME_ACTIVE_MS = 25000;
+// How long after its last write a thread whose turn markers we cannot read is
+// still assumed to be working.
+//
+// This is reached more often than "providers that don't log a marker" suggests:
+// it also catches any log whose most recent marker sits further back than
+// TAIL_BYTES, which is every long turn on a large rollout. In that state this
+// value is the *only* thing deciding the badge, so it must outlast an ordinary
+// quiet stretch — a single slow tool call or a long model think easily passes
+// 25s, and reporting such a thread "stopped" invites re-sending into a live
+// turn. Turns this bridge runs itself no longer come through here at all; the
+// server records those directly.
+const ASSUME_ACTIVE_MS = 90000;
 
 // A turn that is interrupted — you hit escape, the CLI was killed, the machine
 // slept — never writes its end marker, so its log is left looking mid-turn

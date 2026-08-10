@@ -623,14 +623,19 @@ export class ClaudeProvider extends BaseProvider {
       // assistant
       const turn = ensureTurn();
 
-      for (const block of blocks) {
+      // One message can carry several text/thinking blocks, so the block index
+      // is part of an item's identity. The live stream ids these as
+      // `${message.id}:${index}` — match that exactly, or the client cannot tell
+      // that a file-rendered item and a streamed one are the same item and draws
+      // both.
+      for (const [blockIndex, block] of blocks.entries()) {
         if (block.type === "text") {
           if ((block.text ?? "").trim()) {
-            turn.items.push({ type: "agentMessage", id: obj.message?.id, text: block.text });
+            turn.items.push({ type: "agentMessage", id: `${obj.message?.id}:${blockIndex}`, text: block.text });
           }
         } else if (block.type === "thinking") {
           if ((block.thinking ?? "").trim()) {
-            turn.items.push({ type: "reasoning", id: obj.message?.id, summary: [block.thinking] });
+            turn.items.push({ type: "reasoning", id: `${obj.message?.id}:${blockIndex}`, summary: [block.thinking] });
           }
         } else if (block.type === "tool_use") {
           const item = toolUseToItem(block);

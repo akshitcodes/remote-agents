@@ -37,7 +37,42 @@ const PWA_FILES = {
 
 const sseClients = new Set(); // http responses subscribed to events
 
+// Turns this bridge is running, as "provider:threadId". We are told when these
+// start and end, so for them the session-file heuristic is a guess about
+// something we already know for certain — see trackActiveTurn.
+const activeTurns = new Set();
+
+function turnKey(provider, threadId) { return (provider || "codex") + ":" + threadId; }
+
+// A session file only reveals a turn is under way if the marker that says so is
+// still inside the tail window that gets read. On a large rollout it is not:
+// runningStates then falls back to "was this file written to very recently",
+// which goes false during any ordinary pause — a long tool call, a slow model
+// think — and the thread looks stopped while it is working. That misreport is
+// worse than cosmetic: it invites you to re-send a message into a live turn. Our
+// own turns never need guessing, so record them and let them override.
+function trackActiveTurn(event, data) {
+  if (event !== "notify") { return; }
+
+  const { method, params = {}, provider } = data ?? {};
+  const threadId = params.threadId;
+
+  if (!method || !threadId) { return; }
+
+  const key = turnKey(provider, threadId);
+
+  if (method === "turn/started") {
+    activeTurns.add(key);
+  } else if (method === "turn/completed" || method === "turn/failed" || method === "turn/aborted") {
+    activeTurns.delete(key);
+  } else if (method === "thread/adopted" && params.sessionId) {
+    // The turn streamed under a draft id; carry it onto the real one.
+    if (activeTurns.delete(key)) { activeTurns.add(turnKey(provider, params.sessionId)); }
+  }
+}
+
 function broadcast(event, data) {
+  trackActiveTurn(event, data);
   trackForPush(event, data);
   const frame = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 
@@ -693,7 +728,8 @@ const routes = {
     const running = watch.runningStates(p.name, (listed.data ?? []).map((t) => t.id));
 
     for (const t of listed.data ?? []) {
-      t.running = !!running[t.id];
+      // A turn we are running ourselves is known, not inferred.
+      t.running = activeTurns.has(turnKey(p.name, t.id)) || !!running[t.id];
     }
 
     json(res, 200, listed);

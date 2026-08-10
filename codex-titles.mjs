@@ -131,7 +131,12 @@ function fetchNames() {
     };
 
     try {
-      child = spawn(codexBinary(), ["app-server"], { stdio: ["pipe", "pipe", "ignore"] });
+      // No MCP servers. config.toml declares eleven, and app-server starts them
+      // all on launch — the exact thing that used to wedge it and take the
+      // session list down. thread/list only reads local state, so this probe has
+      // no use for them: it removes the failure mode rather than timing it out,
+      // and is measurably faster for it (927ms vs 1660ms locally).
+      child = spawn(codexBinary(), ["app-server", "-c", "mcp_servers={}"], { stdio: ["pipe", "pipe", "ignore"] });
     } catch {
       resolve(null);
       return;
