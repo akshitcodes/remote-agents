@@ -11,7 +11,7 @@
 //
 // Bump CACHE_VERSION to force a refresh of the precached shell.
 
-const CACHE_VERSION = "remote-agents-v4";
+const CACHE_VERSION = "remote-agents-v11";
 const NAV_TIMEOUT_MS = 2500;
 
 // A reverse proxy in front of us (Cloudflare, a tunnel, nginx) answers with a
@@ -32,6 +32,9 @@ const SHELL = [
   "/manifest.webmanifest",
   "/icons/icon-192.png",
   "/icons/icon-512.png",
+  "/icons/provider-codex.svg",
+  "/icons/provider-claude.svg",
+  "/icons/provider-grok.svg",
 ];
 
 self.addEventListener("install", (event) => {

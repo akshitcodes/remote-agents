@@ -18,6 +18,7 @@ import { homedir, networkInterfaces, platform } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { remoteAgentsHome } from "../app-home.mjs";
 import { startServer } from "../server.mjs";
 import qrcode from "qrcode-terminal";
 
@@ -25,7 +26,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = fileURLToPath(import.meta.url);
 const NODE = process.execPath;
 
-const CONFIG_DIR = join(homedir(), ".codex-phone");
+const CONFIG_DIR = remoteAgentsHome();
 const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 const LABEL = "com.codexphone.server";
 

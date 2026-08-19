@@ -7,15 +7,29 @@
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
 import { readFileSync, existsSync, statSync, realpathSync } from "node:fs";
-import { homedir } from "node:os";
-import { basename, dirname, join, resolve, sep, isAbsolute } from "node:path";
+import { basename, dirname, extname, join, resolve, sep, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { remoteAgentsHome } from "./app-home.mjs";
 import * as watch from "./watch.mjs";
+import { findRollout } from "./codex-rollout.mjs";
 import { CodexProvider } from "./providers/codex.mjs";
 import { ClaudeProvider } from "./providers/claude.mjs";
 import { GrokProvider } from "./providers/grok.mjs";
+import { rankRecentThreads, sortRecentThreads } from "./recent-threads.mjs";
+import { validateDispatchSettings, validateNewThreadModel } from "./dispatch-settings.mjs";
 import * as push from "./push.mjs";
+import { SendLedger } from "./send-ledger.mjs";
+import { ThreadSubscriptions } from "./thread-subscriptions.mjs";
+import { pruneAttachments, readAttachment, resolveAttachmentIds, storeAttachment } from "./attachments.mjs";
+import {
+  readClaudeTranscriptThreadSettings,
+  readCodexDbThreadSettings,
+  readCodexRolloutThreadSettings,
+  readGrokSessionThreadSettings,
+  ThreadSettingsService,
+  ThreadSettingsStore,
+} from "./thread-settings.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -25,12 +39,19 @@ let HOST = "127.0.0.1";
 let PORT = 8484;
 let TOKEN = "";
 const COOKIE_NAME = "cxp_session";
+const APP_HOME = remoteAgentsHome();
+const threadSubscriptions = new ThreadSubscriptions({ file: join(APP_HOME, "thread-subscriptions.json") });
+const threadSettingsStore = new ThreadSettingsStore({ file: join(APP_HOME, "thread-settings.json") });
+let threadSettings = null;
 
 // PWA assets served without the session cookie (no secrets in them).
 const PWA_FILES = {
   "/sw.js": { file: "sw.js", type: "application/javascript; charset=utf-8" },
   "/manifest.webmanifest": { file: "manifest.webmanifest", type: "application/manifest+json; charset=utf-8" },
   "/favicon.ico": { file: "icons/icon-192.png", type: "image/png" },
+  "/icons/provider-codex.svg": { file: "icons/provider-codex.svg", type: "image/svg+xml" },
+  "/icons/provider-claude.svg": { file: "icons/provider-claude.svg", type: "image/svg+xml" },
+  "/icons/provider-grok.svg": { file: "icons/provider-grok.svg", type: "image/svg+xml" },
 };
 
 // ---------- SSE fan-out ----------
@@ -41,8 +62,30 @@ const sseClients = new Set(); // http responses subscribed to events
 // start and end, so for them the session-file heuristic is a guess about
 // something we already know for certain — see trackActiveTurn.
 const activeTurns = new Set();
+const recentBridgeTerminals = new Map(); // provider:thread -> completion observed from our owner
 
 function turnKey(provider, threadId) { return (provider || "codex") + ":" + threadId; }
+
+// Keep the safety decision next to the authoritative turn set, not in the UI.
+// The optional set makes this exact route path testable without starting a turn.
+export async function releaseThreadLock(provider, threadId, turns = activeTurns) {
+  if (!threadId) {
+    throw Object.assign(new Error("threadId required"), { status: 400 });
+  }
+
+  if (turns.has(turnKey(provider?.name, threadId))) {
+    throw Object.assign(new Error("the thread is working; wait for the turn to finish before releasing it"), {
+      status: 409,
+      code: "turn_in_progress",
+    });
+  }
+
+  if (typeof provider?.releaseThread !== "function") {
+    throw Object.assign(new Error("write-lock controls are only available for Codex"), { status: 400 });
+  }
+
+  return provider.releaseThread({ threadId });
+}
 
 // A session file only reveals a turn is under way if the marker that says so is
 // still inside the tail window that gets read. On a large rollout it is not:
@@ -64,7 +107,13 @@ function trackActiveTurn(event, data) {
   if (method === "turn/started") {
     activeTurns.add(key);
   } else if (method === "turn/completed" || method === "turn/failed" || method === "turn/aborted") {
+    if (activeTurns.has(key)) { recentBridgeTerminals.set(key, Date.now()); }
     activeTurns.delete(key);
+
+    const cutoff = Date.now() - 60000;
+    for (const [terminalKey, at] of recentBridgeTerminals) {
+      if (at < cutoff) { recentBridgeTerminals.delete(terminalKey); }
+    }
   } else if (method === "thread/adopted" && params.sessionId) {
     // The turn streamed under a draft id; carry it onto the real one.
     if (activeTurns.delete(key)) { activeTurns.add(turnKey(provider, params.sessionId)); }
@@ -235,11 +284,21 @@ const reading = new Set();
 const lastRead = new Map();
 const trailing = new Map();
 
-async function emitExternal({ provider, threadId, running, changed }) {
+async function emitExternal({ provider, threadId, running, runConfidence, terminalId, terminalOutcome, terminalText, changed }) {
   const key = metaKey(provider, threadId);
 
   if (!changed) {
-    broadcast("external", { provider, threadId, running });
+    trackExternalCompletion({ provider, threadId, terminalId, terminalOutcome, reply: terminalText }).catch(() => {});
+    broadcast("external", { provider, threadId, running, runConfidence });
+    return;
+  }
+
+  // A bell-only interest needs run-state and an exact terminal cursor, not a
+  // full transcript diff. Large Codex rollouts can exceed 1 GB and parsing one
+  // synchronously would stall every HTTP/SSE/provider operation on the bridge.
+  if (!hasRecentPresence(provider, [threadId])) {
+    trackExternalCompletion({ provider, threadId, terminalId, terminalOutcome, reply: terminalText }).catch(() => {});
+    broadcast("external", { provider, threadId, running, runConfidence });
     return;
   }
 
@@ -248,12 +307,12 @@ async function emitExternal({ provider, threadId, running, changed }) {
   if (reading.has(key) || since < MIN_READ_MS) {
     // Coalesce: report liveness now (without `changed`, so the app doesn't fall
     // back to re-reading the whole thread) and pick the content up shortly.
-    broadcast("external", { provider, threadId, running });
+    broadcast("external", { provider, threadId, running, runConfidence });
 
     if (!trailing.has(key)) {
       trailing.set(key, setTimeout(() => {
         trailing.delete(key);
-        emitExternal({ provider, threadId, running, changed: true });
+        emitExternal({ provider, threadId, running, runConfidence, terminalId, terminalOutcome, terminalText, changed: true });
       }, Math.max(0, MIN_READ_MS - since) + 100));
     }
 
@@ -261,12 +320,14 @@ async function emitExternal({ provider, threadId, running, changed }) {
   }
 
   reading.add(key);
-  let payload = { provider, threadId, running, result: "unchanged" };
+  let payload = { provider, threadId, running, runConfidence, result: "unchanged" };
+  let reply = "";
 
   try {
     const p = providers[provider];
     const res = await p?.readThread(threadId);
     const items = (res?.thread?.turns ?? []).flatMap((t) => t.items ?? []);
+    reply = [...items].reverse().find((item) => item?.type === "agentMessage" && String(item.text ?? "").trim())?.text ?? "";
     const prev = snapshots.get(key);
     const generation = watch.generationOf(provider, threadId);
 
@@ -302,6 +363,7 @@ async function emitExternal({ provider, threadId, running, changed }) {
     lastRead.set(key, Date.now());
   }
 
+  trackExternalCompletion({ provider, threadId, terminalId, terminalOutcome, reply: reply || terminalText }).catch(() => {});
   broadcast("external", payload);
 }
 
@@ -310,47 +372,83 @@ async function emitExternal({ provider, threadId, running, changed }) {
 // Retrying the second case posts the message twice. So each operation carries a
 // client-generated requestId, and a replay of one already accepted returns the
 // original outcome instead of sending again.
-const sendLedger = new Map(); // requestId -> { at, promise }
-const LEDGER_TTL_MS = 10 * 60 * 1000;
+const sendLedger = new SendLedger({ file: join(APP_HOME, "send-ledger.json") });
 
 async function sendOnce(provider, body, method = "send") {
   const requestId = body?.requestId;
+  const patch = {};
+  let dispatch = null;
+
+  if (method === "send") {
+    let listed;
+    try {
+      listed = (await provider.models())?.data ?? [];
+    } catch (error) {
+      throw Object.assign(new Error(`Could not verify ${provider.name} models before sending: ${error?.message ?? error}`), {
+        status: 503,
+        code: "model_verification_failed",
+      });
+    }
+
+    const recorded = body?.threadId
+      ? await threadSettings.resolve(provider.name, body.threadId)
+      : null;
+    dispatch = validateDispatchSettings(provider.name, body, listed, recorded);
+  }
+
+  for (const key of ["model", "effort", "mode"]) {
+    if (key === "mode" && body?.mode === "provider-exact") { continue; }
+    if (body?.[key] != null) { patch[key] = body[key]; }
+  }
+
+  if (body?.threadId && Object.keys(patch).length) {
+    // Persist the exact next-turn selection before anything can reach a
+    // provider. If this write fails, the turn is not dispatched.
+    threadSettings.remember(provider.name, body.threadId, patch, { pending: true });
+  }
+
+  const deliver = async () => {
+    const providerBody = { ...body, attachments: resolveAttachmentIds(body?.attachmentIds ?? []) };
+    if (dispatch?.mode === "provider-exact") { providerBody.preserveProviderPolicy = true; }
+    delete providerBody.attachmentIds;
+    const result = await provider[method](providerBody);
+    return dispatch && result && typeof result === "object"
+      ? { ...result, dispatch: { ...dispatch, accepted: true } }
+      : result;
+  };
 
   if (!requestId) {
-    return provider[method](body);
+    return deliver();
   }
 
-  const now = Date.now();
+  return sendLedger.run({
+    provider: provider.name,
+    method,
+    requestId,
+    threadId: body?.threadId,
+  }, () => {
+    // This runs only after the idempotency record is durable and only when a
+    // provider operation will actually be attempted (not on a dedup replay or
+    // an uncertain-after-restart refusal).
+    if (method === "send") {
+      broadcast("send-stage", {
+        provider: provider.name,
+        threadId: body?.threadId,
+        requestId,
+        stage: "accepted",
+      });
+    }
 
-  for (const [id, entry] of sendLedger) {
-    if (now - entry.at > LEDGER_TTL_MS) { sendLedger.delete(id); }
-  }
-
-  const seen = sendLedger.get(requestId);
-
-  // Await the original in-flight operation rather than starting a second one: a
-  // retry that arrives while the first is still running is the common case.
-  if (seen) {
-    return seen.promise;
-  }
-
-  const promise = Promise.resolve(provider[method](body));
-  sendLedger.set(requestId, { at: now, promise });
-
-  try {
-    return await promise;
-  } catch (e) {
-    // A failed operation is not a fact worth replaying — let a retry try again.
-    sendLedger.delete(requestId);
-    throw e;
-  }
+    return deliver();
+  });
 }
 
 // The session-file watcher follows only what someone actually has open — the
 // same reports that drive unread-only push, reused so nothing extra is polled.
 function refreshInterest() {
   const now = Date.now();
-  const wanted = [];
+  threadSubscriptions.pruneEndpoints((endpoint) => push.has(endpoint));
+  const wanted = threadSubscriptions.interests();
 
   for (const [clientId, p] of presence) {
     if (now - p.at > PRESENCE_TTL_MS) {
@@ -389,6 +487,18 @@ function isOnScreen(provider, candidateIds) {
   return false;
 }
 
+function hasRecentPresence(provider, candidateIds) {
+  const now = Date.now();
+
+  for (const p of presence.values()) {
+    if (now - p.at <= PRESENCE_TTL_MS && p.provider === (provider || "codex") && p.ids.some((id) => candidateIds.includes(id))) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function metaKey(provider, threadId) {
   return `${provider || "codex"}:${threadId}`;
 }
@@ -398,6 +508,8 @@ function rememberThreadTitles(provider, rows) {
     if (t?.id) {
       threadTitles.set(metaKey(provider, t.id), t.name || t.preview || "");
     }
+
+    rememberThreadTitles(provider, t?.subagents);
   }
 }
 
@@ -508,9 +620,54 @@ async function lookupThreadTitle(provider, threadId) {
   }
 }
 
+async function trackExternalCompletion({ provider = "codex", threadId, terminalId, terminalOutcome, reply = "" } = {}) {
+  if (!threadId || !terminalId) { return; }
+  const key = metaKey(provider, threadId);
+  const ownedAt = recentBridgeTerminals.get(key) ?? 0;
+
+  // The ordinary provider event already sends the existing global completion
+  // push for a bridge-owned turn. The file watcher sees the same terminal record
+  // moments later; advance subscription cursors, but do not buzz twice.
+  if (activeTurns.has(turnKey(provider, threadId)) || Date.now() - ownedAt < 60000 || isOnScreen(provider, [threadId])) {
+    threadSubscriptions.acknowledge({ provider, threadId, terminalId });
+    return;
+  }
+
+  if (ownedAt) { recentBridgeTerminals.delete(key); }
+
+  const deliveries = threadSubscriptions.observe({
+    provider,
+    threadId,
+    terminalId,
+    outcome: terminalOutcome || "completed",
+  });
+
+  if (!deliveries.length) { return; }
+
+  refreshInterest();
+
+  let title = threadTitles.get(key) || "";
+  if (!title) { title = await lookupThreadTitle(provider, threadId); }
+
+  const failed = terminalOutcome === "failed";
+  const body = String(reply ?? "").trim().replace(/\s+/g, " ").slice(0, 180) || (failed ? "Turn failed" : "Turn finished");
+  const label = PROVIDER_LABELS[provider] || "Agent";
+
+  await push.send({
+    title: `${label}${failed ? " · failed" : " finished"}${title ? " · " + title.slice(0, 60) : ""}`,
+    body,
+    threadId,
+    provider,
+  }, { endpoints: deliveries.map((delivery) => delivery.endpoint) });
+}
+
 // Each provider gets an emit callback that tags every frame with its name.
 function makeEmit(name) {
   return function emit(event, data) {
+    if (event === "notify" && data?.method === "thread/adopted" && data.params?.threadId && data.params?.sessionId) {
+      threadSettings?.adopt(name, data.params.threadId, data.params.sessionId);
+    }
+
     broadcast(event, { ...data, provider: name });
   };
 }
@@ -522,6 +679,30 @@ const providers = {
   claude: new ClaudeProvider(makeEmit("claude")),
   grok: new GrokProvider(makeEmit("grok")),
 };
+
+function readCodexThreadSettings(threadId) {
+  const database = readCodexDbThreadSettings(threadId);
+  const rolloutSettings = readCodexRolloutThreadSettings(findRollout(threadId));
+  if (!database) { return rolloutSettings; }
+  if (!rolloutSettings) { return database; }
+  return {
+    ...database,
+    model: database.model ?? rolloutSettings.model,
+    effort: database.effort ?? rolloutSettings.effort,
+    source: database.model == null || database.effort == null
+      ? "codex_db+rollout"
+      : database.source,
+  };
+}
+
+threadSettings = new ThreadSettingsService({
+  store: threadSettingsStore,
+  readers: {
+    codex: readCodexThreadSettings,
+    claude: (threadId) => readClaudeTranscriptThreadSettings(providers.claude.findTranscriptPath(threadId)),
+    grok: (threadId) => readGrokSessionThreadSettings(providers.grok.findSession(threadId)),
+  },
+});
 
 function pickProvider(name) {
   return providers[name || "codex"] ?? null;
@@ -545,19 +726,26 @@ function json(res, status, body) {
   res.end(data);
 }
 
-function readBody(req) {
+function readBody(req, maxBytes = 12 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
-    let data = "";
+    const chunks = [];
+    let bytes = 0;
+    let tooLarge = false;
     req.on("data", (c) => {
-      data += c;
+      if (tooLarge) { return; }
 
-      if (data.length > 2e6) {
-        reject(new Error("body too large"));
-        req.destroy();
-      }
+      const chunk = Buffer.isBuffer(c) ? c : Buffer.from(c);
+      bytes += chunk.length;
+      tooLarge = bytes > maxBytes;
+      if (!tooLarge) { chunks.push(chunk); }
     });
     req.on("end", () => {
+      if (tooLarge) {
+        return reject(Object.assign(new Error("body too large"), { status: 413, code: "body_too_large" }));
+      }
+
       try {
+        const data = Buffer.concat(chunks).toString("utf8");
         resolve(data ? JSON.parse(data) : {});
       } catch (e) {
         reject(e);
@@ -639,7 +827,7 @@ function projectRoots(realCwd) {
 
 function fileAccessMode() {
   try {
-    return JSON.parse(readFileSync(join(homedir(), ".codex-phone", "config.json"), "utf8")).fileAccess || "project";
+    return JSON.parse(readFileSync(join(APP_HOME, "config.json"), "utf8")).fileAccess || "project";
   } catch {
     return "project";
   }
@@ -699,7 +887,69 @@ function readProjectFile(cwd, p) {
 
 // ---------- routes ----------
 
+async function listThreadsWithState(p, { search, cursor } = {}) {
+  const listed = await p.listThreads({ search, cursor });
+  rememberThreadTitles(p.name, listed.data);
+
+  // Whether each thread is mid-turn, read off the CLI's own session file, so
+  // the list badges turns this bridge never started (and turns that were
+  // already under way before the app was opened).
+  const threadIds = (listed.data ?? []).flatMap((t) => [t.id, ...(t.subagents ?? []).map((child) => child.id)]);
+  const running = watch.runningDetails(p.name, threadIds);
+
+  for (const t of listed.data ?? []) {
+    for (const child of t.subagents ?? []) {
+      const childOwned = activeTurns.has(turnKey(p.name, child.id));
+      child.running = childOwned || !!running[child.id]?.running;
+      child.runConfidence = childOwned ? "bridge" : (running[child.id]?.confidence ?? "unknown");
+    }
+
+    // A task is active when its own turn or any grouped subagent is active.
+    const owned = activeTurns.has(turnKey(p.name, t.id));
+    const activeChild = (t.subagents ?? []).some((child) => child.running);
+    t.running = owned || !!running[t.id]?.running || activeChild;
+    t.runConfidence = owned ? "bridge" : (activeChild ? "subagent" : (running[t.id]?.confidence ?? "unknown"));
+  }
+
+  return listed;
+}
+
+function decodeRecentCursor(value) {
+  if (!value) { return {}; }
+
+  try {
+    const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    throw Object.assign(new Error("invalid recent cursor"), { status: 400 });
+  }
+}
+
+function encodeRecentCursor(value) {
+  return Buffer.from(JSON.stringify(value)).toString("base64url");
+}
+
+function recentProviderUnavailable(value) {
+  return !!value && typeof value === "object" && value.unavailable === true;
+}
+
 const routes = {
+  "POST /api/attachment": async (req, res) => {
+    const body = await readBody(req);
+    json(res, 200, storeAttachment(body));
+  },
+
+  "GET /api/attachment": async (_req, res, url) => {
+    const attachment = readAttachment(url.searchParams.get("id"));
+    res.writeHead(200, {
+      "content-type": attachment.mimeType,
+      "content-length": attachment.data.length,
+      "cache-control": "private, max-age=86400",
+      "x-content-type-options": "nosniff",
+    });
+    res.end(attachment.data);
+  },
+
   "GET /api/file": async (req, res, url) => {
     if (!isAuthed(req)) {
       return json(res, 401, { error: "unauthorized" });
@@ -719,20 +969,55 @@ const routes = {
       return;
     }
 
-    const listed = await p.listThreads({ search: url.searchParams.get("search"), cursor: url.searchParams.get("cursor") });
-    rememberThreadTitles(p.name, listed.data);
-
-    // Whether each thread is mid-turn, read off the CLI's own session file, so
-    // the list badges turns this bridge never started (and turns that were
-    // already under way before the app was opened).
-    const running = watch.runningStates(p.name, (listed.data ?? []).map((t) => t.id));
-
-    for (const t of listed.data ?? []) {
-      // A turn we are running ourselves is known, not inferred.
-      t.running = activeTurns.has(turnKey(p.name, t.id)) || !!running[t.id];
-    }
-
+    const listed = await listThreadsWithState(p, {
+      search: url.searchParams.get("search"),
+      cursor: url.searchParams.get("cursor"),
+    });
     json(res, 200, listed);
+  },
+
+  "GET /api/threads/recent": async (_req, res, url) => {
+    const search = url.searchParams.get("search");
+    const cursorState = decodeRecentCursor(url.searchParams.get("cursor"));
+    const entries = Object.entries(providers).filter(([name]) => cursorState[name] !== false && !recentProviderUnavailable(cursorState[name]));
+    const settled = await Promise.allSettled(entries.map(([name, p]) => listThreadsWithState(p, {
+      search,
+      cursor: typeof cursorState[name] === "string" ? cursorState[name] : null,
+    })));
+    const groups = [];
+    // Preserve partial-sync truth throughout this pagination chain. Starting a
+    // fresh refresh has no cursor, so it naturally retries failed providers.
+    const unavailableProviders = Object.entries(cursorState)
+      .filter(([, value]) => recentProviderUnavailable(value))
+      .map(([name]) => name);
+    const nextState = { ...cursorState };
+
+    settled.forEach((result, index) => {
+      const providerName = entries[index][0];
+
+      if (result.status === "fulfilled") {
+        groups.push(result.value.data ?? []);
+        nextState[providerName] = result.value.nextCursor ?? false;
+      } else {
+        unavailableProviders.push(providerName);
+        // A refresh starts a new pagination chain and retries this provider.
+        // Within one chain, drop a persistent failure so Load more terminates.
+        nextState[providerName] = { unavailable: true };
+      }
+    });
+
+    const continuation = !!url.searchParams.get("cursor");
+    const ranked = continuation ? [] : rankRecentThreads(groups, { limit: 10 });
+    const featured = new Set(ranked.map((thread) => `${thread.provider}:${thread.id}`));
+    const more = sortRecentThreads(groups.flat().filter((thread) => !featured.has(`${thread.provider}:${thread.id}`)), { runningFirst: false });
+    const hasMore = Object.values(nextState).some((providerCursor) => typeof providerCursor === "string");
+
+    json(res, 200, {
+      data: ranked.concat(more),
+      featuredCount: ranked.length,
+      nextCursor: hasMore ? encodeRecentCursor(nextState) : null,
+      unavailableProviders,
+    });
   },
 
   // Web Push: the key the browser needs to subscribe, plus (un)subscribe.
@@ -779,7 +1064,45 @@ const routes = {
     }
 
     const body = await readBody(req);
-    json(res, 200, push.unsubscribe(body?.endpoint));
+    const endpoint = String(body?.endpoint ?? "");
+    threadSubscriptions.removeEndpoint(endpoint);
+    refreshInterest();
+    json(res, 200, push.unsubscribe(endpoint));
+  },
+
+  "POST /api/thread/notifications/status": async (req, res) => {
+    if (!isAuthed(req)) {
+      return json(res, 401, { error: "unauthorized" });
+    }
+
+    const body = await readBody(req);
+    const endpoint = String(body?.endpoint ?? "");
+    json(res, 200, { enabled: push.has(endpoint), rules: endpoint ? threadSubscriptions.list(endpoint) : [] });
+  },
+
+  "POST /api/thread/notifications": async (req, res) => {
+    if (!isAuthed(req)) {
+      return json(res, 401, { error: "unauthorized" });
+    }
+
+    const body = await readBody(req);
+    const endpoint = String(body?.endpoint ?? "");
+    const provider = String(body?.provider || "codex");
+    const threadId = String(body?.threadId ?? "");
+    const mode = String(body?.mode ?? "off");
+
+    if (mode !== "off" && !push.has(endpoint)) {
+      return json(res, 409, { error: "enable notifications on this device first", code: "push_not_subscribed" });
+    }
+
+    try {
+      const terminalId = watch.runningDetails(provider, [threadId])[threadId]?.terminalId ?? null;
+      const rule = threadSubscriptions.set({ endpoint, provider, threadId, mode, terminalId });
+      refreshInterest();
+      json(res, 200, rule);
+    } catch (e) {
+      json(res, e.status ?? 500, { error: String(e.message ?? e) });
+    }
   },
 
   "GET /api/thread": async (req, res, url) => {
@@ -792,6 +1115,13 @@ const routes = {
     const id = url.searchParams.get("id");
     const full = await p.readThread(id);
     const before = Number(url.searchParams.get("before")) || null;
+    const owned = activeTurns.has(turnKey(p.name, id));
+    const observed = watch.runningDetails(p.name, [id])[id];
+    const runtime = {
+      running: owned || !!observed?.running,
+      confidence: owned ? "bridge" : (observed?.confidence ?? "unknown"),
+      source: owned ? "bridge" : "session_file",
+    };
 
     // Seed the delta baseline from exactly what this client is being given, so
     // the next change is measured against it. Paging backwards is not a new
@@ -800,7 +1130,7 @@ const routes = {
       ? seedSnapshot(p.name, id, (full?.thread?.turns ?? []).flatMap((t) => t.items ?? []))
       : { generation: snapshots.get(metaKey(p.name, id))?.generation ?? null, revision: snapshots.get(metaKey(p.name, id))?.revision ?? 0 };
 
-    json(res, 200, { ...tailOfThread(full, before), ...cursor });
+    json(res, 200, { ...tailOfThread(full, before), ...cursor, runtime });
   },
 
   "GET /api/models": async (req, res, url) => {
@@ -813,6 +1143,40 @@ const routes = {
     json(res, 200, await p.models());
   },
 
+  "GET /api/thread/settings": async (req, res, url) => {
+    const p = providerFromQuery(res, url);
+
+    if (!p) { return; }
+
+    const threadId = url.searchParams.get("threadId");
+
+    if (!threadId) {
+      return json(res, 400, { error: "threadId required" });
+    }
+
+    // Provider settings must stay readable even if model discovery is slow or
+    // unavailable. The client already has that independent list and compares it.
+    json(res, 200, await threadSettings.resolve(p.name, threadId));
+  },
+
+  "POST /api/thread/settings": async (req, res) => {
+    const body = await readBody(req);
+    const p = providerFromBody(res, body);
+
+    if (!p) { return; }
+
+    if (!body?.threadId) {
+      return json(res, 400, { error: "threadId required" });
+    }
+
+    const patch = {};
+    for (const key of ["model", "effort", "mode"]) {
+      if (body[key] !== undefined) { patch[key] = body[key]; }
+    }
+
+    json(res, 200, { ok: true, stored: threadSettings.remember(p.name, body.threadId, patch, { pending: body.pending !== false }) });
+  },
+
   "GET /api/usage": async (req, res, url) => {
     const p = providerFromQuery(res, url);
 
@@ -821,6 +1185,14 @@ const routes = {
     }
 
     json(res, 200, await p.usage({ refresh: url.searchParams.get("refresh") === "1" }));
+  },
+
+  "GET /api/approvals": async (req, res, url) => {
+    const p = providerFromQuery(res, url);
+
+    if (!p) { return; }
+
+    json(res, 200, { data: p.pendingApprovalsList?.() ?? [] });
   },
 
   "GET /api/projects": async (req, res, url) => {
@@ -833,6 +1205,46 @@ const routes = {
     json(res, 200, await p.projects());
   },
 
+  "GET /api/thread/lock": async (req, res, url) => {
+    const p = providerFromQuery(res, url);
+
+    if (!p) {
+      return;
+    }
+
+    if (typeof p.lockStatus !== "function") {
+      return json(res, 400, { error: "write-lock controls are only available for Codex" });
+    }
+
+    json(res, 200, p.lockStatus(url.searchParams.get("threadId")));
+  },
+
+  "POST /api/thread/lock/warm": async (req, res) => {
+    const body = await readBody(req);
+    const p = providerFromBody(res, body);
+
+    if (!p) {
+      return;
+    }
+
+    if (typeof p.warmThread !== "function") {
+      return json(res, 400, { error: "write-lock controls are only available for Codex" });
+    }
+
+    json(res, 200, await p.warmThread(body));
+  },
+
+  "POST /api/thread/lock/release": async (req, res) => {
+    const body = await readBody(req);
+    const p = providerFromBody(res, body);
+
+    if (!p) {
+      return;
+    }
+
+    json(res, 200, await releaseThreadLock(p, body.threadId));
+  },
+
   "POST /api/thread/new": async (req, res) => {
     const body = await readBody(req);
     const p = providerFromBody(res, body);
@@ -841,6 +1253,16 @@ const routes = {
       return;
     }
 
+    let listed;
+    try {
+      listed = (await p.models())?.data ?? [];
+    } catch (error) {
+      throw Object.assign(new Error(`Could not verify ${p.name} models before creating the session: ${error?.message ?? error}`), {
+        status: 503,
+        code: "model_verification_failed",
+      });
+    }
+    body.model = validateNewThreadModel(p.name, body.model, listed);
     json(res, 200, await p.newThread(body));
   },
 
@@ -976,7 +1398,8 @@ const server = createServer(async (req, res) => {
   // PWA assets (service worker, manifest, icons, favicon) are served pre-auth —
   // they carry no secrets and the browser/SW may request them without the cookie.
   if (req.method === "GET" && (PWA_FILES[url.pathname] || url.pathname.startsWith("/icons/"))) {
-    const entry = PWA_FILES[url.pathname] ?? { file: join("icons", basename(url.pathname)), type: "image/png" };
+    const iconName = basename(url.pathname);
+    const entry = PWA_FILES[url.pathname] ?? { file: join("icons", iconName), type: extname(iconName).toLowerCase() === ".svg" ? "image/svg+xml" : "image/png" };
     const file = join(__dirname, "public", entry.file);
 
     if (!existsSync(file)) {
@@ -1037,6 +1460,7 @@ export function startServer({ host = "0.0.0.0", port = 8484, token } = {}) {
   PORT = Number(port);
   TOKEN = token || "";
 
+  pruneAttachments();
   push.init();
 
   // Turns nobody here started still move their session file; tell the app so it

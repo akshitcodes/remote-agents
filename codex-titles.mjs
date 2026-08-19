@@ -33,6 +33,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
+import { remoteAgentsHome } from "./app-home.mjs";
 import { codexBinary } from "./providers/codex.mjs";
 
 const CODEX_HOME = join(homedir(), ".codex");
@@ -42,7 +43,7 @@ const TTL_MS = 10000;
 const REFRESH_MS = 5 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 20000;
 const NAME_LIMIT = 400;
-const NAMES_FILE = join(homedir(), ".codex-phone", "thread-names.json");
+const NAMES_FILE = join(remoteAgentsHome(), "thread-names.json");
 
 let cache = { at: 0, titles: new Map() };
 let names = null; // id -> name, loaded from disk on first use

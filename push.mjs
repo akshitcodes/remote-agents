@@ -9,12 +9,12 @@
 // gone (404/410) is pruned automatically.
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 
 import webpush from "web-push";
+import { remoteAgentsHome } from "./app-home.mjs";
 
-const CONFIG_DIR = join(homedir(), ".codex-phone");
+const CONFIG_DIR = remoteAgentsHome();
 const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 const SUBS_FILE = join(CONFIG_DIR, "push.json");
 
@@ -69,6 +69,10 @@ export function count() {
   return subs.length;
 }
 
+export function has(endpoint) {
+  return !!endpoint && subs.some((sub) => sub.endpoint === endpoint);
+}
+
 export function subscribe(sub) {
   if (!sub?.endpoint) {
     throw Object.assign(new Error("subscription with an endpoint is required"), { status: 400 });
@@ -92,7 +96,7 @@ export function unsubscribe(endpoint) {
 }
 
 // Fire and forget: a dead subscription is dropped, other failures are logged.
-export async function send(payload) {
+export async function send(payload, { endpoints } = {}) {
   if (!keys || !subs.length) {
     return { sent: 0 };
   }
@@ -100,8 +104,10 @@ export async function send(payload) {
   const body = JSON.stringify(payload);
   const dead = [];
   let sent = 0;
+  const wanted = endpoints === undefined ? null : new Set(endpoints);
+  const targets = wanted ? subs.filter((sub) => wanted.has(sub.endpoint)) : subs;
 
-  await Promise.all(subs.map(async (sub) => {
+  await Promise.all(targets.map(async (sub) => {
     try {
       await webpush.sendNotification(sub, body);
       sent++;

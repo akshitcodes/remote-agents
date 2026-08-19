@@ -8,17 +8,29 @@
   },
   "main": "server.mjs",
   "scripts": {
-    "start": "node bin/codex-phone.mjs"
+    "start": "node bin/codex-phone.mjs",
+    "test": "node --test test/*.test.mjs"
   },
   "files": [
     "bin/",
     "server.mjs",
+    "app-home.mjs",
+    "attachments.mjs",
+    "send-ledger.mjs",
+    "thread-subscriptions.mjs",
+    "thread-settings.mjs",
+    "watch.mjs",
+    "push.mjs",
+    "codex-rollout.mjs",
+    "dispatch-settings.mjs",
+    "codex-titles.mjs",
+    "recent-threads.mjs",
     "providers/",
     "public/",
     "README.md"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=22.5.0"
   },
   "dependencies": {
     "@zed-industries/agent-client-protocol": "^0.4.5",

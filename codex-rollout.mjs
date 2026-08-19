@@ -65,8 +65,20 @@ export function listRolloutFiles() {
 // Enough of the head to find session_meta and the first user message, without
 // reading a multi-megabyte log just to render one row.
 const HEAD_BYTES = 256 * 1024;
+const summaryCache = new Map(); // path -> immutable metadata from the rollout head
 
 export function summarize(file) {
+  const cached = summaryCache.get(file.path);
+
+  if (cached && (cached.preview || cached.observedMtimeMs === file.mtimeMs)) {
+    const { observedMtimeMs: _observedMtimeMs, ...stable } = cached;
+    return {
+      ...stable,
+      name: titleFor(cached.id) || cached.preview,
+      updatedAt: Math.floor(file.mtimeMs / 1000),
+    };
+  }
+
   let head = "";
   let fd;
 
@@ -104,8 +116,11 @@ export function summarize(file) {
   if (!meta?.id && !meta?.session_id) { return null; }
 
   const id = meta.id ?? meta.session_id;
+  const spawn = meta.source?.subagent?.thread_spawn ?? {};
+  const parentThreadId = meta.parent_thread_id ?? spawn.parent_thread_id ?? null;
+  const threadSource = meta.thread_source ?? (parentThreadId ? "subagent" : "user");
 
-  return {
+  const summary = {
     id,
     provider: "codex",
     cwd: meta.cwd ?? "",
@@ -115,7 +130,21 @@ export function summarize(file) {
     preview,
     updatedAt: Math.floor(file.mtimeMs / 1000),
     gitInfo: meta.git?.branch ? { branch: meta.git.branch } : null,
+    threadSource,
+    parentThreadId,
+    subagentDepth: Number.isFinite(Number(spawn.depth)) ? Number(spawn.depth) : null,
+    agentNickname: meta.agent_nickname ?? spawn.agent_nickname ?? null,
+    agentPath: meta.agent_path ?? spawn.agent_path ?? null,
   };
+
+  const { name: _name, updatedAt: _updatedAt, ...stable } = summary;
+  summaryCache.set(file.path, { ...stable, observedMtimeMs: file.mtimeMs });
+
+  if (summaryCache.size > 2000) {
+    summaryCache.delete(summaryCache.keys().next().value);
+  }
+
+  return summary;
 }
 
 // ---------- records -> the items the UI renders ----------
@@ -193,8 +222,14 @@ export function feedLines(st, lines) {
           break;
 
         case "user_message":
-          if (String(p.message ?? "").trim()) {
-            push({ id: id(), type: "userMessage", content: [{ type: "text", text: String(p.message) }] });
+          {
+            const content = [];
+
+            if (String(p.message ?? "").trim()) { content.push({ type: "text", text: String(p.message) }); }
+            for (const _ of p.images ?? []) { content.push({ type: "image" }); }
+            for (const _ of p.local_images ?? []) { content.push({ type: "localImage" }); }
+
+            if (content.length) { push({ id: id(), type: "userMessage", content }); }
           }
 
           break;
@@ -363,6 +398,21 @@ export function findRollout(id) {
   }
 
   return null;
+}
+
+// Resume cost is mostly proportional to the rollout app-server must replay.
+// Keep this as metadata only: callers need an honest progress label, not the
+// file contents a second time.
+export function rolloutSize(id) {
+  const path = findRollout(id);
+
+  if (!path) { return null; }
+
+  try {
+    return statSync(path).size;
+  } catch {
+    return null;
+  }
 }
 
 export function rolloutExists(id) {

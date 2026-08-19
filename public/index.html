@@ -35,7 +35,7 @@
 
   /* header */
   header {
-    display: flex; align-items: center; gap: 10px;
+    display: flex; align-items: center; gap: 7px;
     padding: calc(env(safe-area-inset-top) + 10px) 12px 10px;
     background: var(--bg2); border-bottom: 1px solid var(--border); flex-shrink: 0;
   }
@@ -45,6 +45,9 @@
   .hbtn { background: none; border: none; color: var(--accent2); font-size: 15px; padding: 6px; cursor: pointer; display: flex; align-items: center; justify-content: center; border-radius: 8px; }
   .hbtn:active { background: var(--bg3); }
   #backBtn { font-size: 26px; padding: 0 4px; display: none; }
+  #sidebarToggleBtn { display: none; color: var(--fg-dim); }
+  #sidebarToggleBtn svg path:last-child { transform-origin: center; transition: transform .18s ease; }
+  #sidebarToggleBtn.collapsed svg path:last-child { transform: rotate(180deg); }
   .hbtn.icon svg { width: 20px; height: 20px; stroke: currentColor; fill: none; stroke-width: 2; }
   #connDot { width: 9px; height: 9px; border-radius: 50%; background: var(--danger); flex-shrink: 0; transition: background .3s; }
   #connDot.on { background: var(--accent); }
@@ -54,19 +57,46 @@
 
   /* list view */
   #listView { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; }
-  #searchWrap { padding: 10px 12px; position: sticky; top: 0; background: var(--bg); z-index: 2; }
-  #search { width: 100%; padding: 9px 13px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg3); color: var(--fg); font-size: 16px; outline: none; }
-  .seg { display: flex; gap: 3px; background: var(--bg3); border: 1px solid var(--border); border-radius: 10px; padding: 3px; margin-bottom: 10px; }
-  .seg button { flex: 1; background: none; border: none; color: var(--fg-dim); font-size: 13px; font-weight: 600; padding: 7px; border-radius: 8px; cursor: pointer; }
-  .seg button.on { background: var(--accent2); color: #04121f; }
-  .chip.prov { color: var(--accent2); }
-  .row { padding: 12px 14px; border-bottom: 1px solid var(--bg3); cursor: pointer; }
-  .row:active { background: var(--bg2); }
-  .row .preview { font-size: 14px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; margin-bottom: 6px; }
-  .row .meta { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
-  .chip { font-size: 11px; color: var(--fg-dim); background: var(--bg3); padding: 2px 8px; border-radius: 20px; white-space: nowrap; max-width: 45vw; overflow: hidden; text-overflow: ellipsis; }
-  .chip.branch { color: var(--purple); }
-  .chip.time { background: none; padding-left: 0; }
+  #searchWrap { padding: 10px 12px 9px; position: sticky; top: 0; background: #0d1117f2; backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); z-index: 2; border-bottom: 1px solid #ffffff08; }
+  #search { width: 100%; padding: 9px 13px; border-radius: 11px; border: 1px solid var(--border); background: #161b22cc; color: var(--fg); font-size: 16px; outline: none; box-shadow: inset 0 1px 0 #ffffff08; }
+  #search:focus { border-color: #58a6ff88; box-shadow: 0 0 0 3px #58a6ff16; }
+  .seg { display: flex; gap: 3px; background: #161b22cc; border: 1px solid var(--border); border-radius: 11px; padding: 3px; margin-bottom: 9px; }
+  .seg button { flex: 1; background: none; border: none; color: var(--fg-dim); font-size: 13px; font-weight: 600; padding: 7px; border-radius: 8px; cursor: pointer; white-space: nowrap; }
+  .seg button.on { background: #30363d; color: var(--fg); box-shadow: 0 1px 4px #0005, inset 0 1px 0 #ffffff0d; }
+  #viewSeg { display: flex; flex-shrink: 0; gap: 1px; margin: 0; padding: 2px; border: 1px solid var(--border); border-radius: 9px; background: #0d111788; }
+  #viewSeg button { min-height: 24px; border: 0; border-radius: 7px; padding: 2px 7px; background: transparent; color: var(--fg-dim); font: inherit; font-size: 10.5px; font-weight: 650; white-space: nowrap; cursor: pointer; }
+  #viewSeg button.on { background: var(--bg3); color: var(--fg); box-shadow: inset 0 1px 0 #ffffff0d; }
+  #providerSeg { display: none; }
+  .chip.prov { width: 19px; height: 19px; flex: 0 0 19px; display: inline-flex; align-items: center; justify-content: center; padding: 2px; border-radius: 6px; background: var(--bg3); }
+  .chip.prov img { width: 100%; height: 100%; display: block; object-fit: contain; border-radius: 4px; }
+  .row { padding: 8px 12px; border-bottom: 1px solid #21262dcc; cursor: pointer; transition: background .12s ease; }
+  .row:active { background: linear-gradient(90deg, #161b22, #1b2129); }
+  .row-head { display: flex; align-items: center; gap: 7px; min-height: 44px; }
+  .row-copy { flex: 1; min-width: 0; border: 0; padding: 0; background: transparent; color: inherit; text-align: left; font: inherit; cursor: pointer; }
+  .row .titleline { display: flex; align-items: center; gap: 6px; min-width: 0; margin-bottom: 4px; }
+  .row .preview { flex: 1; min-width: 0; font-size: 14px; font-weight: 570; line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row-actions { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
+  .row-action { min-width: 44px; min-height: 44px; border: 0; border-radius: 10px; background: transparent; color: var(--fg-dim); padding: 5px 7px; font: inherit; font-size: 11px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 4px; }
+  .row-action:active { background: var(--bg3); }
+  .row-action svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 2; }
+  .row-action.on { color: var(--accent); border-color: #2ea04377; background: #2ea04314; }
+  .row-action .chevron { font-size: 15px; line-height: 1; transition: transform .15s; }
+  .row-action.expanded .chevron { transform: rotate(90deg); }
+  .section-divider { display: flex; align-items: center; gap: 9px; padding: 12px 12px 6px; color: var(--fg-faint); font-size: 10.5px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; }
+  .section-divider::after { content: ""; height: 1px; flex: 1; background: var(--bg3); }
+  .subagents { display: none; margin: 10px 0 0 16px; border-left: 2px solid var(--border); padding-left: 9px; }
+  .subagents.open { display: block; }
+  .subagent-row { width: 100%; min-height: 44px; display: flex; align-items: center; gap: 8px; padding: 9px 8px; border: 0; border-radius: 9px; background: transparent; color: inherit; text-align: left; font: inherit; cursor: pointer; }
+  .subagent-row:active { background: var(--bg3); }
+  .subagent-copy { flex: 1; min-width: 0; }
+  .subagent-name { font-size: 13px; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .subagent-path { font-size: 11px; color: var(--fg-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .subagent-row .run-badge { flex-shrink: 0; }
+  .row .meta { display: flex; gap: 5px; flex-wrap: nowrap; align-items: center; min-width: 0; overflow: hidden; }
+  .chip { font-size: 10.5px; line-height: 1.45; color: var(--fg-dim); background: var(--bg3); padding: 1px 7px; border-radius: 20px; white-space: nowrap; max-width: 45vw; overflow: hidden; text-overflow: ellipsis; }
+  .row .chip.dir { min-width: 0; flex: 0 1 auto; }
+  .chip.time { background: none; padding: 0; margin-left: auto; flex-shrink: 0; font-variant-numeric: tabular-nums; }
+  .chip.ready-badge { color: var(--fg-faint); background: transparent; padding-left: 0; }
   .chip.run-badge { display: inline-flex; align-items: center; gap: 5px; color: var(--accent); background: #2ea04322; }
   .run-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: pulse 1.3s ease-in-out infinite; }
   /* A message that didn't send stays visible and carries its own retry, so the
@@ -176,6 +206,12 @@
   .item-chip.link { cursor: pointer; }
   .item-chip.link:active { background: var(--bg3); }
   .item-chip.pending { color: var(--warn); border-color: #9e6a03; border-style: dashed; margin-left: auto; }
+  .pending-actions { display: inline-flex; align-items: center; gap: 3px; margin-left: 2px; }
+  .item-chip .pending-actions { min-width: auto; overflow: visible; white-space: normal; flex-shrink: 0; }
+  .pending-action { min-height: 34px; border: 0; border-radius: 7px; padding: 4px 8px; background: var(--bg3); color: var(--fg-dim); font: inherit; font-size: 11px; font-weight: 650; cursor: pointer; }
+  .pending-action:active { background: var(--border); color: var(--fg); }
+  .pending-action.cancel { color: var(--danger); }
+  #queuedEditInput { min-height: 120px; resize: vertical; font-family: inherit; line-height: 1.4; }
   .ic { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 2; flex-shrink: 0; vertical-align: -2px; }
 
   /* diff colors */
@@ -201,12 +237,29 @@
   .ctl:active { background: var(--bg); }
   .ctl b { color: var(--fg); font-weight: 600; }
   .ctl .ck { color: var(--fg-faint); font-size: 10px; }
+  .settings-truth { display: inline-flex; align-items: center; gap: 6px; min-height: 29px; margin-left: auto; color: var(--fg-dim); font-size: 11px; white-space: nowrap; }
+  .settings-truth::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px #3fb95018; }
+  .settings-truth[data-state="loading"]::before { background: var(--warn); animation: pulse 1.3s ease-in-out infinite; }
+  .settings-truth[data-state="error"] { color: var(--danger); }
+  .settings-truth[data-state="error"]::before { background: var(--danger); box-shadow: 0 0 0 3px #f8514918; }
+  .settings-truth[data-state="override"] { color: var(--accent2); }
+  .settings-truth[data-state="override"]::before { background: var(--accent2); box-shadow: 0 0 0 3px #58a6ff18; }
   #composer { display: flex; gap: 8px; align-items: flex-end; min-width: 0; }
   #input { flex: 1; min-width: 0; background: var(--bg3); border: 1px solid var(--border); color: var(--fg); border-radius: 18px; padding: 9px 14px; font-size: 16px; outline: none; resize: none; max-height: 120px; font-family: inherit; line-height: 1.4; }
-  #sendBtn, #stopBtn { width: 38px; height: 38px; border-radius: 50%; border: none; font-size: 17px; cursor: pointer; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
+  #sendBtn, #stopBtn, #attachBtn { width: 38px; height: 38px; border-radius: 50%; border: none; font-size: 17px; cursor: pointer; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
   #sendBtn { background: var(--accent); color: #04260f; }
   #sendBtn:disabled { opacity: .4; }
   #stopBtn { background: var(--danger); color: #fff; display: none; }
+  #attachBtn { background: var(--bg3); color: var(--fg-dim); border: 1px solid var(--border); }
+  #attachBtn:disabled { opacity: .35; }
+  #attachmentStrip { display: none; gap: 8px; overflow-x: auto; padding: 0 0 8px; }
+  #attachmentStrip.on { display: flex; }
+  .attachment-preview { width: 58px; height: 58px; position: relative; flex: 0 0 58px; border-radius: 10px; overflow: hidden; border: 1px solid var(--border); background: var(--bg3); }
+  .attachment-preview img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .attachment-preview button { position: absolute; right: 2px; top: 2px; width: 20px; height: 20px; border: 0; border-radius: 50%; color: #fff; background: #000b; font-size: 14px; line-height: 18px; }
+  .msg.user .user-images { display: grid; grid-template-columns: repeat(2, minmax(0, 150px)); gap: 5px; margin-bottom: 6px; }
+  .msg.user .user-images img, .msg.user .image-placeholder { width: 100%; max-height: 190px; min-height: 72px; object-fit: cover; border-radius: 9px; background: #0002; }
+  .msg.user .image-placeholder { display: flex; align-items: center; justify-content: center; color: var(--fg-dim); font-size: 12px; }
 
   /* sheets / modal */
   .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 50; display: none; }
@@ -220,6 +273,7 @@
   .opt { display: flex; align-items: flex-start; gap: 10px; padding: 11px 12px; border: 1px solid var(--border); border-radius: 10px; margin-bottom: 8px; cursor: pointer; }
   .opt.sel { border-color: var(--accent); background: #2ea04314; }
   .opt .radio { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--fg-faint); flex-shrink: 0; margin-top: 1px; }
+  .opt-button { width: 100%; background: transparent; color: inherit; text-align: left; font: inherit; }
   .opt.sel .radio { border-color: var(--accent); background: radial-gradient(circle, var(--accent) 42%, transparent 46%); }
   .opt .on { font-weight: 600; font-size: 14.5px; }
   .opt .od { font-size: 12.5px; color: var(--fg-dim); margin-top: 2px; }
@@ -227,6 +281,12 @@
   .primary-btn { width: 100%; background: var(--accent); color: #04260f; border: none; border-radius: 11px; padding: 13px; font-size: 15px; font-weight: 600; cursor: pointer; margin-top: 14px; }
   .primary-btn:disabled { opacity: .4; }
   .field-input { width: 100%; background: var(--bg3); border: 1px solid var(--border); color: var(--fg); border-radius: 10px; padding: 10px 12px; font-size: 16px; outline: none; }
+  .sheet.new-session-host { height: min(82dvh, 680px); overflow: hidden; display: flex; flex-direction: column; }
+  .sheet.new-session-host #sheetBody { flex: 1; min-height: 0; }
+  .new-session-layout { height: 100%; min-height: 0; display: flex; flex-direction: column; }
+  .new-session-projects { flex: 1; min-height: 110px; overflow-y: auto; overscroll-behavior: contain; padding: 1px 2px 4px 0; -webkit-overflow-scrolling: touch; }
+  .new-session-footer { flex-shrink: 0; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--border); background: var(--bg2); }
+  .new-session-footer .seclabel { margin-top: 0; }
 
   /* file viewer */
   .file-tabs { display: flex; gap: 6px; margin: 4px 0 12px; }
@@ -275,39 +335,132 @@
   .spark { display: flex; align-items: flex-end; gap: 3px; height: 46px; margin-top: 10px; }
   .spark > div { flex: 1; background: var(--accent2); border-radius: 2px 2px 0 0; min-height: 2px; opacity: .8; }
   .credit { display: flex; gap: 9px; align-items: center; background: #2ea04314; border: 1px solid var(--accent); border-radius: 10px; padding: 10px 12px; margin-top: 6px; font-size: 13px; }
+
+  /* Laptop workspace: keep navigation in view and bound the reading measure.
+     Mobile still uses the original full-screen list -> chat navigation below
+     this breakpoint, including its back button and safe-area spacing. */
+  @media (min-width: 960px) {
+    body.thread-open #app {
+      display: grid;
+      grid-template-columns: clamp(310px, 24vw, 380px) minmax(0, 1fr);
+      grid-template-rows: auto minmax(0, 1fr);
+      background: var(--bg);
+      transition: grid-template-columns .2s ease;
+    }
+    body.thread-open.sidebar-collapsed #app { grid-template-columns: 0 minmax(0, 1fr); }
+    body.thread-open header { grid-column: 1 / -1; grid-row: 1; padding: 10px 18px; box-shadow: 0 1px 0 #0008; z-index: 4; }
+    body.thread-open #backBtn { display: none !important; }
+    body.thread-open #sidebarToggleBtn { display: flex; }
+    body.thread-open #viewSeg,
+    body.thread-open #usageBtn,
+    body.thread-open #newBtn { display: flex !important; }
+    body.thread-open #listView {
+      display: block !important;
+      grid-column: 1;
+      grid-row: 2;
+      min-width: 0;
+      border-right: 1px solid var(--border);
+      background: var(--bg);
+      transition: opacity .15s ease;
+    }
+    body.thread-open.sidebar-collapsed #listView {
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+      border-right: 0;
+    }
+    body.thread-open #chatView {
+      grid-column: 2;
+      grid-row: 2;
+      min-width: 0;
+      align-items: center;
+      background: var(--bg);
+    }
+    body.thread-open #transcript,
+    body.thread-open #composerWrap {
+      width: min(calc(100% - 32px), 70vw, 1100px);
+      border-left: 0;
+      border-right: 0;
+      background: transparent;
+    }
+    body.thread-open #messages { padding: 24px clamp(24px, 4vw, 56px) 20px; }
+    body.thread-open #composerWrap {
+      padding: 10px clamp(20px, 3vw, 42px) 14px;
+      border-top-color: #30363d70;
+      box-shadow: none;
+    }
+    body.thread-open #approval {
+      width: min(calc(100% - 32px), 70vw, 1076px);
+      margin-left: auto;
+      margin-right: auto;
+    }
+    body.thread-open #controls { margin-bottom: 10px; }
+    body.thread-open #input { min-height: 42px; padding: 10px 16px; }
+    body.thread-open .msg.agent { font-size: 15px; line-height: 1.58; }
+    body.thread-open .msg.user { max-width: 72%; }
+    body.thread-open .row:hover,
+    body.thread-open .row:focus-within { background: #161b22; }
+    body.thread-open .row.active-thread {
+      background: linear-gradient(90deg, #1f6feb20, #161b22 72%);
+      box-shadow: inset 3px 0 var(--accent2);
+    }
+    body.thread-open .subagent-row.active-subagent { background: #1f6feb18; color: var(--accent2); }
+    body.thread-open .row-copy:focus-visible {
+      outline: 2px solid var(--accent2);
+      outline-offset: -3px;
+      border-radius: 8px;
+    }
+    .sheet {
+      left: 50%;
+      right: auto;
+      bottom: 24px;
+      width: min(620px, calc(100vw - 48px));
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      box-shadow: 0 24px 80px #000b;
+      transform: translate(-50%, calc(100% + 32px));
+    }
+    .sheet.show { transform: translate(-50%, 0); }
+  }
 </style>
 </head>
 <body>
 <div id="app">
   <header>
     <button id="backBtn" class="hbtn" aria-label="Back">‹</button>
+    <button id="sidebarToggleBtn" class="hbtn icon" aria-label="Hide session sidebar" aria-expanded="true" title="Hide session sidebar"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM9 5v14"/><path d="M14 9l-3 3 3 3"/></svg></button>
     <div class="htext">
       <div class="title" id="hTitle">Codex Sessions</div>
       <div class="sub" id="hSub"></div>
+    </div>
+    <div id="viewSeg" aria-label="Session view">
+      <button data-view="recent" class="on">Recent</button>
+      <button data-view="provider">Agents</button>
     </div>
     <span id="offlinePill">Offline</span>
     <span id="tokCount" class="mono"></span>
     <button id="diffBtn" class="hbtn icon" aria-label="Diff" style="display:none"><svg viewBox="0 0 24 24"><path d="M12 3v18M5 8h4M5 12h4M5 16h4"/><path d="M15 12h4M17 10v4"/></svg></button>
     <button id="filesBtn" class="hbtn icon" aria-label="Files" style="display:none"><svg viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg></button>
+    <button id="notifyBtn" class="hbtn icon" aria-label="Task notifications" aria-haspopup="dialog" style="display:none"><svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg></button>
     <button id="usageBtn" class="hbtn icon" aria-label="Usage"><svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 18 0 9 9 0 0 0-18 0z"/><path d="M12 12l4-2"/><path d="M12 7v0"/></svg></button>
     <button id="newBtn" class="hbtn icon" aria-label="New session"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
     <div id="connDot" title="event stream"></div>
   </header>
 
-  <div id="listView">
+  <aside id="listView" aria-label="Agent sessions">
     <div id="searchWrap">
       <div class="seg" id="providerSeg">
-        <button data-provider="codex" class="on">Codex</button>
-        <button data-provider="claude">Claude</button>
-        <button data-provider="grok">Grok</button>
+        <button data-provider="codex" class="on" aria-pressed="true">Codex</button>
+        <button data-provider="claude" aria-pressed="false">Claude</button>
+        <button data-provider="grok" aria-pressed="false">Grok</button>
       </div>
       <input id="search" type="search" placeholder="Search sessions…" autocomplete="off">
     </div>
     <div id="rows"></div>
     <button id="loadMore" style="display:none">Load more</button>
-  </div>
+  </aside>
 
-  <div id="chatView">
+  <main id="chatView" aria-label="Selected agent conversation">
     <div id="transcript">
       <div id="messages"></div>
       <div id="livePill"><span class="run-dot"></span><span id="livePillText">Running — following along…</span></div>
@@ -324,22 +477,27 @@
     </div>
     <div id="composerWrap">
       <div id="controls">
-        <button class="ctl" id="modelCtl"><span>Model</span> <b id="modelName">—</b> <span class="ck">▾</span></button>
-        <button class="ctl" id="effortCtl"><span>Effort</span> <b id="effortName">—</b> <span class="ck">▾</span></button>
+        <button class="ctl" id="modelCtl"><span id="modelLabel">Model</span> <b id="modelName">—</b> <span class="ck">▾</span></button>
+        <button class="ctl" id="effortCtl"><span id="effortLabel">Effort</span> <b id="effortName">—</b> <span class="ck">▾</span></button>
         <button class="ctl" id="modeCtl"><span id="modeName">Agent</span> <span class="ck">▾</span></button>
         <button class="ctl" id="steerCtl"><span>Send</span> <b id="steerName">Queue</b> <span class="ck">▾</span></button>
+        <button class="ctl" id="lockCtl" style="display:none"><span>Lock</span> <b id="lockName">Not held here</b> <span class="ck">▾</span></button>
+        <span class="settings-truth" id="settingsTruth" data-state="loading" role="status">Checking settings…</span>
       </div>
+      <div id="attachmentStrip"></div>
       <div id="composer">
+        <input id="imageInput" type="file" accept="image/*" multiple hidden>
+        <button id="attachBtn" aria-label="Attach images" title="Attach images">＋</button>
         <textarea id="input" rows="1" placeholder="Message Codex…"></textarea>
         <button id="stopBtn" aria-label="Stop">■</button>
         <button id="sendBtn" aria-label="Send">➤</button>
       </div>
     </div>
-  </div>
+  </main>
 </div>
 
 <div class="overlay" id="overlay"></div>
-<div class="sheet" id="sheet"><div class="grip"></div><div id="sheetBody"></div></div>
+<div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="sheetTitle" inert><div class="grip"></div><div id="sheetBody"></div></div>
 
 <script src="/vendor/marked.min.js"></script>
 <script src="/vendor/purify.min.js"></script>
@@ -373,26 +531,48 @@ function renderMarkdown(src) {
 
 const state = {
   provider: "codex",         // codex | claude
+  listView: "recent",        // recent | provider
+  sidebarCollapsed: false,
+  listRequestSeq: 0,
+  unavailableProviders: [],
+  featuredCount: 0,
   threads: [], nextCursor: null,
   active: null, activeTurnId: null,
   items: new Map(),          // itemId -> {kind, el, bodyEl}
   approvalId: null,
   searchTimer: null,
   models: [], model: null, effort: null,
-  modeByProvider: { codex: "auto", claude: "manual" }, // permission mode, per provider
+  modelsProvider: null,
+  modelRequestSeq: 0,
+  modeByProvider: { codex: "auto", claude: "manual", grok: "bypass" }, // defaults for new threads
+  threadMode: null,          // server-resolved mode for the open thread
+  threadModeUnknown: false, // provider exposed a combination we cannot map honestly
+  threadApprovalPolicy: null,
+  threadSandboxPolicy: null,
+  settingsTruth: { state: "loading", sources: {}, message: "Checking settings…" },
+  modelsReady: false,
+  settingsSave: Promise.resolve(),
   sendMode: "queue",         // queue | steer — what happens when you send mid-turn
   busy: false,               // is a turn currently running
   pending: [],               // [{ text, chip }] messages waiting to send
   failedSends: [],           // [{ threadId, text, requestId }] sends that never landed
   running: new Set(),        // "provider:threadId" of threads with an active turn
+  runConfidence: new Map(),  // same key -> bridge | provider | marker | heuristic | stale_timeout
   sseErrored: false,         // did the event stream drop (for reconnect catch-up)
   resyncing: false,          // guard against overlapping re-reads
   lastDiff: "",
   threadFiles: new Map(), // path -> { path, edited } for the open thread
   activityGroup: null,    // newest contiguous Codex activity run
+  lock: { state: "unknown", label: "Checking…" },
+  sendStage: null,        // { requestId, threadId, text, bubble, chip }
+  composerAttachments: [], // uploaded server refs safe to persist in queues
+  uploadingAttachments: 0,
+  notificationRules: new Map(), // "provider:threadId" -> once | follow, for this device
+  expandedSubagents: new Set(),
 };
 
 const PROVIDER_LABELS = { codex: "Codex", claude: "Claude", grok: "Grok" };
+const PROVIDER_ICONS = { codex: "/icons/provider-codex.svg", claude: "/icons/provider-claude.svg", grok: "/icons/provider-grok.svg" };
 
 function providerLabel() { return PROVIDER_LABELS[state.provider] || "Codex"; }
 
@@ -416,25 +596,72 @@ const MODE_SETS = {
     "bypass":      { name: "Bypass permissions",   desc: "No prompts at all. Full autonomy — use with care." },
   },
   grok: {
-    "manual":      { name: "Manual approve",       desc: "Grok asks before running tools (handled by the Grok CLI)." },
     "bypass":      { name: "Bypass permissions",   desc: "Auto-approves every tool. Full autonomy — use with care." },
   },
 };
 
-const DEFAULT_MODE = { codex: "auto", claude: "auto", grok: "manual" };
+const DEFAULT_MODE = { codex: "auto", claude: "auto", grok: "bypass" };
 
 const SEND_MODES = {
   queue: { name: "Queue", desc: "Held and sent automatically when the current turn finishes." },
-  steer: { name: "Steer", desc: "Interrupts the current turn now, then sends — so the agent changes course immediately." },
+  steer: { name: "Steer", desc: "Adds guidance to a turn this bridge owns at the next safe boundary; otherwise it stays queued." },
 };
+
+function sendModesFor(provider) {
+  if (provider === "grok") {
+    return {
+      queue: SEND_MODES.queue,
+      steer: { name: "Interrupt & send", desc: "Stops a Grok turn owned by this bridge, waits for confirmed cancellation, then sends your message." },
+    };
+  }
+
+  return SEND_MODES;
+}
+
+function effectiveSendBehavior() {
+  if (!state.busy) { return { name: "Now", desc: "Starts a new turn immediately." }; }
+  if (state.sendMode === "queue") { return SEND_MODES.queue; }
+  if (state.externalTurn) {
+    return { name: "Queue (external)", desc: "This turn is owned elsewhere, so the message waits for confirmed completion." };
+  }
+  return sendModesFor(activeProvider()).steer;
+}
 
 function modeSetFor(provider) { return MODE_SETS[provider] || MODE_SETS.codex; }
 
-// Resolve the active provider's selected permission mode, repairing an invalid key.
+// Resolve the open thread's mode first. Global picks are defaults for sessions
+// with no provider/store value, not a competing opinion about an existing one.
 function currentMode() {
   const p = activeProvider();
   const set = modeSetFor(p);
-  let key = state.modeByProvider[p];
+
+  if (state.active && activeProvider() === "codex" && state.threadModeUnknown && !state.threadMode
+      && (state.threadApprovalPolicy || state.threadSandboxPolicy)) {
+    const sandboxType = typeof state.threadSandboxPolicy === "object"
+      ? state.threadSandboxPolicy?.type
+      : state.threadSandboxPolicy;
+    const policyName = sandboxType === "managed" ? "Managed access" : `${sandboxType || "Custom"} access`;
+    return {
+      key: "provider-exact",
+      name: policyName,
+      desc: `Provider-owned policy · approval ${state.threadApprovalPolicy || "unspecified"}`,
+      approvalPolicy: state.threadApprovalPolicy,
+      sandbox: state.threadSandboxPolicy,
+      providerExact: true,
+      unknown: false,
+    };
+  }
+
+  if (state.active && state.threadModeUnknown && !state.threadMode) {
+    return {
+      key: null,
+      name: "Unrepresentable policy",
+      desc: `${PROVIDER_LABELS[p] || "Provider"} reports a permission policy this bridge cannot represent. Choose a preset before sending.`,
+      unknown: true,
+    };
+  }
+
+  let key = state.active && state.threadMode ? state.threadMode : state.modeByProvider[p];
 
   if (!set[key]) {
     key = DEFAULT_MODE[p];
@@ -660,6 +887,34 @@ const ICONS = {
   plan: '<svg class="ic" viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/></svg>',
   spin: '<svg class="ic" viewBox="0 0 24 24" style="animation:spin 1s linear infinite"><path d="M12 3a9 9 0 1 0 9 9" style="opacity:.9"/></svg>',
 };
+
+function bellSvg() {
+  return '<svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg>';
+}
+
+function threadRuleKey(provider, threadId) { return `${provider || "codex"}:${threadId}`; }
+
+// A child is part of the parent task for notification purposes. This avoids a
+// burst when several workers finish while still letting the child transcript
+// remain independently navigable.
+function notificationTarget(thread) {
+  if (!thread?.parentThreadId) { return thread; }
+  return state.threads.find((candidate) => candidate.id === thread.parentThreadId) || {
+    id: thread.parentThreadId,
+    provider: thread.provider || "codex",
+    name: "Parent task",
+  };
+}
+
+function syncNotifyButton() {
+  const btn = $("notifyBtn");
+  const target = notificationTarget(state.active);
+  const mode = target && state.notificationRules.get(threadRuleKey(target.provider, target.id));
+  btn.classList.toggle("on", !!mode);
+  btn.style.color = mode ? "var(--accent)" : "";
+  btn.title = mode === "once" ? "Notify once" : mode === "follow" ? "Following this task" : "Task notifications";
+  btn.setAttribute("aria-label", btn.title);
+}
 const styleSpin = document.createElement("style");
 styleSpin.textContent = "@keyframes spin{to{transform:rotate(360deg)}}";
 document.head.appendChild(styleSpin);
@@ -672,31 +927,105 @@ function renderRows(append) {
 
   const start = append ? rows.children.length : 0;
 
-  for (const t of state.threads.slice(start)) {
+  for (let index = start; index < state.threads.length; index += 1) {
+    if (state.listView === "recent" && index === state.featuredCount && index > 0) {
+      const divider = document.createElement("div");
+      divider.className = "section-divider";
+      divider.textContent = "More sessions";
+      rows.appendChild(divider);
+    }
+
+    const t = state.threads[index];
     const div = document.createElement("div");
-    div.className = "row";
+    const selected = !!state.active && (state.active.parentThreadId || state.active.id) === t.id && activeProvider() === (t.provider || "codex");
+    div.className = "row" + (selected ? " active-thread" : "");
     div.dataset.tid = t.id;
+    div.dataset.provider = t.provider || "codex";
     const dir = (t.cwd || "").split("/").pop() || "";
-    const runningNow = isRunning(t.provider, t.id);
-    div.innerHTML = `<div class="preview"></div><div class="meta">
+    const runningNow = isThreadRunning(t);
+    const childCount = t.subagents?.length ?? 0;
+    const expanded = state.expandedSubagents.has(t.id);
+    const notifyMode = state.notificationRules.get(threadRuleKey(t.provider, t.id));
+    const showReady = state.listView === "recent" && !runningNow;
+    const subagentListId = "subagents-" + String(t.id).replace(/[^a-zA-Z0-9_-]/g, "");
+    div.innerHTML = `<div class="row-head"><button class="row-copy" type="button"${selected ? ' aria-current="true"' : ""}><div class="titleline"><span class="chip prov"></span><div class="preview"></div></div><div class="meta">
       <span class="chip run-badge" style="display:${runningNow ? "inline-flex" : "none"}"><span class="run-dot"></span>running</span>
-      <span class="chip prov"></span>
+      <span class="chip ready-badge" style="display:${showReady ? "inline-flex" : "none"}">ready</span>
       <span class="chip dir"></span>
-      ${t.gitInfo?.branch ? '<span class="chip branch"></span>' : ""}
-      <span class="chip time"></span></div>`;
+      <span class="chip time"></span></div></button><div class="row-actions">
+      ${childCount ? `<button class="row-action subagent-action ${expanded ? "expanded" : ""}" aria-expanded="${expanded}" aria-controls="${subagentListId}"><span>${childCount} subagent${childCount === 1 ? "" : "s"}</span><span class="chevron">›</span></button>` : ""}
+      <button class="row-action notify-action ${notifyMode ? "on" : ""}" aria-label="${notifyMode ? "Task notifications on" : "Task notifications"}" aria-haspopup="dialog" title="Task notifications">${bellSvg()}</button>
+      </div></div><div class="subagents ${expanded ? "open" : ""}" id="${subagentListId}"></div>`;
     div.querySelector(".preview").textContent = t.name || t.preview || "(empty session)";
-    div.querySelector(".prov").textContent = PROVIDER_LABELS[t.provider] || "Codex";
+    const providerMark = div.querySelector(".prov");
+    const providerName = PROVIDER_LABELS[t.provider] || "Codex";
+    const providerIcon = document.createElement("img");
+    providerIcon.src = PROVIDER_ICONS[t.provider] || PROVIDER_ICONS.codex;
+    providerIcon.alt = "";
+    providerMark.appendChild(providerIcon);
+    providerMark.title = providerName;
+    providerMark.setAttribute("role", "img");
+    providerMark.setAttribute("aria-label", providerName);
+    providerMark.style.display = state.listView === "recent" ? "inline-flex" : "none";
     div.querySelector(".dir").textContent = "📁 " + dir;
 
-    if (t.gitInfo?.branch) { div.querySelector(".branch").textContent = "⎇ " + t.gitInfo.branch; }
-
     div.querySelector(".time").textContent = relTime(t.updatedAt);
+    div.querySelector(".notify-action").onclick = (event) => {
+      event.stopPropagation();
+      openTaskNotificationSheet(t);
+    };
+
+    const disclosure = div.querySelector(".subagent-action");
+    const childList = div.querySelector(".subagents");
+
+    if (disclosure) {
+      disclosure.onclick = (event) => {
+        event.stopPropagation();
+        const on = !state.expandedSubagents.has(t.id);
+        if (on) { state.expandedSubagents.add(t.id); } else { state.expandedSubagents.delete(t.id); }
+        disclosure.classList.toggle("expanded", on);
+        disclosure.setAttribute("aria-expanded", String(on));
+        childList.classList.toggle("open", on);
+      };
+    }
+
+    for (const child of t.subagents ?? []) {
+      const childRow = document.createElement("button");
+      const childRunning = isRunning(child.provider || t.provider, child.id);
+      const childSelected = !!state.active && state.active.id === child.id && activeProvider() === (child.provider || t.provider || "codex");
+      childRow.className = "subagent-row" + (childSelected ? " active-subagent" : "");
+      childRow.type = "button";
+      childRow.dataset.tid = child.id;
+      if (childSelected) { childRow.setAttribute("aria-current", "true"); }
+      childRow.innerHTML = `<div class="subagent-copy"><div class="subagent-name"></div><div class="subagent-path"></div></div>
+        <span class="chip run-badge" style="display:${childRunning ? "inline-flex" : "none"}"><span class="run-dot"></span>running</span>
+        <span class="chip time"></span>`;
+      childRow.querySelector(".subagent-name").textContent = child.agentNickname || child.name || child.preview || "Subagent";
+      childRow.querySelector(".subagent-path").textContent = child.agentPath || child.preview || "Child task";
+      childRow.querySelector(".time").textContent = relTime(child.updatedAt);
+      childRow.onclick = (event) => {
+        event.stopPropagation();
+        openThread({
+          ...child,
+          name: child.agentNickname || child.name || "Subagent",
+          provider: child.provider || t.provider,
+          parentThreadId: t.id,
+        });
+      };
+      childList.appendChild(childRow);
+    }
+
+    div.querySelector(".row-copy").onclick = (event) => {
+      event.stopPropagation();
+      openThread(t);
+    };
     div.onclick = () => openThread(t);
     rows.appendChild(div);
   }
 
   if (!state.threads.length) { rows.innerHTML = '<div class="empty">No sessions found</div>'; }
 
+  $("loadMore").textContent = state.listView === "recent" ? "Load more sessions" : "Load more";
   $("loadMore").style.display = state.nextCursor ? "block" : "none";
 }
 
@@ -704,51 +1033,166 @@ async function loadThreads(append) {
   const q = new URLSearchParams();
   const search = $("search").value.trim();
   const provider = state.provider;
+  const listView = state.listView;
+  const requestSeq = ++state.listRequestSeq;
 
-  q.set("provider", provider);
+  if (listView === "provider") { q.set("provider", provider); }
 
   if (append && state.nextCursor) { q.set("cursor", state.nextCursor); }
 
   if (search) { q.set("search", search); }
 
   try {
-    const res = await api("/api/threads?" + q);
+    const path = listView === "recent" ? "/api/threads/recent?" : "/api/threads?";
+    let res;
 
-    // A newer switch may have changed the provider while this was in flight —
-    // discard the stale response so it can't overwrite the current list.
-    if (state.provider !== provider) { return; }
+    try {
+      res = await api(path + q);
+    } catch (error) {
+      // During a safe live rollout the static PWA can refresh before the bridge
+      // process is restarted (we never restart over active turns). Older
+      // bridges do not have the aggregate endpoint yet, so fan out through the
+      // existing provider endpoint until the process can be upgraded safely.
+      if (listView !== "recent" || error.status !== 404) { throw error; }
 
-    state.threads = append ? state.threads.concat(res.data) : res.data;
+      const providerResults = await Promise.allSettled(Object.keys(PROVIDER_LABELS).map(async (name) => {
+        const providerQuery = new URLSearchParams(q);
+        providerQuery.set("provider", name);
+        return { name, result: await api("/api/threads?" + providerQuery) };
+      }));
+      const groups = [];
+      const unavailableProviders = [];
+
+      const providerNames = Object.keys(PROVIDER_LABELS);
+
+      for (let index = 0; index < providerResults.length; index += 1) {
+        const result = providerResults[index];
+
+        if (result.status === "fulfilled") { groups.push(result.value.result.data ?? []); }
+        else { unavailableProviders.push(providerNames[index]); }
+      }
+
+      res = {
+        data: groups.flat().sort((a, b) => Number(!!b.running) - Number(!!a.running) || Number(b.updatedAt ?? 0) - Number(a.updatedAt ?? 0)),
+        featuredCount: Math.min(10, groups.flat().length),
+        nextCursor: null,
+        unavailableProviders,
+      };
+    }
+
+    // A view/provider/search switch can finish requests out of order. Only the
+    // newest request may update the list.
+    if (requestSeq !== state.listRequestSeq || state.listView !== listView || (listView === "provider" && state.provider !== provider)) { return; }
+
+    if (append && listView === "recent") {
+      const existing = new Set(state.threads.map((thread) => `${thread.provider}:${thread.id}`));
+      state.threads = state.threads.concat((res.data ?? []).filter((thread) => !existing.has(`${thread.provider}:${thread.id}`)));
+    } else {
+      state.threads = append ? state.threads.concat(res.data) : res.data;
+    }
     state.nextCursor = res.nextCursor;
+    if (!append) { state.featuredCount = listView === "recent" ? (res.featuredCount ?? Math.min(10, res.data?.length ?? 0)) : 0; }
+    state.unavailableProviders = res.unavailableProviders ?? [];
 
     // The server read each thread's run state off disk, which is the only way to
     // know about turns that were already under way before this app connected.
     for (const t of res.data ?? []) {
       const ourTurn = state.active && t.id === state.active.id && state.busy && !state.externalTurn;
+      const threadProvider = t.provider || provider;
 
-      if (!ourTurn) { markRunning(provider, t.id, !!t.running); }
+      if (!ourTurn) { markRunning(threadProvider, t.id, !!t.running, { confidence: t.runConfidence, live: false }); }
+
+      for (const child of t.subagents ?? []) {
+        markRunning(child.provider || threadProvider, child.id, !!child.running, { confidence: child.runConfidence, live: false });
+      }
     }
 
-    renderRows(append);
+    const previousListTop = $("listView").scrollTop;
+    renderRows(listView === "provider" && append);
+    if (listView === "recent" && append) { $("listView").scrollTop = previousListTop; }
+    updateListChrome();
     setOfflineNote(false);
 
     // Cache the first page (no search) so the list renders offline.
-    if (!append && !search) { idbSet(listCacheKey(provider), { data: res.data, nextCursor: res.nextCursor }); }
+    if (!append && !search) { idbSet(listCacheKey(listView === "recent" ? "recent" : provider), { data: res.data, nextCursor: res.nextCursor, featuredCount: state.featuredCount }); }
   } catch (e) {
-    // Offline / unreachable — fall back to the last cached list for this provider.
+    // Offline / unreachable — fall back to the last cached copy of this view.
     if (append || search) { throw e; }
 
-    const cached = await idbGet(listCacheKey(provider));
+    const cached = await idbGet(listCacheKey(listView === "recent" ? "recent" : provider));
 
-    if (cached?.data && state.provider === provider) {
+    if (cached?.data && requestSeq === state.listRequestSeq && state.listView === listView && (listView === "recent" || state.provider === provider)) {
       state.threads = cached.data;
       state.nextCursor = null;
+      state.featuredCount = listView === "recent" ? (cached.featuredCount ?? Math.min(10, cached.data.length)) : 0;
+      state.unavailableProviders = [];
       renderRows(false);
+      updateListChrome();
       setOfflineNote(true, e.reach);
     } else {
-      $("rows").innerHTML = '<div class="empty">' + offlineWord(e.reach) + " — no saved sessions for " + esc(providerLabel()) + ".</div>";
+      const label = listView === "recent" ? "recent work" : providerLabel();
+      $("rows").innerHTML = '<div class="empty">' + offlineWord(e.reach) + " — no saved sessions for " + esc(label) + ".</div>";
     }
   }
+}
+
+function updateListChrome() {
+  const recent = state.listView === "recent";
+  $("providerSeg").style.display = recent ? "none" : "flex";
+  $("search").placeholder = recent ? "Search all agents…" : "Search " + providerLabel() + "…";
+  $("viewSeg").querySelectorAll("[data-view]").forEach((button) => {
+    const selected = button.dataset.view === state.listView;
+    button.classList.toggle("on", selected);
+    button.setAttribute("aria-pressed", String(selected));
+  });
+
+  // On desktop the list remains a live sidebar while a conversation is open.
+  // Keep its filters accurate without replacing the chat title in the header.
+  if (state.active) { return; }
+
+  $("viewSeg").style.display = "flex";
+  $("hTitle").textContent = recent ? "All Sessions" : providerLabel() + " Sessions";
+  $("hSub").textContent = state.unavailableProviders.length
+    ? "Partial sync · " + state.unavailableProviders.map((p) => PROVIDER_LABELS[p] || p).join(", ") + " unavailable"
+    : "";
+}
+
+function syncSidebarToggle() {
+  const collapsed = !!state.sidebarCollapsed;
+  document.body.classList.toggle("sidebar-collapsed", collapsed);
+  $("sidebarToggleBtn").classList.toggle("collapsed", collapsed);
+  $("sidebarToggleBtn").setAttribute("aria-expanded", String(!collapsed));
+  $("sidebarToggleBtn").setAttribute("aria-label", collapsed ? "Show session sidebar" : "Hide session sidebar");
+  $("sidebarToggleBtn").title = collapsed ? "Show session sidebar" : "Hide session sidebar";
+}
+
+function toggleSidebar(forceExpanded = false) {
+  state.sidebarCollapsed = forceExpanded ? false : !state.sidebarCollapsed;
+  syncSidebarToggle();
+  persistPrefs();
+}
+
+function syncProviderSeg() {
+  $("providerSeg").querySelectorAll("[data-provider]").forEach((button) => {
+    const selected = button.dataset.provider === state.provider;
+    button.classList.toggle("on", selected);
+    button.setAttribute("aria-pressed", String(selected));
+  });
+}
+
+async function switchListView(view) {
+  if (!['recent', 'provider'].includes(view) || view === state.listView) { return; }
+
+  state.listView = view;
+  state.threads = [];
+  state.nextCursor = null;
+  state.featuredCount = 0;
+  state.unavailableProviders = [];
+  $("search").value = "";
+  $("rows").innerHTML = '<div class="empty">Loading…</div>';
+  updateListChrome();
+  persistPrefs();
+  await loadThreads(false);
 }
 
 // ---------- chat rendering ----------
@@ -815,11 +1259,45 @@ function syncStick() {
 // own: this device just sent it, so jumping to it is what the user asked for.
 // A user message arriving from the transcript — replayed history, or another
 // device typing into the same thread — must not move anyone's viewport.
-function addUser(text, { own = false } = {}) {
+function attachmentUrl(id) { return "/api/attachment?id=" + encodeURIComponent(id); }
+
+function addUser(text, { own = false, attachments = [], imageCount = 0 } = {}) {
   resetActivityGroup();
   const el = document.createElement("div");
   el.className = "msg user";
-  el.textContent = text;
+
+  const count = Math.max(attachments.length, imageCount);
+
+  if (count) {
+    const images = document.createElement("div");
+    images.className = "user-images";
+
+    for (let index = 0; index < count; index++) {
+      const attachment = attachments[index];
+
+      if (attachment?.id) {
+        const img = document.createElement("img");
+        img.src = attachmentUrl(attachment.id);
+        img.alt = attachment.name || "Attached image";
+        images.appendChild(img);
+      } else {
+        const placeholder = document.createElement("div");
+        placeholder.className = "image-placeholder";
+        placeholder.textContent = "Image attached";
+        images.appendChild(placeholder);
+      }
+    }
+
+    el.appendChild(images);
+  }
+
+  if (text) {
+    const body = document.createElement("div");
+    body.className = "user-text";
+    body.textContent = text;
+    el.appendChild(body);
+  }
+
   box().appendChild(el);
   scrollDown({ force: own });
   return el;
@@ -1185,8 +1663,9 @@ function renderItem(item, opts = {}) {
   switch (item.type) {
     case "userMessage": {
       const t = (item.content ?? []).map((c) => c.text ?? "").join("");
+      const imageCount = (item.content ?? []).filter((c) => c.type === "image" || c.type === "localImage").length;
 
-      if (t.trim()) { return [addUser(t)]; }
+      if (t.trim() || imageCount) { return [addUser(t, { imageCount })]; }
 
       break;
     }
@@ -1539,10 +2018,27 @@ function liveItem(itemId, factory) {
 }
 
 function onNotify(method, params, provider) {
+  const tid = params?.threadId;
+
+  // Run state belongs to the provider's task list, even when a task from a
+  // different provider is currently open. Transcript events below are still
+  // scoped to the open provider, but the provider-agnostic Recent view must
+  // never miss a start/stop transition.
+  if (method === "turn/started") { markRunning(provider, tid, true, { confidence: "provider" }); }
+
+  if (method === "turn/completed" || method === "turn/failed" || method === "turn/aborted") { markRunning(provider, tid, false, { confidence: "provider" }); }
+
+  if (method === "thread/status/changed") {
+    const st = params?.status;
+    const active = st === "active" || st?.type === "active" || st?.type === "running";
+    markRunning(provider, tid, active, { confidence: "provider" });
+  }
+
   if (provider && provider !== activeProvider()) { return; }
 
   if (method === "thread/adopted") {
     if (state.active && state.active.id === params.threadId) {
+      migrateThreadLocalState(activeProvider(), state.active.id, params.sessionId);
       state.active.draftId = state.active.id;
       state.active.id = params.sessionId;
       state.active.draft = false;
@@ -1551,27 +2047,27 @@ function onNotify(method, params, provider) {
     return;
   }
 
-  const tid = params?.threadId;
-
-  // Track which threads are running, regardless of which one is open, so the
-  // list can badge them and opening one shows the correct running state.
-  if (method === "turn/started") { markRunning(provider, tid, true); }
-
-  if (method === "turn/completed" || method === "turn/failed" || method === "turn/aborted") { markRunning(provider, tid, false); }
-
-  if (method === "thread/status/changed") {
-    const st = params?.status;
-    const active = st === "active" || st?.type === "active" || st?.type === "running";
-    markRunning(provider, tid, active);
-  }
-
   if (!state.active || (tid !== state.active.id && tid !== state.active.draftId)) {
     if (method === "account/rateLimits/updated") { updateUsageLive(params.rateLimits); }
 
     return;
   }
 
+  // Once real turn output arrives, the existing streaming UI is the status.
+  // Remove the pre-stream progress chip instead of building a second surface.
+  if (method === "item/started" || method === "item/completed" || method.includes("/delta") || method.includes("/outputDelta")) {
+    finishSendProgress();
+  }
+
   switch (method) {
+    case "approval/expired":
+      if (!params.requestId || params.requestId === state.approvalId) {
+        state.approvalId = null;
+        $("approval").style.display = "none";
+        chip("ℹ️", "Approval timed out and was denied safely");
+      }
+      break;
+
     case "turn/started":
       resetActivityGroup();
       state.activeTurnId = params.turn?.id ?? params.turnId;
@@ -1739,15 +2235,26 @@ function onNotify(method, params, provider) {
 
     case "turn/aborted":
     case "turn/completed":
-    case "turn/failed":
+    case "turn/failed": {
+      const error = params.error ?? params.turn?.error;
+
+      if (error?.code === "thread_locked_elsewhere") {
+        failSendProgress(error);
+      } else {
+        finishSendProgress();
+      }
+
       setBusy(false);
       state.activeTurnId = null;
       clearCarets();
 
-      if (method === "turn/failed") { chip("⚠️", "Turn failed" + (params.error?.message ? ": " + params.error.message : "")); }
+      if (method === "turn/failed" && error?.code !== "thread_locked_elsewhere") {
+        chip("⚠️", "Turn failed" + (error?.message ? ": " + error.message : ""));
+      }
 
       flushPending();
       break;
+    }
   }
 }
 
@@ -1755,29 +2262,70 @@ function onNotify(method, params, provider) {
 async function openThread(t) {
   resetActivityGroup();
   state.active = t;
-  // Reopening a thread should come back on the model and effort it was last run
-  // with, not on whatever was picked in some other thread since.
-  applyThreadPrefs();
+  state.threadMode = null;
+  state.threadModeUnknown = false;
+  state.threadApprovalPolicy = null;
+  state.threadSandboxPolicy = null;
+  state.settingsTruth = { state: "loading", sources: {}, message: "Checking settings…" };
+  const threadProvider = t.provider || state.provider || "codex";
+  const providerChanged = threadProvider !== state.modelsProvider;
+  state.provider = threadProvider;
+  persistPrefs();
+  syncProviderSeg();
+
+  if (providerChanged) {
+    await initModels(threadProvider);
+    if (state.active !== t) { return; }
+  }
+
+  state.approvalId = null;
+  $("approval").style.display = "none";
+  state.lock = { state: "unknown", label: "Checking…" };
+  await loadThreadSettings(t);
+  if (state.active !== t) { return; }
   state.activeTurnId = null;
   state.items = new Map();
   state.pending = [];
+  state.composerAttachments = [];
+  renderComposerAttachments();
   state.lastDiff = "";
   state.threadFiles = new Map();
   $("filesBtn").style.display = "none";
+  $("notifyBtn").style.display = "flex";
   sendPresence();
   setBusy(false);
   syncControls();
+  document.body.classList.add("thread-open");
+  syncSidebarToggle();
   $("listView").style.display = "none";
   $("chatView").style.display = "flex";
+  $("viewSeg").style.display = "none";
   $("backBtn").style.display = "block";
   $("newBtn").style.display = "none";
   $("usageBtn").style.display = "none";
   $("diffBtn").style.display = "none";
   $("tokCount").textContent = "";
   $("hTitle").textContent = t.name || t.preview || "Session";
-  $("hSub").textContent = (t.cwd || "").split("/").slice(-2).join("/");
+  $("hSub").textContent = t.agentPath || (t.cwd || "").split("/").slice(-2).join("/");
+  $("rows").querySelectorAll(".row").forEach((row) => {
+    const selected = row.dataset.tid === String(t.parentThreadId || t.id) && row.dataset.provider === (t.provider || "codex");
+    row.classList.toggle("active-thread", selected);
+    const trigger = row.querySelector(".row-copy");
+
+    if (selected) { trigger?.setAttribute("aria-current", "true"); }
+    else { trigger?.removeAttribute("aria-current"); }
+
+    row.querySelectorAll(".subagent-row").forEach((child) => {
+      const childSelected = child.dataset.tid === String(t.id);
+      child.classList.toggle("active-subagent", childSelected);
+      if (childSelected) { child.setAttribute("aria-current", "true"); }
+      else { child.removeAttribute("aria-current"); }
+    });
+  });
   $("input").placeholder = "Message " + (PROVIDER_LABELS[t.provider] || "Codex") + "…";
+  syncNotifyButton();
   box().innerHTML = '<div class="empty">Loading…</div>';
+  refreshLockStatus();
 
   if (t.draft) {
     box().innerHTML = '<div class="empty">New session — send a message to begin.</div>';
@@ -1816,6 +2364,10 @@ async function openThread(t) {
     scrollDown({ force: true });
     state.fetching = false;
     setCursor(res);
+    if (res.runtime) {
+      markRunning(t.provider, t.id, !!res.runtime.running, { confidence: res.runtime.confidence });
+    }
+    refreshApprovals();
     setOfflineNote(false);
     const tu = res.thread?.tokenUsage?.total?.totalTokens ?? res.thread?.turns?.at?.(-1)?.tokenUsage?.total?.totalTokens;
 
@@ -1830,6 +2382,25 @@ async function openThread(t) {
     if (isRunning(t.provider, t.id)) {
       setBusy(true, { external: true });
       setLivePill(true, "Running — following live");
+    } else {
+      // Only auto-dispatch a restored queue after a successful canonical read
+      // and an explicit provider marker prove the thread is idle.
+      setBusy(false);
+      const confidence = state.runConfidence.get(runKey(t.provider, t.id));
+
+      if (confidence === "provider" || confidence === "bridge" || confidence === "marker") {
+        queueMicrotask(flushPending);
+      } else if (state.pending.length) {
+        for (const entry of state.pending) {
+          const label = entry.chip?.querySelector("span");
+
+          if (label) { label.textContent = "Completion could not be confirmed — check the thread, then tap Retry to try now"; }
+          entry.retryRequired = true;
+          markSendFailed(entry.bubble, () => retryPendingEntry(entry));
+        }
+
+        savePending();
+      }
     }
   } catch (e) {
     state.fetching = false;
@@ -1854,7 +2425,13 @@ async function openThread(t) {
 }
 
 function backToList() {
+  finishSendProgress();
   state.active = null;
+  state.threadMode = null;
+  state.threadModeUnknown = false;
+  state.threadApprovalPolicy = null;
+  state.threadSandboxPolicy = null;
+  document.body.classList.remove("thread-open");
   sendPresence();
   $("chatView").style.display = "none";
   $("listView").style.display = "block";
@@ -1863,8 +2440,8 @@ function backToList() {
   $("usageBtn").style.display = "flex";
   $("diffBtn").style.display = "none";
   $("filesBtn").style.display = "none";
-  $("hTitle").textContent = providerLabel() + " Sessions";
-  $("hSub").textContent = "";
+  $("notifyBtn").style.display = "none";
+  updateListChrome();
   $("tokCount").textContent = "";
   loadThreads(false);
 }
@@ -1874,34 +2451,157 @@ async function switchProvider(name) {
 
   state.provider = name;
   persistPrefs();
-  $("providerSeg").querySelectorAll("[data-provider]").forEach((b) => b.classList.toggle("on", b.dataset.provider === name));
-  $("hTitle").textContent = providerLabel() + " Sessions";
+  syncProviderSeg();
+  updateListChrome();
   state.threads = [];
   state.nextCursor = null;
   $("search").value = "";
   $("rows").innerHTML = '<div class="empty">Loading…</div>';
 
-  await initModels();
+  // On desktop this is a sidebar filter while a task remains open. Do not let
+  // browsing Claude/Grok sessions replace the active task's composer catalog.
+  if (!state.active) { await initModels(name); }
   loadThreads(false);
 }
 
 // ---------- sending ----------
 // send() is the composer action. When idle it sends immediately; when a turn is
 // running it enqueues (Queue = send on turn end, Steer = interrupt now + send).
-async function send() {
-  const text = $("input").value.trim();
+const MAX_ATTACHMENTS = 4;
+const MAX_ATTACHMENT_BYTES = 3 * 1024 * 1024;
+const MAX_ATTACHMENTS_TOTAL_BYTES = 8 * 1024 * 1024;
+const MAX_IMAGE_EDGE = 2000;
+const DIRECT_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 
-  if (!text || !state.active) { return; }
+function renderComposerAttachments() {
+  const strip = $("attachmentStrip");
+  strip.innerHTML = "";
+  strip.classList.toggle("on", state.composerAttachments.length > 0);
 
-  $("input").value = "";
-  $("input").style.height = "auto";
+  for (const attachment of state.composerAttachments) {
+    const preview = document.createElement("div");
+    preview.className = "attachment-preview";
+    const img = document.createElement("img");
+    img.src = attachmentUrl(attachment.id);
+    img.alt = attachment.name || "Attached image";
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.textContent = "×";
+    remove.setAttribute("aria-label", `Remove ${attachment.name || "image"}`);
+    remove.onclick = () => {
+      state.composerAttachments = state.composerAttachments.filter((item) => item.id !== attachment.id);
+      renderComposerAttachments();
+    };
+    preview.append(img, remove);
+    strip.appendChild(preview);
+  }
+}
 
-  if (state.busy) {
-    enqueue(text);
+function imageElement(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("This image format could not be decoded")); };
+    img.src = url;
+  });
+}
+
+function canvasBlob(canvas, type, quality) {
+  return new Promise((resolve, reject) => canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("Image compression failed")), type, quality));
+}
+
+async function normalizedImage(file) {
+  const img = await imageElement(file);
+
+  if (DIRECT_IMAGE_TYPES.has(file.type) && file.size <= MAX_ATTACHMENT_BYTES && Math.max(img.naturalWidth, img.naturalHeight) <= MAX_IMAGE_EDGE) {
+    return file;
+  }
+
+  const scale = Math.min(1, MAX_IMAGE_EDGE / Math.max(img.naturalWidth, img.naturalHeight));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+  canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  let blob = await canvasBlob(canvas, "image/jpeg", 0.86);
+
+  if (blob.size > MAX_ATTACHMENT_BYTES) { blob = await canvasBlob(canvas, "image/jpeg", 0.7); }
+  if (blob.size > MAX_ATTACHMENT_BYTES) { throw new Error("Image is still larger than 3 MB after compression"); }
+
+  return new File([blob], (file.name || "image").replace(/\.[^.]+$/, "") + ".jpg", { type: "image/jpeg" });
+}
+
+function base64Of(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");
+    reader.onerror = () => reject(new Error("Could not read image"));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function uploadImages(files) {
+  if (activeProvider() === "grok") {
+    chip("⚠️", "This Grok CLI does not support image prompts");
     return;
   }
 
-  doSend(text, { bubble: addUser(text, { own: true }) });
+  const remaining = MAX_ATTACHMENTS - state.composerAttachments.length;
+
+  if (remaining <= 0) { chip("⚠️", `Attach at most ${MAX_ATTACHMENTS} images`); return; }
+
+  state.uploadingAttachments++;
+  syncControls();
+
+  try {
+    for (const original of [...files].slice(0, remaining)) {
+      const file = await normalizedImage(original);
+
+      if (state.composerAttachments.reduce((sum, item) => sum + (item.size || 0), 0) + file.size > MAX_ATTACHMENTS_TOTAL_BYTES) {
+        throw new Error("Attached images must be 8 MB or less in total");
+      }
+
+      const attachment = await api("/api/attachment", { name: file.name, data: await base64Of(file) });
+      state.composerAttachments.push(attachment);
+      renderComposerAttachments();
+    }
+
+    if (files.length > remaining) { chip("⚠️", `Only the first ${remaining} image${remaining === 1 ? " was" : "s were"} attached`); }
+  } catch (error) {
+    chip("⚠️", "Image not attached: " + error.message);
+  } finally {
+    state.uploadingAttachments--;
+    $("imageInput").value = "";
+    syncControls();
+  }
+}
+
+async function send() {
+  const text = $("input").value.trim();
+  const attachments = state.composerAttachments.slice();
+
+  if ((!text && !attachments.length) || !state.active || state.uploadingAttachments) { return; }
+  const readiness = dispatchReadiness();
+  if (!readiness.ready) {
+    chip("⚠️", `${readiness.reason}. Nothing was queued or sent.`);
+    syncControls();
+    return;
+  }
+
+  $("input").value = "";
+  $("input").style.height = "auto";
+  state.composerAttachments = [];
+  renderComposerAttachments();
+
+  if (state.busy) {
+    enqueue(text, attachments);
+    return;
+  }
+
+  doSend(text, { attachments, bubble: addUser(text, { own: true, attachments }) });
 }
 
 // Queued and steered-but-not-yet-landed messages used to live only in
@@ -1915,6 +2615,47 @@ function pendingStore() {
   try { return JSON.parse(localStorage.getItem(PENDING_KEY)) || {}; } catch { return {}; }
 }
 
+function migrateThreadLocalState(provider, fromId, toId) {
+  if (!fromId || !toId || fromId === toId) { return; }
+
+  const fromKey = runKey(provider, fromId);
+  const toKey = runKey(provider, toId);
+  const pending = pendingStore();
+
+  if (pending[fromKey]?.length) {
+    const byId = new Map();
+    const merged = [...(pending[toKey] ?? []), ...pending[fromKey]];
+
+    merged.forEach((entry, index) => {
+      const key = entry?.requestId || `legacy:${index}:${typeof entry === "string" ? entry : JSON.stringify(entry)}`;
+      byId.set(key, entry);
+    });
+
+    pending[toKey] = [...byId.values()];
+    delete pending[fromKey];
+    try { localStorage.setItem(PENDING_KEY, JSON.stringify(pending)); } catch {}
+  }
+
+  let changed = false;
+
+  for (const failed of state.failedSends) {
+    if ((failed.provider || "codex") === provider && failed.threadId === fromId) {
+      failed.threadId = toId;
+      changed = true;
+    }
+  }
+
+  if (changed) { saveFailedSends(); }
+
+  const prefs = threadPrefsStore();
+
+  if (prefs[fromKey] && !prefs[toKey]) { prefs[toKey] = prefs[fromKey]; }
+  if (prefs[fromKey]) {
+    delete prefs[fromKey];
+    try { localStorage.setItem(THREAD_PREFS_KEY, JSON.stringify(prefs)); } catch {}
+  }
+}
+
 function savePending() {
   const tid = state.active?.id;
 
@@ -1922,36 +2663,202 @@ function savePending() {
 
   const all = pendingStore();
   const key = runKey(state.active.provider, tid);
-  const texts = state.pending.map((e) => e.text).filter(Boolean);
+  const entries = state.pending
+    .filter((e) => e.text || e.attachments?.length)
+    .map((e) => ({
+      text: e.text,
+      attachments: e.attachments ?? [],
+      requestId: e.requestId || newRequestId(),
+      retryRequired: !!e.retryRequired,
+      retryWithNewId: !!e.retryWithNewId,
+      retryAsSteer: !!e.retryAsSteer,
+      mayHaveDispatched: !!e.mayHaveDispatched,
+    }));
 
-  if (texts.length) { all[key] = texts; } else { delete all[key]; }
+  if (entries.length) { all[key] = entries; } else { delete all[key]; }
 
   try { localStorage.setItem(PENDING_KEY, JSON.stringify(all)); } catch {}
+}
+
+function removePendingEntry(entry) {
+  const at = state.pending.indexOf(entry);
+
+  if (at < 0 || entry.dispatching || entry.mayHaveDispatched) { return false; }
+
+  state.pending.splice(at, 1);
+  entry.chip?.remove();
+  entry.bubble?.remove();
+  savePending();
+  if (!state.busy) { queueMicrotask(flushPending); }
+  return true;
+}
+
+function setQueuedBubbleText(entry, text) {
+  if (!entry.bubble) { return; }
+
+  let body = entry.bubble.querySelector(".user-text");
+
+  if (!text) {
+    body?.remove();
+    return;
+  }
+
+  if (!body) {
+    body = document.createElement("div");
+    body.className = "user-text";
+    entry.bubble.appendChild(body);
+  }
+
+  body.textContent = text;
+}
+
+function openPendingEditSheet(entry) {
+  if (!state.pending.includes(entry) || entry.dispatching || entry.mayHaveDispatched) { return; }
+
+  openSheet(`<h2>Edit queued message</h2>
+    <div class="hint">This has not been sent to the agent yet.</div>
+    <textarea class="field-input" id="queuedEditInput"></textarea>
+    <button class="primary-btn" id="saveQueuedEdit">Save message</button>`);
+  $("queuedEditInput").value = entry.text || "";
+  $("queuedEditInput").focus();
+  $("saveQueuedEdit").onclick = () => {
+    const text = $("queuedEditInput").value.trim();
+
+    if (!text && !(entry.attachments ?? []).length) { return; }
+    if (!state.pending.includes(entry) || entry.dispatching || entry.mayHaveDispatched) { closeSheet(); return; }
+
+    entry.text = text;
+    entry.retryRequired = false;
+    entry.retryWithNewId = false;
+    entry.mayHaveDispatched = false;
+    markSendFailed(entry.bubble, null);
+    setQueuedBubbleText(entry, text);
+    const label = entry.chip?.querySelector(":scope > span");
+    const queueIndex = state.pending.indexOf(entry);
+    if (label) {
+      label.textContent = state.busy
+        ? "Queued — sends when the current turn finishes"
+        : queueIndex > 0
+          ? "Queued — sends after earlier messages"
+          : "Ready to send";
+    }
+    savePending();
+    syncPendingActions(entry);
+    closeSheet();
+    if (!state.busy) { flushPending(); }
+  };
+}
+
+function syncPendingActions(entry) {
+  entry.chip?.querySelector(".pending-actions")?.remove();
+
+  if (!entry.chip?.isConnected || entry.dispatching || entry.mayHaveDispatched) { return; }
+
+  const actions = document.createElement("span");
+  actions.className = "pending-actions";
+  const edit = document.createElement("button");
+  edit.type = "button";
+  edit.className = "pending-action edit";
+  edit.textContent = "Edit";
+  edit.onclick = (event) => { event.stopPropagation(); openPendingEditSheet(entry); };
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "pending-action cancel";
+  cancel.textContent = "Cancel";
+  cancel.onclick = (event) => { event.stopPropagation(); removePendingEntry(entry); };
+  actions.append(edit, cancel);
+  entry.chip.appendChild(actions);
 }
 
 function restorePending() {
   const tid = state.active?.id;
 
-  if (!tid || state.pending.length) { return; }
+  if (!tid) { return; }
 
-  const texts = pendingStore()[runKey(state.active.provider, tid)] ?? [];
+  const saved = pendingStore()[runKey(state.active.provider, tid)] ?? [];
 
-  for (const text of texts) {
-    const bubble = addUser(text);
-    const c = chip("⏳", "Not sent yet — waiting for the current turn to end");
+  for (const raw of saved) {
+    const text = typeof raw === "string" ? raw : raw?.text;
+    const attachments = Array.isArray(raw?.attachments) ? raw.attachments : [];
+    const requestId = raw?.requestId || newRequestId();
+    const retryRequired = !!raw?.retryRequired;
+    const retryWithNewId = !!raw?.retryWithNewId;
+    const retryAsSteer = !!raw?.retryAsSteer;
+    const mayHaveDispatched = !!raw?.mayHaveDispatched || (retryRequired && retryWithNewId);
+
+    if (!text && !attachments.length) { continue; }
+
+    // renderHistory replaces the transcript DOM while the in-memory queue
+    // intentionally survives. Reattach that existing entry instead of either
+    // duplicating it or leaving its bubble/chip detached and invisible.
+    const existing = state.pending.find((entry) => entry.requestId === requestId);
+
+    if (existing?.bubble?.isConnected && existing?.chip?.isConnected) { continue; }
+
+    const bubble = addUser(text, { attachments });
+    const uncertain = retryRequired && mayHaveDispatched;
+    const c = chip(
+      retryRequired ? "⚠️" : "⏳",
+      uncertain
+        ? "Delivery uncertain — check the latest messages, then tap Retry only if needed"
+        : retryRequired
+          ? "Not sent — tap Retry"
+          : "Not sent yet — waiting for the current turn to end",
+    );
     c.classList.add("pending");
-    state.pending.push({ text, chip: c, bubble });
+
+    if (existing) {
+      existing.text = text;
+      existing.attachments = attachments;
+      existing.bubble = bubble;
+      existing.chip = c;
+      existing.retryRequired = retryRequired;
+      existing.retryWithNewId = retryWithNewId;
+      existing.retryAsSteer = retryAsSteer;
+      existing.mayHaveDispatched = mayHaveDispatched;
+    } else {
+      state.pending.push({ text, attachments, requestId, chip: c, bubble, retryRequired, retryWithNewId, retryAsSteer, mayHaveDispatched });
+    }
+
+    const entry = existing || state.pending.at(-1);
+    syncPendingActions(entry);
+
+    if (retryRequired) {
+      markSendFailed(bubble, () => retryPendingEntry(entry), { uncertain });
+    }
+  }
+
+  // Migrate legacy string-only entries immediately so retries keep one stable
+  // id across reloads and ambiguous HTTP failures.
+  savePending();
+}
+
+function retryPendingEntry(entry) {
+  entry.retryRequired = false;
+
+  if (entry.retryWithNewId) { entry.requestId = newRequestId(); }
+
+  entry.retryWithNewId = false;
+  entry.mayHaveDispatched = false;
+  markSendFailed(entry.bubble, null);
+  savePending();
+
+  if (entry.retryAsSteer && state.busy) {
+    trySteer(entry);
+  } else {
+    doSend(entry.text, { attachments: entry.attachments ?? [], bubble: entry.bubble, requestId: entry.requestId, pendingEntry: entry });
   }
 }
 
-function enqueue(text) {
-  const bubble = addUser(text, { own: true });
-  const steering = state.sendMode === "steer";
+function enqueue(text, attachments = []) {
+  const bubble = addUser(text, { own: true, attachments });
+  const steering = state.sendMode === "steer" && !state.externalTurn;
   const c = chip("⏳", steering ? "Steering — lands at the next tool call…" : "Queued — sends when the current turn finishes");
   c.classList.add("pending");
-  const entry = { text, chip: c, bubble };
+  const entry = { text, attachments, requestId: newRequestId(), chip: c, bubble };
   state.pending.push(entry);
   savePending();
+  syncPendingActions(entry);
 
   // Queued messages wait for the turn to end. Steering does not: it goes into
   // the turn that is already running.
@@ -1983,7 +2890,11 @@ async function trySteer(entry) {
 
   if (!t) { return; }
 
-  const id = newRequestId();
+  const id = entry.requestId || (entry.requestId = newRequestId());
+  entry.dispatching = true;
+  entry.mayHaveDispatched = true;
+  syncPendingActions(entry);
+  savePending();
 
   try {
     await api("/api/steer", {
@@ -1992,11 +2903,34 @@ async function trySteer(entry) {
       turnId: state.activeTurnId,
       expectedTurnId: state.activeTurnId,
       text: entry.text,
+      attachmentIds: (entry.attachments ?? []).map((attachment) => attachment.id),
       requestId: id,
     });
   } catch (e) {
+    if (e.code === "steer_unsupported" && activeProvider() === "grok" && !state.externalTurn) {
+      await interruptForQueuedMessage(entry);
+      return;
+    }
+
     const label = entry.chip?.querySelector("span");
 
+    const uncertain = e.code === "delivery_uncertain" || !!e.reach || !e.status || e.status >= 500;
+
+    if (uncertain) {
+      entry.retryRequired = true;
+      entry.retryWithNewId = e.code === "delivery_uncertain";
+      entry.retryAsSteer = true;
+      entry.mayHaveDispatched = true;
+      savePending();
+      if (label) { label.textContent = "Steer delivery could not be confirmed — check the latest messages, then tap Retry if needed"; }
+      markSendFailed(entry.bubble, () => retryPendingEntry(entry), { uncertain: true });
+      return;
+    }
+
+    entry.dispatching = false;
+    entry.mayHaveDispatched = false;
+    savePending();
+    syncPendingActions(entry);
     if (label) { label.textContent = steerFallbackReason(e.code); }
 
     return; // still pending: flushPending sends it when the turn ends
@@ -2010,16 +2944,58 @@ async function trySteer(entry) {
   entry.chip?.remove();
 }
 
+// Grok's ACP protocol cannot inject guidance into a live prompt. In Steer mode,
+// the explicit user-selected fallback is cancel-then-send: cancellation must be
+// confirmed by the provider before the durable queue is allowed to flush.
+async function interruptForQueuedMessage(entry) {
+  const label = entry.chip?.querySelector("span");
+
+  if (label) { label.textContent = "Stopping Grok safely, then sending this message…"; }
+
+  try {
+    await api("/api/interrupt", { provider: "grok", threadId: state.active.id, turnId: state.activeTurnId, requireActive: true });
+  } catch (error) {
+    entry.dispatching = false;
+    entry.mayHaveDispatched = false;
+    savePending();
+    syncPendingActions(entry);
+    if (label) { label.textContent = "Could not confirm Grok stopped — message remains queued"; }
+    return;
+  }
+
+  // The provider resolves interrupt only after the active prompt reaches its
+  // terminal state. Clear local busy state and dispatch exactly once.
+  setBusy(false);
+  flushPending();
+}
+
 // Send the next queued message once the turn has ended.
 function flushPending() {
   if (state.busy || !state.pending.length || !state.active) { return; }
 
-  const next = state.pending.shift();
-  savePending();
+  const next = state.pending[0];
 
-  if (next.chip) { next.chip.remove(); }
+  // A known provider failure needs a deliberate tap. Reconnect/run-state
+  // events must not turn it into an unbounded automatic retry loop.
+  if (next.retryRequired) { return; }
 
-  doSend(next.text, { bubble: next.bubble ?? addUser(next.text) });
+  const label = next.chip?.querySelector("span");
+  const readiness = dispatchReadiness();
+  if (!readiness.ready) {
+    if (label) { label.textContent = `Waiting for verified settings — ${readiness.reason}`; }
+    return;
+  }
+
+  if (label) { label.textContent = "Sending queued message…"; }
+  next.dispatching = true;
+  syncPendingActions(next);
+
+  doSend(next.text, {
+    attachments: next.attachments ?? [],
+    bubble: next.bubble ?? addUser(next.text, { attachments: next.attachments ?? [] }),
+    requestId: next.requestId,
+    pendingEntry: next,
+  });
 }
 
 // The actual API call for one message. The user bubble is already rendered.
@@ -2031,13 +3007,28 @@ function flushPending() {
 // transcript from the session file — which by definition does not contain a
 // message that never landed. Without this, the bubble and its Retry button are
 // destroyed moments after they appear and the typed text is lost.
-function recordFailedSend(threadId, text, requestId) {
+const FAILED_SENDS_KEY = "cxp_failed_sends";
+
+function saveFailedSends() {
+  try { localStorage.setItem(FAILED_SENDS_KEY, JSON.stringify(state.failedSends.slice(-200))); } catch {}
+}
+
+function loadFailedSends() {
+  try {
+    const rows = JSON.parse(localStorage.getItem(FAILED_SENDS_KEY));
+    return Array.isArray(rows) ? rows : [];
+  } catch { return []; }
+}
+
+function recordFailedSend(threadId, text, requestId, provider = activeProvider(), attachments = [], retryWithNewId = false) {
   dropFailedSend(requestId);
-  state.failedSends.push({ threadId, text, requestId });
+  state.failedSends.push({ provider, threadId, text, requestId, attachments, retryWithNewId });
+  saveFailedSends();
 }
 
 function dropFailedSend(requestId) {
   state.failedSends = state.failedSends.filter((f) => f.requestId !== requestId);
+  saveFailedSends();
 }
 
 function restoreFailedSends() {
@@ -2046,38 +3037,258 @@ function restoreFailedSends() {
   if (!tid) { return; }
 
   for (const f of state.failedSends) {
-    if (f.threadId !== tid) { continue; }
+    if (f.threadId !== tid || (f.provider || "codex") !== activeProvider()) { continue; }
 
-    const bubble = addUser(f.text);
-    markSendFailed(bubble, () => doSend(f.text, { bubble, requestId: f.requestId }));
+    const attachments = Array.isArray(f.attachments) ? f.attachments : [];
+    const bubble = addUser(f.text, { attachments });
+    markSendFailed(bubble, () => {
+      const requestId = f.retryWithNewId ? newRequestId() : f.requestId;
+
+      if (f.retryWithNewId) { dropFailedSend(f.requestId); }
+
+      doSend(f.text, { attachments, bubble, requestId });
+    }, { uncertain: !!f.retryWithNewId });
   }
 }
 
-async function doSend(text, { bubble, requestId } = {}) {
+function startSendProgress(requestId, threadId, text, bubble) {
+  state.sendStage?.chip?.remove();
+  state.sendStage = {
+    requestId,
+    threadId,
+    text,
+    bubble,
+    chip: chip("⏳", "Sending to the bridge…"),
+  };
+}
+
+function updateSendProgress(frame) {
+  const progress = state.sendStage;
+
+  if (!progress || frame.requestId !== progress.requestId || frame.threadId !== progress.threadId) { return; }
+
+  const label = progress.chip?.querySelector("span");
+
+  if (!label) { return; }
+
+  switch (frame.stage) {
+    case "accepted":
+      label.textContent = "Message reached the bridge";
+      break;
+    case "resuming":
+      label.textContent = frame.rolloutBytes >= 50 * 1024 * 1024
+        ? `Loading a large session (${fmtBytes(frame.rolloutBytes)}) into Codex…`
+        : "Loading the session into Codex…";
+      break;
+    case "resumed":
+      label.textContent = frame.cold ? "Session loaded into Codex" : "Session was already loaded in Codex";
+      break;
+    case "starting_turn":
+      label.textContent = "Session ready — starting the turn…";
+      break;
+    case "turn_started":
+      label.textContent = "Turn started — waiting for the first update…";
+      break;
+  }
+}
+
+function finishSendProgress() {
+  state.sendStage?.chip?.remove();
+  state.sendStage = null;
+}
+
+function failSendProgress(error) {
+  const progress = state.sendStage;
+
+  if (!progress) { return; }
+
+  const label = progress.chip?.querySelector("span");
+  const conflict = error?.code === "thread_locked_elsewhere";
+  const uncertain = error?.code === "delivery_uncertain";
+
+  if (label) {
+    label.textContent = conflict
+      ? "This thread is open on your Mac; close it there to continue"
+      : uncertain
+        ? "Delivery is uncertain after a bridge restart — check the latest messages before retrying"
+        : "Message did not reach the agent: " + (error?.message || "unknown error");
+  }
+
+  state.sendStage = null;
+}
+
+async function doSend(text, { attachments = [], bubble, requestId, pendingEntry } = {}) {
   const m = currentMode();
+  const target = state.active;
+  const readiness = dispatchReadiness();
+  if (!target || !readiness.ready) {
+    if (pendingEntry) {
+      pendingEntry.dispatching = false;
+      pendingEntry.mayHaveDispatched = false;
+      pendingEntry.retryRequired = false;
+      savePending();
+      syncPendingActions(pendingEntry);
+      const label = pendingEntry.chip?.querySelector("span");
+      if (label) { label.textContent = `Waiting for verified settings — ${readiness.reason}`; }
+    }
+    markSendFailed(bubble, null);
+    chip("⚠️", `${readiness.reason}. Nothing was sent.`);
+    syncControls();
+    return;
+  }
+  const dispatch = {
+    provider: target.provider || "codex",
+    threadId: target.id,
+    model: state.model,
+    effort: state.effort,
+    mode: m.key,
+    approvalPolicy: m.approvalPolicy,
+    sandbox: m.sandbox,
+  };
   const id = requestId || newRequestId();
-  const threadId = state.active?.id;
+  const threadId = target.id;
+  startSendProgress(id, threadId, text, bubble);
+  if (pendingEntry) {
+    pendingEntry.dispatching = true;
+    // Persist this before the request can leave the page. A reload during a
+    // slow resume must never resurrect Edit/Cancel for an in-flight message.
+    pendingEntry.mayHaveDispatched = true;
+    syncPendingActions(pendingEntry);
+    savePending();
+  }
   setBusy(true);
   markSendFailed(bubble, null);
 
   try {
-    await api("/api/message", {
-      provider: state.active.provider || "codex",
-      threadId: state.active.id, text,
-      model: state.model, effort: state.effort,
-      mode: m.key, cwd: state.active.cwd, draft: state.active.draft,
-      approvalPolicy: m.approvalPolicy, sandbox: m.sandbox,
+    if (m.unknown) {
+      throw Object.assign(new Error("choose a permission preset before sending from this thread"), { code: "unknown_permission_mode" });
+    }
+
+    // A settings write is part of dispatch: never let a turn leave with a value
+    // that can disappear on another browser or after a bridge restart.
+    const settingsPayload = {
+      provider: dispatch.provider,
+      threadId: dispatch.threadId,
+      model: dispatch.model,
+      effort: dispatch.effort,
+      pending: true,
+    };
+    if (!m.providerExact) { settingsPayload.mode = dispatch.mode; }
+    const settingsJob = state.settingsSave.catch(() => {}).then(() => api("/api/thread/settings", settingsPayload));
+    state.settingsSave = settingsJob;
+    await settingsJob;
+    const accepted = await api("/api/message", {
+      provider: dispatch.provider,
+      threadId: dispatch.threadId, text,
+      attachmentIds: attachments.map((attachment) => attachment.id),
+      model: dispatch.model, effort: dispatch.effort,
+      mode: dispatch.mode, cwd: target.cwd, draft: target.draft,
+      approvalPolicy: dispatch.approvalPolicy, sandbox: dispatch.sandbox,
       requestId: id,
     });
+    if (accepted?.dispatch?.accepted && state.active === target) {
+      const stillShowingDispatch = state.model === dispatch.model
+        && state.effort === dispatch.effort
+        && currentMode().key === dispatch.mode;
+      if (stillShowingDispatch) {
+        state.settingsTruth = {
+          state: "accepted",
+          sources: { model: "provider_accept", effort: "provider_accept", mode: "provider_accept" },
+          message: "Exact settings sent to provider",
+        };
+      } else {
+        // The user changed the controls while the request was in flight. Keep
+        // those newer values as a pending next-turn override after the server
+        // marks the dispatched snapshot accepted.
+        state.settingsTruth = { state: "override", sources: {}, message: "Current turn accepted · next override saved" };
+        saveThreadSettings().catch((error) => chip("⚠️", "Could not save next-turn settings: " + error.message));
+      }
+      syncControls();
+    }
+    finishSendProgress();
     dropFailedSend(id);
+    if (pendingEntry) {
+      const at = state.pending.indexOf(pendingEntry);
+
+      if (at >= 0) { state.pending.splice(at, 1); savePending(); }
+
+      pendingEntry.chip?.remove();
+    }
   } catch (e) {
     setBusy(false);
-    recordFailedSend(threadId, text, id);
-    markSendFailed(bubble, () => doSend(text, { bubble, requestId: id }));
+    failSendProgress(e);
+
+    if (["model_unavailable", "effort_unavailable", "permission_mode_unavailable", "model_not_available", "effort_not_supported", "permission_mode_mismatch", "model_verification_failed"].includes(e.code)) {
+      state.settingsTruth = { state: "error", sources: {}, message: "Settings rejected · send blocked" };
+      syncControls();
+    }
+
+    const retryId = e.code === "delivery_uncertain" ? null : id;
+    const retry = () => {
+      if (pendingEntry) {
+        pendingEntry.retryRequired = false;
+        pendingEntry.mayHaveDispatched = false;
+        savePending();
+      }
+
+      let nextId = retryId;
+
+      if (pendingEntry && !retryId) {
+        pendingEntry.requestId = newRequestId();
+        savePending();
+        nextId = pendingEntry.requestId;
+      } else if (!pendingEntry && !retryId) {
+        dropFailedSend(id);
+        nextId = newRequestId();
+      }
+
+      doSend(text, { attachments, bubble, requestId: nextId, pendingEntry });
+    };
+
+    if ((e.code === "thread_locked_elsewhere" || e.code === "turn_in_progress") && !pendingEntry) {
+      const elsewhere = e.code === "thread_locked_elsewhere";
+      const c = chip("⏳", elsewhere ? "Open elsewhere — queued until the thread is available" : "Another send won the race — queued behind the current turn");
+      c.classList.add("pending");
+      const queued = { text, attachments, requestId: id, bubble, chip: c, retryRequired: elsewhere };
+      dropFailedSend(id);
+      state.pending.push(queued);
+      savePending();
+      syncPendingActions(queued);
+      if (elsewhere) {
+        markSendFailed(bubble, () => doSend(text, { attachments, bubble, requestId: id, pendingEntry: queued }));
+        setLockStatus({ state: "elsewhere", label: "Open elsewhere" });
+      } else {
+        markSendFailed(bubble, null);
+        setBusy(true, { external: true });
+      }
+    } else if (pendingEntry) {
+      const label = pendingEntry.chip?.querySelector("span");
+
+      if (e.code === "turn_in_progress") {
+        pendingEntry.dispatching = false;
+        pendingEntry.mayHaveDispatched = false;
+        savePending();
+        syncPendingActions(pendingEntry);
+        if (label) { label.textContent = "Still working — queued behind the current turn"; }
+        markSendFailed(bubble, null);
+        setBusy(true, { external: true });
+      } else {
+        pendingEntry.dispatching = false;
+        pendingEntry.retryRequired = true;
+        pendingEntry.retryWithNewId = e.code === "delivery_uncertain";
+        pendingEntry.mayHaveDispatched = e.code === "delivery_uncertain" || !!e.reach || !e.status || e.status >= 500;
+        savePending();
+        if (label) { label.textContent = pendingEntry.mayHaveDispatched ? "Delivery could not be confirmed — check the thread, then retry if needed" : "Not sent — tap Retry"; }
+        markSendFailed(bubble, retry, { uncertain: pendingEntry.mayHaveDispatched });
+        syncPendingActions(pendingEntry);
+      }
+    } else if (e.code !== "thread_locked_elsewhere") {
+      recordFailedSend(threadId, text, id, activeProvider(), attachments, e.code === "delivery_uncertain");
+      markSendFailed(bubble, retry, { uncertain: e.code === "delivery_uncertain" });
+    }
 
     if (!bubble) { chip("⚠️", "send failed: " + e.message); }
 
-    flushPending();
   }
 }
 
@@ -2087,7 +3298,7 @@ function newRequestId() {
 
 // Mark the message that failed, rather than dropping a warning further down the
 // transcript — the thing that didn't send is the thing you tap to retry.
-function markSendFailed(bubble, onRetry) {
+function markSendFailed(bubble, onRetry, { uncertain = false } = {}) {
   if (!bubble) { return; }
 
   bubble.querySelector(".retry")?.remove();
@@ -2097,8 +3308,8 @@ function markSendFailed(bubble, onRetry) {
 
   const btn = document.createElement("button");
   btn.className = "retry";
-  btn.title = "Not sent — tap to retry";
-  btn.textContent = "⟳ Retry";
+  btn.title = uncertain ? "Delivery uncertain — check the latest messages before retrying" : "Not sent — tap to retry";
+  btn.textContent = uncertain ? "⚠ Check, then retry" : "⟳ Retry";
   btn.onclick = () => {
     btn.disabled = true;
     btn.textContent = "⟳ Sending…";
@@ -2134,9 +3345,12 @@ function setBusy(busy, { external = false } = {}) {
   if (state.externalTurn && activeProvider() === "codex") {
     refreshActivityGroup(state.activityGroup, { live: true });
   }
-  // Send stays enabled while busy so messages can be queued or used to steer.
-  $("stopBtn").style.display = busy ? "flex" : "none";
+  // Only offer Stop for a turn this bridge owns. An externally observed turn
+  // has no safe interrupt handle; showing Stop there would imply control we do
+  // not have and used to discard the user's queue before the interrupt failed.
+  $("stopBtn").style.display = busy && !external ? "flex" : "none";
   setLivePill(state.externalTurn);
+  syncControls();
 
   if (ownTurnEnding) { scheduleExternalRefresh(); }
 }
@@ -2153,17 +3367,33 @@ async function interruptApi() {
 
   try {
     await api("/api/interrupt", { provider: state.active.provider || "codex", threadId: state.active.id, turnId: state.activeTurnId });
-  } catch {}
+    return true;
+  } catch (error) {
+    chip("⚠️", "Stop failed: " + (error.message || error));
+    return false;
+  }
 }
 
 // Stop button: a hard stop — drop anything queued, then interrupt.
-function stopAgent() {
+async function stopAgent() {
+  if (state.externalTurn) {
+    chip("ℹ️", "This turn is running elsewhere and cannot be stopped from here");
+    return;
+  }
+
+  $("stopBtn").disabled = true;
+  const stopped = await interruptApi();
+  $("stopBtn").disabled = false;
+
+  if (!stopped) { return; }
+
   for (const p of state.pending) {
     if (p.chip) { p.chip.remove(); }
+    if (p.bubble) { p.bubble.remove(); }
   }
 
   state.pending = [];
-  interruptApi();
+  savePending();
 }
 
 // ---------- approvals ----------
@@ -2179,6 +3409,19 @@ function showApproval(a) {
   scrollDown();
 }
 
+async function refreshApprovals() {
+  const t = state.active;
+
+  if (!t) { return; }
+
+  try {
+    const res = await api("/api/approvals?provider=" + encodeURIComponent(activeProvider()));
+    const pending = (res.data ?? []).find((a) => a.params?.threadId === t.id || a.params?.threadId === t.draftId);
+
+    if (pending && state.active === t) { showApproval(pending); }
+  } catch {}
+}
+
 async function answerApproval(decision) {
   if (!state.approvalId) { return; }
 
@@ -2191,14 +3434,27 @@ async function answerApproval(decision) {
 
 // ---------- sheets ----------
 function openSheet(html) {
+  state.sheetReturnFocus = document.activeElement;
+  $("sheet").removeAttribute("inert");
+  $("app").setAttribute("inert", "");
+  $("sheet").classList.remove("new-session-host");
   $("sheetBody").innerHTML = html;
+  const heading = $("sheetBody").querySelector("h2");
+  if (heading) { heading.id = "sheetTitle"; }
   $("overlay").classList.add("show");
   $("sheet").classList.add("show");
+  $("sheet").setAttribute("aria-hidden", "false");
+  requestAnimationFrame(() => $("sheetBody").querySelector("button, input, textarea, select, [tabindex]")?.focus());
 }
 
 function closeSheet() {
   $("overlay").classList.remove("show");
   $("sheet").classList.remove("show");
+  $("sheet").setAttribute("aria-hidden", "true");
+  $("sheet").setAttribute("inert", "");
+  $("app").removeAttribute("inert");
+  state.sheetReturnFocus?.focus?.();
+  state.sheetReturnFocus = null;
 }
 $("overlay").onclick = closeSheet;
 
@@ -2463,12 +3719,151 @@ function renderFileInto(el, name, d, staleAt) {
 
 function currentModel() { return state.models.find((m) => m.id === state.model); }
 
+function setSettingsTruth(next) {
+  state.settingsTruth = { ...state.settingsTruth, ...next };
+  syncControls();
+}
+
+function dispatchReadiness() {
+  const mode = currentMode();
+  const model = currentModel();
+  const efforts = model?.supportedReasoningEfforts ?? [];
+
+  if (state.settingsTruth.state === "loading") { return { ready: false, reason: "Thread settings are still loading" }; }
+  if (state.settingsTruth.state === "error") { return { ready: false, reason: state.settingsTruth.message || "Thread settings could not be verified" }; }
+  if (!state.model || !model) { return { ready: false, reason: "No exact model is selected" }; }
+  if (!state.effort) { return { ready: false, reason: "No reasoning effort is selected" }; }
+  if (efforts.length && !efforts.some((candidate) => candidate.reasoningEffort === state.effort)) {
+    return { ready: false, reason: `${state.effort} is not supported by ${state.model}` };
+  }
+  if (mode.unknown || !mode.key) { return { ready: false, reason: "Choose a known permission mode" }; }
+  return { ready: true, reason: "" };
+}
+
+function settingsSourceMessage(settings) {
+  const values = [settings?.sources?.model, settings?.sources?.effort, settings?.sources?.mode];
+  const providerCount = values.filter((source) => source && !source.startsWith("bridge_")).length;
+  const savedCount = values.filter((source) => source?.startsWith("bridge_")).length;
+  const missingCount = values.filter((source) => !source).length;
+  if (providerCount && savedCount) { return "Provider-confirmed · saved overrides"; }
+  if (providerCount && missingCount) { return "Provider-confirmed · defaults for missing fields"; }
+  if (providerCount) { return `Confirmed from ${PROVIDER_LABELS[activeProvider()] || "provider"}`; }
+  if (missingCount === values.length) { return "Settings not recorded"; }
+  return "Saved exact settings";
+}
+
+function setLockStatus(lock) {
+  state.lock = { ...state.lock, ...lock };
+  syncLockControl();
+}
+
+function syncLockControl() {
+  const codexThread = state.active && activeProvider() === "codex" && !state.active.draft;
+  $("lockCtl").style.display = codexThread ? "flex" : "none";
+  $("lockName").textContent = state.lock.label || "Checking…";
+}
+
+async function refreshLockStatus() {
+  const t = state.active;
+
+  if (!t || activeProvider() !== "codex" || t.draft) { return null; }
+
+  const threadId = t.id;
+
+  try {
+    const lock = await api(`/api/thread/lock?provider=codex&threadId=${encodeURIComponent(threadId)}`);
+
+    if (state.active?.id === threadId) { setLockStatus(lock); }
+
+    return lock;
+  } catch {
+    return null;
+  }
+}
+
+function renderLockSheet() {
+  const lock = state.lock;
+
+  if (lock.state === "unknown") {
+    openSheet(`<h2>Write access</h2><div class="hint">The bridge could not check this thread's lock state.</div>`);
+    return;
+  }
+
+  if (lock.state === "held") {
+    const busy = state.busy;
+    openSheet(`<h2>You have it</h2>
+      <div class="hint">This bridge has the thread loaded, so other Codex clients cannot write to it.</div>
+      ${busy ? '<div class="hint">Release is unavailable while the agent is working. It will never interrupt a running turn.</div>' : ""}
+      <button class="primary-btn" id="releaseLockBtn" ${busy ? "disabled" : ""}>Release</button>`);
+    const btn = $("releaseLockBtn");
+
+    btn.onclick = async () => {
+      btn.disabled = true;
+      btn.textContent = "Releasing…";
+
+      try {
+        const next = await api("/api/thread/lock/release", { provider: "codex", threadId: state.active.id });
+        setLockStatus(next);
+        renderLockSheet();
+      } catch (e) {
+        btn.textContent = e.code === "turn_in_progress" ? "Wait for the turn to finish" : "Release failed — tap to retry";
+        btn.disabled = e.code === "turn_in_progress";
+      }
+    };
+    return;
+  }
+
+  if (lock.state === "elsewhere") {
+    openSheet(`<h2>Open elsewhere</h2>
+      <div class="hint">This thread is open on your Mac. Close it there to continue here. The bridge cannot take another app's lock.</div>
+      <button class="primary-btn" id="escapeLockBtn">Start another session</button>`);
+    $("escapeLockBtn").onclick = () => { closeSheet(); openNewSheet(); };
+    return;
+  }
+
+  openSheet(`<h2>Not held here</h2>
+    <div class="hint">The bridge is not holding this thread. Another Codex client may still own it; the next send or warm-up will verify safely and will never take the lock by force.</div>
+    <button class="primary-btn" id="warmLockBtn">Warm up</button>`);
+  $("warmLockBtn").onclick = async () => {
+    const btn = $("warmLockBtn");
+    const mode = currentMode();
+    btn.disabled = true;
+    btn.textContent = "Loading the session into Codex…";
+
+    try {
+      const next = await api("/api/thread/lock/warm", {
+        provider: "codex",
+        threadId: state.active.id,
+        approvalPolicy: mode.approvalPolicy,
+        sandbox: mode.sandbox,
+      });
+      setLockStatus(next);
+      renderLockSheet();
+    } catch (e) {
+      if (e.code === "thread_locked_elsewhere") {
+        setLockStatus({ state: "elsewhere", label: "Open elsewhere" });
+        renderLockSheet();
+      } else {
+        btn.disabled = false;
+        btn.textContent = "Warm up failed — tap to retry";
+      }
+    }
+  };
+}
+
+async function openLockSheet() {
+  openSheet(`<h2>Write access</h2><div class="hint">Checking this thread…</div>`);
+  await refreshLockStatus();
+
+  if (state.active && activeProvider() === "codex") { renderLockSheet(); }
+}
+
 function openModelSheet() {
   const html = state.models.filter((m) => !m.hidden).map((m) => `
-    <div class="opt ${m.id === state.model ? "sel" : ""}" data-model="${m.id}">
+    <button type="button" class="opt opt-button ${m.id === state.model ? "sel" : ""}" data-model="${m.id}">
       <div class="radio"></div>
       <div><div class="on">${esc(m.displayName || m.id)}</div><div class="od">${esc(m.description || "")}</div></div>
-    </div>`).join("");
+    </button>`).join("");
   openSheet(`<h2>Model</h2><div class="hint">Which model runs your next message.</div>${html}`);
   $("sheetBody").querySelectorAll("[data-model]").forEach((el) => {
     el.onclick = () => { setModel(el.dataset.model); closeSheet(); };
@@ -2477,15 +3872,30 @@ function openModelSheet() {
 
 function openEffortSheet() {
   const m = currentModel();
-  const efforts = m?.supportedReasoningEfforts ?? [];
+  const efforts = [...(m?.supportedReasoningEfforts ?? [])];
+
+  if (state.effort && !efforts.some((e) => e.reasoningEffort === state.effort)) {
+    efforts.unshift({
+      reasoningEffort: state.effort,
+      description: "Current thread effort. It is not listed for the currently advertised model.",
+    });
+  }
+
   const html = efforts.map((e) => `
-    <div class="opt ${e.reasoningEffort === state.effort ? "sel" : ""}" data-effort="${e.reasoningEffort}">
+    <button type="button" class="opt opt-button ${e.reasoningEffort === state.effort ? "sel" : ""}" data-effort="${e.reasoningEffort}">
       <div class="radio"></div>
       <div><div class="on">${esc(e.reasoningEffort)}</div><div class="od">${esc(e.description || "")}</div></div>
-    </div>`).join("");
+    </button>`).join("");
   openSheet(`<h2>Reasoning effort</h2><div class="hint">Higher effort thinks longer and uses more of your quota.</div>${html}`);
   $("sheetBody").querySelectorAll("[data-effort]").forEach((el) => {
-    el.onclick = () => { state.effort = el.dataset.effort; persistPrefs(); saveThreadPrefs(); syncControls(); closeSheet(); };
+    el.onclick = () => {
+      state.effort = el.dataset.effort;
+      setSettingsTruth({ state: "override", message: "Exact override for next turn" });
+      persistPrefs();
+      saveThreadSettings().catch((e) => chip("⚠️", "Could not save thread settings: " + e.message));
+      syncControls();
+      closeSheet();
+    };
   });
 }
 
@@ -2494,24 +3904,60 @@ function openModeSheet() {
   const set = modeSetFor(provider);
   const cur = currentMode().key;
   const who = PROVIDER_LABELS[provider] || "the agent";
+  const unknown = currentMode().providerExact
+    ? `<div class="hint">This thread uses an exact provider-managed policy. Leave it unchanged, or choose a preset below to replace it for the next turn.</div>`
+    : (currentMode().unknown
+      ? `<div class="hint">${esc(currentMode().desc)} The existing policy will not be approximated silently.</div>`
+      : "");
+  const providerPolicy = state.threadApprovalPolicy || state.threadSandboxPolicy
+    ? `<button type="button" class="opt opt-button ${currentMode().providerExact ? "sel" : ""}" data-provider-policy="true">
+        <div class="radio"></div><div><div class="on">Keep provider-managed policy</div><div class="od">Use the exact policy Codex records for this thread.</div></div>
+      </button>`
+    : "";
   const html = Object.entries(set).map(([k, v]) => `
-    <div class="opt ${k === cur ? "sel" : ""}" data-mode="${k}">
+    <button type="button" class="opt opt-button ${k === cur ? "sel" : ""}" data-mode="${k}">
       <div class="radio"></div>
       <div><div class="on">${esc(v.name)}</div><div class="od">${esc(v.desc)}</div></div>
-    </div>`).join("");
-  openSheet(`<h2>Permissions</h2><div class="hint">How much ${esc(who)} can do before asking you.</div>${html}`);
+    </button>`).join("");
+  openSheet(`<h2>Permissions</h2><div class="hint">How much ${esc(who)} can do before asking you.</div>${unknown}${providerPolicy}${html}`);
+  $("sheetBody").querySelector("[data-provider-policy]")?.addEventListener("click", async () => {
+    const active = state.active;
+    setSettingsTruth({ state: "loading", message: "Restoring provider-managed policy…" });
+    try {
+      await saveThreadSettings({ mode: null });
+      if (state.active === active) { await loadThreadSettings(active); }
+      closeSheet();
+    } catch (error) {
+      setSettingsTruth({ state: "error", message: "Could not restore provider policy" });
+      chip("⚠️", "Could not restore provider policy: " + error.message);
+    }
+  });
   $("sheetBody").querySelectorAll("[data-mode]").forEach((el) => {
-    el.onclick = () => { state.modeByProvider[provider] = el.dataset.mode; persistPrefs(); syncControls(); closeSheet(); };
+    el.onclick = () => {
+      if (state.active) {
+        state.threadMode = el.dataset.mode;
+        state.threadModeUnknown = false;
+        setSettingsTruth({ state: "override", message: "Exact override for next turn" });
+        saveThreadSettings().catch((e) => chip("⚠️", "Could not save thread settings: " + e.message));
+      } else {
+        state.modeByProvider[provider] = el.dataset.mode;
+      }
+
+      persistPrefs();
+      syncControls();
+      closeSheet();
+    };
   });
 }
 
 function openSendModeSheet() {
-  const html = Object.entries(SEND_MODES).map(([k, v]) => `
-    <div class="opt ${k === state.sendMode ? "sel" : ""}" data-send="${k}">
+  const modes = sendModesFor(activeProvider());
+  const html = Object.entries(modes).map(([k, v]) => `
+    <button type="button" class="opt opt-button ${k === state.sendMode ? "sel" : ""}" data-send="${k}">
       <div class="radio"></div>
       <div><div class="on">${esc(v.name)}</div><div class="od">${esc(v.desc)}</div></div>
-    </div>`).join("");
-  openSheet(`<h2>Sending mid-turn</h2><div class="hint">What happens when you send a message while the agent is still working. You can always Stop instead.</div>${html}`);
+    </button>`).join("");
+  openSheet(`<h2>Sending mid-turn</h2><div class="hint">What happens when you send while the agent is working. Stop is offered only when this bridge owns the exact active turn.</div>${html}`);
   $("sheetBody").querySelectorAll("[data-send]").forEach((el) => {
     el.onclick = () => { state.sendMode = el.dataset.send; persistPrefs(); syncControls(); closeSheet(); };
   });
@@ -2524,67 +3970,145 @@ function setModel(id) {
 
   if (!efforts.includes(state.effort)) { state.effort = m?.defaultReasoningEffort ?? efforts[0] ?? null; }
 
+  setSettingsTruth({ state: "override", message: "Exact override for next turn" });
+
   persistPrefs();
-  saveThreadPrefs();
+  saveThreadSettings().catch((e) => chip("⚠️", "Could not save thread settings: " + e.message));
   syncControls();
 }
 
 function syncControls() {
   const m = currentModel();
+  const readiness = dispatchReadiness();
+  const truth = state.settingsTruth;
   $("modelName").textContent = m?.displayName || state.model || "—";
   $("effortName").textContent = state.effort || "—";
+  $("modelLabel").textContent = truth.sources?.model === "bridge_override" ? "Next model" : "Model";
+  $("effortLabel").textContent = truth.sources?.effort === "bridge_override" ? "Next effort" : "Effort";
   $("modeName").textContent = currentMode().name;
-  $("steerName").textContent = SEND_MODES[state.sendMode].name;
+  const sendBehavior = effectiveSendBehavior();
+  $("steerName").textContent = sendBehavior.name;
+  $("steerCtl").title = sendBehavior.desc;
+  const grok = activeProvider() === "grok";
+  $("attachBtn").disabled = grok || state.uploadingAttachments > 0;
+  $("attachBtn").title = grok ? "The installed Grok CLI does not support image prompts" : "Attach images";
+  $("modelCtl").title = state.model ? `Exact provider model ID: ${state.model}` : readiness.reason;
+  $("effortCtl").title = state.effort ? `Exact reasoning effort: ${state.effort}` : readiness.reason;
+  $("modeCtl").title = currentMode().unknown
+    ? readiness.reason
+    : (currentMode().providerExact ? currentMode().desc : `Exact permission preset: ${currentMode().key}`);
+  $("settingsTruth").dataset.state = truth.state;
+  $("settingsTruth").textContent = truth.message;
+  $("settingsTruth").title = `Model: ${state.model || "unavailable"} · Effort: ${state.effort || "unavailable"} · Mode: ${currentMode().key || "unavailable"}`;
+  $("sendBtn").disabled = state.uploadingAttachments > 0 || !readiness.ready;
+  $("sendBtn").title = readiness.ready ? "Send with the exact settings shown" : readiness.reason;
+  syncLockControl();
 }
 
-// Model and effort were global, so a thread you were running on one model came
-// back on whatever you last picked elsewhere and had to be re-set every time.
-// Remember the pair per thread, and keep the global choice as the default for
-// threads that have no memory of their own.
-const THREAD_PREFS_KEY = "cxp_thread_prefs";
-
-function threadPrefsStore() {
-  try { return JSON.parse(localStorage.getItem(THREAD_PREFS_KEY)) || {}; } catch { return {}; }
+function threadSettingsBody() {
+  const t = state.active;
+  if (!t?.id) { return null; }
+  const mode = currentMode();
+  const body = {
+    provider: t.provider || state.provider,
+    threadId: t.id,
+    model: state.model,
+    effort: state.effort,
+  };
+  if (!mode.unknown && !mode.providerExact) { body.mode = mode.key; }
+  return body;
 }
 
-function saveThreadPrefs() {
-  const tid = state.active?.id;
-
-  if (!tid || !state.model) { return; }
-
-  const all = threadPrefsStore();
-  all[runKey(state.active.provider, tid)] = { model: state.model, effort: state.effort };
-
-  // Keep this from growing without bound; the newest entries are the ones that
-  // matter, and a forgotten thread simply falls back to the global default.
-  const keys = Object.keys(all);
-
-  if (keys.length > 200) { delete all[keys[0]]; }
-
-  try { localStorage.setItem(THREAD_PREFS_KEY, JSON.stringify(all)); } catch {}
+function saveThreadSettings(patch = null, { pending = true } = {}) {
+  const current = threadSettingsBody();
+  if (!current) { return Promise.resolve(); }
+  const body = patch
+    ? { provider: current.provider, threadId: current.threadId, ...patch }
+    : current;
+  body.pending = pending;
+  const job = state.settingsSave.catch(() => {}).then(() => api("/api/thread/settings", body));
+  state.settingsSave = job;
+  return job;
 }
 
-// Apply a thread's remembered model/effort, validated against what this provider
-// actually offers — a stale entry must never leave the composer on a model the
-// backend would reject.
-function applyThreadPrefs() {
-  const tid = state.active?.id;
+function addCurrentThreadModel(model, effort, availability) {
+  if (!model || state.models.some((item) => item.id === model)) { return; }
+  state.models.unshift({
+    id: model,
+    displayName: model,
+    description: availability === "unlisted"
+      ? "Current thread model. It is not in the provider's current list; the next send will request this exact ID and the provider may reject it."
+      : "Current thread model.",
+    threadOnly: true,
+    supportedReasoningEfforts: effort ? [{ reasoningEffort: effort, description: "Current thread effort." }] : [],
+  });
+}
 
-  if (!tid || !state.models.length) { return; }
+async function loadThreadSettings(t) {
+  setSettingsTruth({ state: "loading", sources: {}, message: "Checking settings…" });
+  state.models = state.models.filter((model) => !model.threadOnly);
+  const prefs = loadPrefs();
+  const def = state.models.find((model) => model.isDefault) || state.models[0];
+  state.model = prefs.model && state.models.some((model) => model.id === prefs.model) ? prefs.model : def?.id ?? null;
+  const baseModel = currentModel();
+  const efforts = (baseModel?.supportedReasoningEfforts ?? []).map((effort) => effort.reasoningEffort);
+  state.effort = prefs.effort && efforts.includes(prefs.effort)
+    ? prefs.effort
+    : baseModel?.defaultReasoningEffort ?? efforts[0] ?? null;
 
-  const saved = threadPrefsStore()[runKey(state.active.provider, tid)];
+  try {
+    const settings = await api(`/api/thread/settings?provider=${encodeURIComponent(t.provider || state.provider)}&threadId=${encodeURIComponent(t.id)}`);
+    if (state.active !== t) { return; }
+    const availability = settings.model && state.models.length
+      ? (state.models.some((model) => model.id === settings.model) ? "listed" : "unlisted")
+      : settings.modelAvailability;
+    addCurrentThreadModel(settings.model, settings.effort, availability);
+    if (settings.model) { state.model = settings.model; }
+    if (settings.effort) { state.effort = settings.effort; }
+    state.threadMode = settings.mode || null;
+    state.threadModeUnknown = settings.modeKnown === false;
+    state.threadApprovalPolicy = settings.approvalPolicy ?? null;
+    state.threadSandboxPolicy = settings.sandboxPolicy ?? null;
+    const sourceValues = [settings.sources?.model, settings.sources?.effort, settings.sources?.mode];
+    const providerConfirmed = sourceValues.every((source) => source && !source.startsWith("bridge_"));
+    state.settingsTruth = {
+      state: providerConfirmed ? "confirmed" : "override",
+      sources: settings.sources ?? {},
+      message: settingsSourceMessage(settings),
+    };
+    if (!state.modelsReady) {
+      state.settingsTruth = { state: "error", sources: settings.sources ?? {}, message: "Models unavailable · send blocked" };
+    }
 
-  if (!saved || !state.models.some((m) => m.id === saved.model)) { return; }
-
-  state.model = saved.model;
-  const m = currentModel();
-  const efforts = (m?.supportedReasoningEfforts ?? []).map((e) => e.reasoningEffort);
-  state.effort = efforts.includes(saved.effort) ? saved.effort : m?.defaultReasoningEffort ?? efforts[0] ?? null;
-  syncControls();
+    // Materialize only missing facts so another browser sees the same fallback.
+    // Provider-owned values stay provider-owned and are not copied as a cache.
+    const missing = {};
+    if (!settings.sources?.model && state.model) { missing.model = state.model; }
+    if (!settings.sources?.effort && state.effort) { missing.effort = state.effort; }
+    if (!settings.sources?.mode && !state.threadModeUnknown) { missing.mode = currentMode().key; }
+    if (Object.keys(missing).length) {
+      saveThreadSettings(missing, { pending: false }).catch((e) => chip("⚠️", "Could not save thread settings: " + e.message));
+    }
+    flushPending();
+  } catch (e) {
+    state.settingsTruth = { state: "error", sources: {}, message: "Settings unavailable · send blocked" };
+    syncControls();
+    chip("⚠️", "Could not load this thread's settings: " + e.message);
+  }
 }
 
 function persistPrefs() {
-  localStorage.setItem("cxp_prefs", JSON.stringify({ provider: state.provider, model: state.model, effort: state.effort, modeByProvider: state.modeByProvider, sendMode: state.sendMode }));
+  const previous = loadPrefs();
+  const saveComposerDefaults = !state.active;
+  localStorage.setItem("cxp_prefs", JSON.stringify({
+    provider: state.provider,
+    listView: state.listView,
+    model: saveComposerDefaults ? state.model : previous.model,
+    effort: saveComposerDefaults ? state.effort : previous.effort,
+    modeByProvider: state.modeByProvider,
+    sendMode: state.sendMode,
+    sidebarCollapsed: state.sidebarCollapsed,
+  }));
 }
 
 function loadPrefs() {
@@ -2592,26 +4116,32 @@ function loadPrefs() {
 }
 
 // ---------- new session ----------
-async function openNewSheet() {
+async function openNewSheet(provider = state.provider) {
   openSheet(`<h2>New session</h2><div class="hint">Loading projects…</div>`);
 
   let projects = [];
 
-  try { projects = (await api("/api/projects?provider=" + encodeURIComponent(state.provider))).projects; } catch {}
+  try { projects = (await api("/api/projects?provider=" + encodeURIComponent(provider))).projects; } catch {}
+  projects.sort((a, b) => Number(b.count ?? 0) - Number(a.count ?? 0) || String(a.name ?? a.path ?? "").localeCompare(String(b.name ?? b.path ?? "")));
 
   const opts = projects.slice(0, 20).map((p, i) => `
-    <div class="opt ${i === 0 ? "sel" : ""}" data-cwd="${esc(p.path)}">
+    <button type="button" class="opt opt-button ${i === 0 ? "sel" : ""}" data-cwd="${esc(p.path)}">
       <div class="radio"></div>
       <div><div class="on">${esc(p.name)}</div><div class="od">${esc(p.path)} · ${p.count} sessions</div></div>
-    </div>`).join("");
+    </button>`).join("");
 
   openSheet(`
-    <h2>New session</h2>
-    <div class="hint">Pick a project folder, or paste any path.</div>
-    ${opts}
-    <div class="seclabel">Or a custom path</div>
-    <input class="field-input" id="cwdInput" placeholder="/Users/you/code/project" autocapitalize="off" autocorrect="off">
-    <button class="primary-btn" id="createBtn">Start session</button>`);
+    <div class="new-session-layout">
+      <h2>New session</h2>
+      <div class="hint">Pick a project folder, or paste any path.</div>
+      <div class="new-session-projects">${opts || '<div class="empty">No recent projects</div>'}</div>
+      <div class="new-session-footer">
+        <div class="seclabel">Or a custom path</div>
+        <input class="field-input" id="cwdInput" placeholder="/Users/you/code/project" autocapitalize="off" autocorrect="off">
+        <button class="primary-btn" id="createBtn" ${state.modelsReady && state.model ? "" : "disabled"}>${state.modelsReady && state.model ? "Start session" : "Model unavailable — reload"}</button>
+      </div>
+    </div>`);
+  $("sheet").classList.add("new-session-host");
 
   let chosen = projects[0]?.path || "";
   $("sheetBody").querySelectorAll("[data-cwd]").forEach((el) => {
@@ -2625,22 +4155,52 @@ async function openNewSheet() {
   $("createBtn").onclick = async () => {
     const cwd = $("cwdInput").value.trim() || chosen;
 
-    if (!cwd) { return; }
+    if (!cwd || !state.modelsReady || !state.model) { return; }
 
     $("createBtn").disabled = true;
     $("createBtn").textContent = "Starting…";
 
     try {
-      const res = await api("/api/thread/new", { provider: state.provider, cwd, model: state.model });
+      const res = await api("/api/thread/new", { provider, cwd, model: state.model });
       const th = res.thread;
       closeSheet();
-      openThread({ id: th.id, name: th.name ?? null, preview: th.preview ?? "New session", cwd: th.cwd ?? cwd, provider: th.provider ?? state.provider, draft: th.draft });
+      openThread({ id: th.id, name: th.name ?? null, preview: th.preview ?? "New session", cwd: th.cwd ?? cwd, provider: th.provider ?? provider, draft: th.draft });
     } catch (e) {
       $("createBtn").disabled = false;
       $("createBtn").textContent = "Start session";
       alert("Failed: " + e.message);
     }
   };
+}
+
+function openNewSession() {
+  if (state.active) {
+    // The desktop New button starts another task with the open task's provider;
+    // this keeps its exact validated catalog intact even if the sidebar is
+    // temporarily filtering a different provider.
+    openNewSheet(activeProvider());
+    return;
+  }
+
+  if (state.listView === "provider") {
+    openNewSheet();
+    return;
+  }
+
+  openSheet(`<h2>New session</h2>
+    <div class="hint">Which agent should own this session?</div>
+    ${Object.entries(PROVIDER_LABELS).map(([provider, label]) => `<button class="opt opt-button" data-new-provider="${provider}"><div class="radio"></div><div><div class="on">${label}</div><div class="od">Start a new ${label} task</div></div></button>`).join("")}`);
+
+  $("sheetBody").querySelectorAll("[data-new-provider]").forEach((button) => {
+    button.onclick = async () => {
+      state.provider = button.dataset.newProvider;
+      syncProviderSeg();
+      persistPrefs();
+      closeSheet();
+      await initModels(state.provider);
+      openNewSheet();
+    };
+  });
 }
 
 // ---------- usage ----------
@@ -2705,6 +4265,106 @@ async function currentPushSub() {
   return reg ? reg.pushManager.getSubscription() : null;
 }
 
+async function ensurePushSubscription() {
+  if (!PUSH_SUPPORTED) { throw new Error("this browser can't receive push notifications"); }
+  if (isIOS() && !isStandalone()) { throw new Error("add this app to the Home Screen first"); }
+  if (Notification.permission === "denied") { throw new Error("notifications are blocked in browser settings"); }
+
+  const existing = await currentPushSub();
+  if (existing) {
+    // Browser state can outlive a restored bridge data directory. This POST is
+    // idempotent and repairs the server side automatically.
+    await api("/api/push/subscribe", { subscription: existing.toJSON() });
+    return existing;
+  }
+
+  const permission = await Notification.requestPermission();
+  if (permission !== "granted") { throw new Error("notification permission wasn't granted"); }
+
+  const { key } = await api("/api/push/key");
+  if (!key) { throw new Error("the bridge has no push key"); }
+
+  const reg = await navigator.serviceWorker.ready;
+  const fresh = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64ToUint8Array(key) });
+  await api("/api/push/subscribe", { subscription: fresh.toJSON() });
+  return fresh;
+}
+
+async function loadNotificationRules() {
+  state.notificationRules.clear();
+  if (!PUSH_SUPPORTED) { return; }
+
+  try {
+    const sub = await currentPushSub();
+    if (!sub) { return; }
+    const status = await api("/api/thread/notifications/status", { endpoint: sub.endpoint });
+
+    for (const rule of status.rules ?? []) {
+      state.notificationRules.set(threadRuleKey(rule.provider, rule.threadId), rule.mode);
+    }
+  } catch {
+    // The session list remains usable offline; subscription state refreshes on
+    // the next foreground sync or bell interaction.
+  }
+
+  syncNotifyButton();
+  if (!state.active && state.threads.length) { renderRows(false); }
+}
+
+async function setTaskNotification(thread, mode) {
+  const target = notificationTarget(thread);
+  const sub = mode === "off" ? await currentPushSub() : await ensurePushSubscription();
+
+  if (!sub) {
+    if (mode === "off") { return; }
+    throw new Error("notifications are not enabled on this device");
+  }
+
+  await api("/api/thread/notifications", {
+    endpoint: sub.endpoint,
+    provider: target.provider || "codex",
+    threadId: target.id,
+    mode,
+  });
+
+  const k = threadRuleKey(target.provider, target.id);
+  if (mode === "off") { state.notificationRules.delete(k); } else { state.notificationRules.set(k, mode); }
+  renderRows(false);
+  syncNotifyButton();
+}
+
+async function openTaskNotificationSheet(thread) {
+  const target = notificationTarget(thread);
+  const k = threadRuleKey(target.provider, target.id);
+  const current = state.notificationRules.get(k) || "off";
+  const isChild = thread?.parentThreadId && thread.id !== target.id;
+  const title = target.name || target.preview || "this task";
+
+  openSheet(`<h2>Task notifications</h2>
+    <div class="hint">${isChild ? "This subagent is grouped under " : "Choose how this device follows "}<b>${esc(title)}</b>. You will be notified for exact completed or failed turns started on the Mac or phone.</div>
+    <button type="button" class="opt opt-button ${current === "once" ? "sel" : ""}" data-notify-mode="once"><div class="radio"></div><div><div class="on">Notify once</div><div class="od">Notify for the next confirmed completion, then turn this off.</div></div></button>
+    <button type="button" class="opt opt-button ${current === "follow" ? "sel" : ""}" data-notify-mode="follow"><div class="radio"></div><div><div class="on">Follow this task</div><div class="od">Notify after every future confirmed turn until you turn it off.</div></div></button>
+    <button type="button" class="opt opt-button ${current === "off" ? "sel" : ""}" data-notify-mode="off"><div class="radio"></div><div><div class="on">Off</div><div class="od">Do not watch externally-started turns for this task.</div></div></button>
+    <div class="hint" id="taskNotifyHint">Subagent work stays grouped: following the parent does not send a separate alert for each child.</div>`);
+
+  $("sheetBody").querySelectorAll("[data-notify-mode]").forEach((option) => {
+    option.onclick = async () => {
+      const hint = $("taskNotifyHint");
+      const mode = option.dataset.notifyMode;
+      $("sheetBody").querySelectorAll("[data-notify-mode]").forEach((item) => item.style.pointerEvents = "none");
+      hint.textContent = mode === "off" ? "Turning off…" : "Enabling notifications…";
+
+      try {
+        await setTaskNotification(target, mode);
+        closeSheet();
+      } catch (error) {
+        hint.textContent = "Couldn't update: " + (error.message || error);
+        $("sheetBody").querySelectorAll("[data-notify-mode]").forEach((item) => item.style.pointerEvents = "");
+      }
+    };
+  });
+}
+
 async function wireNotifications() {
   const btn = $("pushBtn");
   const hint = $("pushHint");
@@ -2735,7 +4395,7 @@ async function wireNotifications() {
   const sub = await currentPushSub();
 
   if (sub) {
-    show("On — you'll be notified when a turn finishes, with the reply.", "Turn off notifications", true);
+    show("On. Bells on individual tasks also follow turns started directly on your Mac.", "Turn off notifications", true);
 
     btn.onclick = async () => {
       btn.disabled = true;
@@ -2747,33 +4407,24 @@ async function wireNotifications() {
         // already gone — fall through and re-read the state
       }
 
+      state.notificationRules.clear();
+      renderRows(false);
+      syncNotifyButton();
       wireNotifications();
     };
 
     return;
   }
 
-  show("Off. Get notified when Codex, Claude or Grok finishes a turn.", "Enable notifications", true);
+  show("Off. Enable this device, then use a task bell to follow work started on your Mac too.", "Enable notifications", true);
 
   btn.onclick = async () => {
     btn.disabled = true;
     hint.textContent = "Requesting permission…";
 
     try {
-      const perm = await Notification.requestPermission();
-
-      if (perm !== "granted") {
-        show("Permission wasn't granted, so notifications stay off.", "Enable notifications", true);
-        return;
-      }
-
-      const { key } = await api("/api/push/key");
-
-      if (!key) { throw new Error("the bridge has no push key"); }
-
-      const reg = await navigator.serviceWorker.ready;
-      const fresh = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64ToUint8Array(key) });
-      await api("/api/push/subscribe", { subscription: fresh.toJSON() });
+      await ensurePushSubscription();
+      await loadNotificationRules();
       wireNotifications();
     } catch (e) {
       show("Couldn't enable notifications: " + (e.message || e), "Try again", true);
@@ -2820,7 +4471,7 @@ async function openLinkedThread() {
     await switchProvider(prov);
   }
 
-  const found = state.threads.find((t) => t.id === id);
+  const found = state.threads.flatMap((t) => [t, ...(t.subagents ?? []).map((child) => ({ ...child, parentThreadId: t.id }))]).find((t) => t.id === id);
   openThread(found || { id, provider: prov || state.provider, cwd: null, name: null, preview: "Session" });
 }
 
@@ -2828,8 +4479,9 @@ async function openUsageSheet() {
   openSheet(`<h2>Usage & limits</h2><div class="hint">Loading…</div>`);
 
   let d;
+  const usageProvider = activeProvider();
 
-  try { d = await api("/api/usage?provider=" + encodeURIComponent(state.provider)); } catch (e) { $("sheetBody").innerHTML = `<h2>Usage</h2><div class="hint">Failed: ${esc(e.message)}</div>`; return; }
+  try { d = await api("/api/usage?provider=" + encodeURIComponent(usageProvider)); } catch (e) { $("sheetBody").innerHTML = `<h2>Usage</h2><div class="hint">Failed: ${esc(e.message)}</div>`; return; }
 
   const acc = d.account || {};
   const rl = d.rateLimits?.rateLimits;
@@ -2837,7 +4489,7 @@ async function openUsageSheet() {
   const credits = d.rateLimits?.rateLimitResetCredits;
 
   const planText = acc.planType ? esc(acc.planType.toUpperCase()) + " plan" : "";
-  let html = `<h2>Usage & limits</h2><div class="hint">${esc(acc.email || providerLabel())}${planText ? " · " + planText : ""}</div>`;
+  let html = `<h2>Usage & limits</h2><div class="hint">${esc(acc.email || PROVIDER_LABELS[usageProvider] || "Agent")}${planText ? " · " + planText : ""}</div>`;
 
   if (rl?.primary) { html += gaugeHtml("primary", rl.primary); }
 
@@ -2920,15 +4572,115 @@ function runKey(provider, tid) { return (provider || "codex") + ":" + tid; }
 
 function isRunning(provider, tid) { return state.running.has(runKey(provider, tid)); }
 
-function markRunning(provider, tid, on) {
+function isThreadRunning(thread, runningKeys = state.running) {
+  if (!thread) { return false; }
+
+  const provider = thread.provider || "codex";
+
+  return runningKeys.has(runKey(provider, thread.id)) || (thread.subagents ?? []).some((child) =>
+    runningKeys.has(runKey(child.provider || provider, child.id))
+  );
+}
+
+// Pure ordering used by the live UI and exercised directly in tests. The
+// server remains canonical, but a start event must promote the task before a
+// network round-trip; a running subagent promotes its parent task as well.
+function rankLiveThreads(threads, runningKeys) {
+  const key = (provider, tid) => (provider || "codex") + ":" + tid;
+  const active = (thread) => {
+    const provider = thread?.provider || "codex";
+
+    return !!thread && (runningKeys.has(key(provider, thread.id)) || (thread.subagents ?? []).some((child) =>
+      runningKeys.has(key(child.provider || provider, child.id))
+    ));
+  };
+
+  return [...(threads ?? [])].sort((a, b) => {
+    const running = Number(active(b)) - Number(active(a));
+
+    if (running) { return running; }
+
+    const updated = Number(b?.updatedAt ?? 0) - Number(a?.updatedAt ?? 0);
+
+    if (updated) { return updated; }
+
+    return `${a?.provider ?? ""}:${a?.id ?? ""}`.localeCompare(`${b?.provider ?? ""}:${b?.id ?? ""}`);
+  });
+}
+
+const LIST_RECONCILE_MS = 600;
+let listReconcileTimer = null;
+
+function scheduleListReconcile() {
+  if (listReconcileTimer) { clearTimeout(listReconcileTimer); }
+
+  listReconcileTimer = setTimeout(() => {
+    listReconcileTimer = null;
+
+    if (state.listView === "recent") { loadThreads(false).catch(() => {}); }
+  }, LIST_RECONCILE_MS);
+}
+
+function touchLiveThread(provider, tid) {
+  const now = Math.floor(Date.now() / 1000);
+  const affected = new Set();
+
+  for (const thread of state.threads) {
+    const threadProvider = thread.provider || "codex";
+
+    if (thread.id === tid && threadProvider === (provider || "codex")) {
+      thread.updatedAt = Math.max(Number(thread.updatedAt ?? 0), now);
+      affected.add(thread.id);
+    }
+
+    for (const child of thread.subagents ?? []) {
+      if (child.id !== tid || (child.provider || threadProvider) !== (provider || "codex")) { continue; }
+
+      child.updatedAt = Math.max(Number(child.updatedAt ?? 0), now);
+      thread.updatedAt = Math.max(Number(thread.updatedAt ?? 0), now);
+      affected.add(thread.id);
+      affected.add(child.id);
+    }
+  }
+
+  return affected;
+}
+
+function rerankRecentRows() {
+  if (state.listView !== "recent" || !state.threads.length) { return; }
+
+  const scrollTop = $("listView").scrollTop;
+  state.threads = rankLiveThreads(state.threads, state.running);
+  renderRows(false);
+  $("listView").scrollTop = scrollTop;
+}
+
+function markRunning(provider, tid, on, { confidence = "unknown", live = true } = {}) {
   if (!tid) { return; }
 
   const k = runKey(provider, tid);
   const had = state.running.has(k);
+  state.runConfidence.set(k, confidence);
 
   if (on) { state.running.add(k); } else { state.running.delete(k); }
 
-  if (had !== on) { updateRowRunning(tid, on); }
+  if (had !== on && live) {
+    const affected = touchLiveThread(provider, tid);
+
+    if (state.listView === "recent") {
+      rerankRecentRows();
+    } else {
+      updateRowRunning(tid, on);
+
+      for (const parentId of affected) {
+        const parent = state.threads.find((thread) => thread.id === parentId);
+
+        if (parent) { updateRowRunning(parent.id, isThreadRunning(parent)); }
+      }
+    }
+
+    scheduleListReconcile();
+  }
 
   // Keep the open thread's composer state honest if its run-state changed
   // elsewhere — and deliver anything queued behind that turn.
@@ -2941,37 +4693,54 @@ function markRunning(provider, tid, on) {
   // reload. Our own turns still end via turn/completed, which flushes there.
   const ownTurnRunning = state.busy && !state.externalTurn;
 
-  if (state.active && (tid === state.active.id || tid === state.active.draftId) && !on && !ownTurnRunning) {
+  const confirmedEnd = confidence === "provider" || confidence === "bridge" || confidence === "marker";
+
+  if (state.active && (tid === state.active.id || tid === state.active.draftId) && !on && !ownTurnRunning && confirmedEnd) {
     setBusy(false);
     flushPending();
+  } else if (state.active && (tid === state.active.id || tid === state.active.draftId) && !on && state.pending.length && !confirmedEnd) {
+    for (const entry of state.pending) {
+      const label = entry.chip?.querySelector("span");
+
+      if (label) { label.textContent = "Completion could not be confirmed — check the thread, then tap Retry to try now"; }
+      entry.retryRequired = true;
+      markSendFailed(entry.bubble, () => retryPendingEntry(entry));
+    }
+
+    savePending();
   }
 }
 
 function updateRowRunning(tid, on) {
-  const badge = document.querySelector('#rows .row[data-tid="' + (window.CSS?.escape ? CSS.escape(tid) : tid) + '"] .run-badge');
+  const escaped = window.CSS?.escape ? CSS.escape(tid) : tid;
 
-  if (badge) { badge.style.display = on ? "inline-flex" : "none"; }
+  document.querySelectorAll('#rows [data-tid="' + escaped + '"]').forEach((row) => {
+    const badge = row.querySelector(":scope > .run-badge, :scope > .row-head .run-badge");
+    if (badge) { badge.style.display = on ? "inline-flex" : "none"; }
+    const ready = row.querySelector(":scope > .row-head .ready-badge");
+    if (ready) { ready.style.display = !on && state.listView === "recent" ? "inline-flex" : "none"; }
+  });
 }
 
 // ---------- auto-sync (focus / reconnect / online) ----------
 // Re-fetch whatever's on screen so a backgrounded PWA shows the truth on return
 // and recovers any events missed while the stream was dropped.
-function resyncView() {
+function resyncView({ force = false } = {}) {
   if (state.active && !state.active.draft) {
-    resyncOpenThread();
+    resyncOpenThread({ force });
   } else if (!state.active) {
     loadThreads(false).catch(() => {});
   }
 }
 
-async function resyncOpenThread() {
+async function resyncOpenThread({ force = false } = {}) {
   const t = state.active;
 
   if (!t || t.draft || state.resyncing) { return; }
 
   // Don't clobber a turn we're streaming ourselves — its live deltas are truth.
   // An external turn is the opposite case: re-reading is the only way to see it.
-  if (state.busy && !state.externalTurn) {
+  if (state.busy && !state.externalTurn && (!force || state.sendStage)) {
     return;
   }
 
@@ -2994,12 +4763,18 @@ async function resyncOpenThread() {
     renderHistory(res.thread, res.itemWindow);
     state.fetching = false;
     setCursor(res);
+    if (res.runtime) {
+      markRunning(t.provider, t.id, !!res.runtime.running, { confidence: res.runtime.confidence });
+    }
 
     if (wasAtBottom) { scrollDown({ force: true }); } else { b.scrollTop = prevTop; syncStick(); }
 
     if (isRunning(t.provider, t.id)) {
-      setBusy(true, { external: state.externalTurn });
+      setBusy(true, { external: res.runtime?.source !== "bridge" });
       setLivePill(true, "Running — following live");
+    } else if (res.runtime && ["provider", "bridge", "marker"].includes(res.runtime.confidence)) {
+      setBusy(false);
+      flushPending();
     }
   } catch (e) {
     // Unreachable or transient — keep whatever's on screen, but say why it's stale.
@@ -3058,8 +4833,10 @@ function connectEvents() {
     // Reconnected after a drop (e.g. resumed from background) — catch up.
     if (state.sseErrored) {
       state.sseErrored = false;
-      resyncView();
+      resyncView({ force: true });
     }
+
+    refreshApprovals();
   };
   es.onerror = () => {
     $("connDot").classList.remove("on");
@@ -3076,15 +4853,29 @@ function connectEvents() {
 
     if (a.provider && a.provider !== activeProvider()) { return; }
 
-    if (!a.params?.threadId || (state.active && a.params.threadId === state.active.id)) { showApproval(a); }
+    if (state.active && (a.params?.threadId === state.active.id || a.params?.threadId === state.active.draftId)) { showApproval(a); }
   });
   es.addEventListener("notify", (e) => { const { method, params, provider } = JSON.parse(e.data); onNotify(method, params, provider); });
+  es.addEventListener("send-stage", (e) => {
+    const frame = JSON.parse(e.data);
+
+    if (frame.provider === activeProvider()) { updateSendProgress(frame); }
+  });
+  es.addEventListener("lock", (e) => {
+    const frame = JSON.parse(e.data);
+    const open = state.active && frame.provider === "codex" && frame.threadId === state.active.id;
+
+    if (!open) { return; }
+
+    const labels = { held: "You have it", elsewhere: "Open elsewhere", free: "Not held here" };
+    setLockStatus({ ...frame, label: labels[frame.state] || "Checking…" });
+  });
 
   // A turn this bridge never started — begun in a terminal, an IDE, or on
   // another device. The server watches the CLI's own session file and tells us
   // when it moves; re-reading the thread *is* the stream for those turns.
   es.addEventListener("external", (e) => {
-    const { provider, threadId, running, result, ops } = JSON.parse(e.data);
+    const { provider, threadId, running, runConfidence, result, ops } = JSON.parse(e.data);
     const open = state.active && (threadId === state.active.id || threadId === state.active.draftId);
 
     // A turn we started here is the authority on its own state. The session file
@@ -3092,7 +4883,7 @@ function connectEvents() {
     // marker — and acting on that would tear down the live UI mid-stream.
     if (open && state.busy && !state.externalTurn) { return; }
 
-    markRunning(provider, threadId, running);
+    markRunning(provider, threadId, running, { confidence: runConfidence });
 
     if (!open) { return; }
 
@@ -3105,10 +4896,15 @@ function connectEvents() {
 }
 
 // ---------- init ----------
-async function initModels() {
+async function initModels(provider = state.provider) {
+  const requestSeq = ++state.modelRequestSeq;
+
   try {
-    const res = await api("/api/models?provider=" + encodeURIComponent(state.provider));
+    const res = await api("/api/models?provider=" + encodeURIComponent(provider));
+    if (requestSeq !== state.modelRequestSeq) { return false; }
     state.models = res.data ?? [];
+    state.modelsReady = state.models.length > 0;
+    state.modelsProvider = provider;
     const prefs = loadPrefs();
     const def = state.models.find((m) => m.isDefault) || state.models[0];
     state.model = prefs.model && state.models.some((m) => m.id === prefs.model) ? prefs.model : def?.id ?? null;
@@ -3120,16 +4916,39 @@ async function initModels() {
 
     if (prefs.sendMode && SEND_MODES[prefs.sendMode]) { state.sendMode = prefs.sendMode; }
 
-    // The global prefs above are the default; a thread with its own memory wins.
-    applyThreadPrefs();
     syncControls();
-  } catch {}
+    return state.modelsReady;
+  } catch (error) {
+    if (requestSeq !== state.modelRequestSeq) { return false; }
+    state.models = [];
+    state.modelsReady = false;
+    state.modelsProvider = null;
+    state.model = null;
+    state.effort = null;
+    state.settingsTruth = { state: "error", sources: {}, message: "Models unavailable · send blocked" };
+    syncControls();
+    return false;
+  }
 }
 
 // wiring
 $("backBtn").onclick = backToList;
+$("sidebarToggleBtn").onclick = () => toggleSidebar();
 $("loadMore").onclick = () => loadThreads(true);
 $("sendBtn").onclick = send;
+$("attachBtn").onclick = () => {
+  if (activeProvider() === "grok") { chip("⚠️", "This Grok CLI does not support image prompts"); return; }
+  $("imageInput").click();
+};
+$("imageInput").onchange = () => uploadImages($("imageInput").files);
+$("input").addEventListener("paste", (event) => {
+  const images = [...(event.clipboardData?.files ?? [])].filter((file) => file.type.startsWith("image/"));
+
+  if (images.length) {
+    event.preventDefault();
+    uploadImages(images);
+  }
+});
 $("stopBtn").onclick = stopAgent;
 $("okBtn").onclick = () => answerApproval("approve");
 $("sessBtn").onclick = () => answerApproval("session");
@@ -3138,12 +4957,17 @@ $("modelCtl").onclick = openModelSheet;
 $("effortCtl").onclick = openEffortSheet;
 $("modeCtl").onclick = openModeSheet;
 $("steerCtl").onclick = openSendModeSheet;
-$("newBtn").onclick = openNewSheet;
+$("lockCtl").onclick = openLockSheet;
+$("newBtn").onclick = openNewSession;
 $("usageBtn").onclick = openUsageSheet;
+$("notifyBtn").onclick = () => state.active && openTaskNotificationSheet(state.active);
 $("diffBtn").onclick = () => openDiffSheet(state.lastDiff || "No diff");
 $("filesBtn").onclick = openFilesSheet;
 $("providerSeg").querySelectorAll("[data-provider]").forEach((b) => {
   b.onclick = () => switchProvider(b.dataset.provider);
+});
+$("viewSeg").querySelectorAll("[data-view]").forEach((b) => {
+  b.onclick = () => switchListView(b.dataset.view);
 });
 
 // The only place stickiness is decided. Scrolling away turns auto-follow off;
@@ -3165,6 +4989,19 @@ $("input").addEventListener("keydown", (e) => {
 $("search").addEventListener("input", () => {
   clearTimeout(state.searchTimer);
   state.searchTimer = setTimeout(() => loadThreads(false), 350);
+});
+
+// Desktop-native navigation: jump to the persistent sidebar without reaching
+// for the pointer, and dismiss centered dialogs with the conventional key.
+document.addEventListener("keydown", (event) => {
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+    event.preventDefault();
+    if (state.active && state.sidebarCollapsed) { toggleSidebar(true); }
+    $("search").focus();
+    $("search").select();
+  } else if (event.key === "Escape" && $("sheet").classList.contains("show")) {
+    closeSheet();
+  }
 });
 
 // Local-path links (see localFileTarget) open in the file viewer instead of
@@ -3197,23 +5034,32 @@ document.addEventListener("touchmove", (e) => {
 document.addEventListener("visibilitychange", () => {
   sendPresence();
 
-  if (!document.hidden) { reconnectNow(); resyncView(); }
+  if (!document.hidden) {
+    reconnectNow();
+    loadNotificationRules().then(() => { if (!state.active) { renderRows(false); } });
+    // A healthy stream already carries a bridge-owned turn. If it had dropped,
+    // connectEvents.onopen performs the forced canonical catch-up.
+    resyncView();
+  }
 });
 
 // Heartbeat so a long read keeps suppressing, and the report expires if we die.
 setInterval(() => {
   if (!document.hidden && state.active) { sendPresence(); }
 }, 30000);
-window.addEventListener("online", () => { setOfflineNote(false); reconnectNow(); resyncView(); });
+window.addEventListener("online", () => { setOfflineNote(false); reconnectNow(); resyncView({ force: true }); });
 window.addEventListener("offline", () => setOfflineNote(true, "phone"));
 
 function initProvider() {
   const prefs = loadPrefs();
 
   if (prefs.provider && PROVIDER_LABELS[prefs.provider]) { state.provider = prefs.provider; }
+  if (["recent", "provider"].includes(prefs.listView)) { state.listView = prefs.listView; }
+  state.sidebarCollapsed = prefs.sidebarCollapsed === true;
 
-  $("providerSeg").querySelectorAll("[data-provider]").forEach((b) => b.classList.toggle("on", b.dataset.provider === state.provider));
-  $("hTitle").textContent = providerLabel() + " Sessions";
+  syncProviderSeg();
+  syncSidebarToggle();
+  updateListChrome();
 }
 
 // Register the service worker for instant launch + offline app shell.
@@ -3223,10 +5069,16 @@ if ("serviceWorker" in navigator) {
   });
 }
 
+// The old per-device thread cache is intentionally retired. Provider state and
+// the bridge's atomic server-side store are the only thread authorities now.
+try { localStorage.removeItem("cxp_thread_prefs"); } catch {}
 initProvider();
+state.failedSends = loadFailedSends();
 connectEvents();
 initModels();
-loadThreads(false).then(() => openLinkedThread().catch(() => {}));
+Promise.all([loadNotificationRules(), loadThreads(false)]).then(() => {
+  openLinkedThread().catch(() => {});
+});
 </script>
 </body>
 </html>

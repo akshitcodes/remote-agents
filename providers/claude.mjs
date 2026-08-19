@@ -4,10 +4,12 @@
 // so the existing chat renderer is reused unchanged.
 //
 //   - listThreads / readThread / projects  read ~/.claude/projects/**/*.jsonl
-//   - send   drives a persistent `claude -p --input-format stream-json` process
-//            per open thread, writing each user turn to stdin and translating
-//            the stream-json envelope into normalized notify events.
-//   - models is a static list; usage is partial (5h window, usedPercent null).
+//   - send   drives a `claude -p --input-format stream-json` process for the
+//            active turn and translates its envelope into normalized events.
+//            The process is closed at terminal result because current Claude
+//            builds accept a later stdin frame but may not stream its result.
+//   - models scans real assistant transcript records and adds documented latest
+//            aliases as a small fallback; usage is partial (5h window).
 //
 // Interactive approvals: in "agent" mode the bridge attaches a PreToolUse hook
 // (via --settings). The hook auto-allows safe tools and, for sensitive ones
@@ -17,10 +19,10 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 
-import { sessionHeldElsewhere } from "../owners.mjs";
-import { readdirSync, statSync, openSync, readSync, closeSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { createReadStream, readdirSync, statSync, openSync, readSync, closeSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, join } from "node:path";
+import { createInterface } from "node:readline";
 
 import { BaseProvider, toEpochSec, makeLineReader } from "./base.mjs";
 
@@ -39,6 +41,20 @@ const FILE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 // (Read, Grep, Glob, WebFetch, …) is auto-allowed by the hook without a prompt.
 const SENSITIVE_TOOLS = new Set(["Bash", "Edit", "Write", "MultiEdit", "NotebookEdit", "WebFetch"]);
 const APPROVAL_TIMEOUT_MS = 240000;
+const THREAD_CONFLICT_CODE = "thread_locked_elsewhere";
+
+export function claudeTurnError(message) {
+  const text = String(message ?? "");
+
+  if (/Session\s+\S+\s+is currently running as a background agent\s*\(bg\)/i.test(text)) {
+    return {
+      message: "this thread is open on your Mac; close it there to continue",
+      code: THREAD_CONFLICT_CODE,
+    };
+  }
+
+  return { message: text };
+}
 
 // The PreToolUse hook script, written to a temp file at startup. It receives the
 // tool call on stdin; safe tools are allowed locally, sensitive ones are posted
@@ -85,11 +101,14 @@ req.write(payload);
 req.end();
 `;
 
-const MODELS = [
-  { id: "opus", displayName: "Claude Opus", description: "Most capable — deep reasoning and hard problems.", isDefault: true },
-  { id: "sonnet", displayName: "Claude Sonnet", description: "Balanced speed and capability for everyday work." },
-  { id: "fable", displayName: "Claude Fable", description: "Fast, strong general-purpose model." },
-  { id: "haiku", displayName: "Claude Haiku", description: "Fastest and lightest for simple tasks." },
+// Claude Code 2.1.228 has no model-list or config-list command. Its --model
+// help does explicitly document these aliases, so they are the only curated
+// choices used when a fresh install has no transcript history yet. Full IDs are
+// discovered from successful assistant records below rather than guessed here.
+const MODEL_FALLBACKS = [
+  { id: "opus", family: "opus", displayName: "Claude Opus (latest)", description: "Latest Opus alias — deep reasoning for complex tasks.", isDefault: true },
+  { id: "sonnet", family: "sonnet", displayName: "Claude Sonnet (latest)", description: "Latest Sonnet alias — balanced speed and capability." },
+  { id: "fable", family: "fable", displayName: "Claude Fable (latest)", description: "Latest Fable alias — fast, strong general-purpose work." },
 ];
 
 const EFFORTS = [
@@ -99,6 +118,133 @@ const EFFORTS = [
   { reasoningEffort: "xhigh", description: "Extended thinking for hard problems." },
   { reasoningEffort: "max", description: "Maximum thinking budget." },
 ];
+
+const MODEL_FAMILY_ORDER = new Map([
+  ["opus", 0],
+  ["sonnet", 1],
+  ["fable", 2],
+  ["haiku", 3],
+]);
+
+function claudeModelFamily(id) {
+  if (MODEL_FAMILY_ORDER.has(id)) { return id; }
+  return /^claude-(opus|sonnet|fable|haiku)-/.exec(id)?.[1] ?? null;
+}
+
+function isClaudeModelId(value) {
+  return typeof value === "string"
+    && value.length <= 200
+    && /^claude-[a-z0-9][a-z0-9._-]*(?:\[[a-z0-9]+\])?$/.test(value);
+}
+
+function displayVersion(id, family) {
+  const raw = id.slice(`claude-${family}-`.length);
+  const match = /^(\d+)(?:-(\d+))?(?:-(\d{8}))?(.*)$/.exec(raw);
+
+  if (!match) { return raw.replaceAll("-", " "); }
+
+  const version = match[2] ? `${match[1]}.${match[2]}` : match[1];
+  const date = match[3] ? ` (${match[3]})` : "";
+  const rest = match[4] ? match[4].replaceAll("-", " ") : "";
+  return `${version}${date}${rest}`.trim();
+}
+
+function observedModelDescription(family) {
+  switch (family) {
+    case "opus":
+      return "Pinned Opus model observed in local Claude transcript history.";
+    case "sonnet":
+      return "Pinned Sonnet model observed in local Claude transcript history.";
+    case "fable":
+      return "Pinned Fable model observed in local Claude transcript history.";
+    case "haiku":
+      return "Pinned Haiku model observed in local Claude transcript history.";
+    default:
+      return "Model observed in local Claude transcript history.";
+  }
+}
+
+export function buildClaudeModelList(observedIds = []) {
+  const observed = [...new Set(observedIds)].filter(isClaudeModelId).map((id) => {
+    const family = claudeModelFamily(id);
+    const familyName = family ? family[0].toUpperCase() + family.slice(1) : "Model";
+    return {
+      id,
+      family,
+      displayName: family ? `Claude ${familyName} ${displayVersion(id, family)}` : id,
+      description: observedModelDescription(family),
+      source: "transcript",
+    };
+  });
+
+  observed.sort((a, b) => {
+    const family = (MODEL_FAMILY_ORDER.get(a.family) ?? 99) - (MODEL_FAMILY_ORDER.get(b.family) ?? 99);
+    return family || b.id.localeCompare(a.id, undefined, { numeric: true });
+  });
+
+  const byFamily = new Map();
+  for (const model of observed) {
+    const rows = byFamily.get(model.family) ?? [];
+    rows.push(model);
+    byFamily.set(model.family, rows);
+  }
+
+  const data = [];
+  for (const fallback of MODEL_FALLBACKS) {
+    data.push({ ...fallback, source: "cli_help" });
+    data.push(...(byFamily.get(fallback.family) ?? []));
+    byFamily.delete(fallback.family);
+  }
+
+  for (const family of ["haiku", ...byFamily.keys()]) {
+    data.push(...(byFamily.get(family) ?? []));
+    byFamily.delete(family);
+  }
+
+  return data.map(({ family, ...model }) => model);
+}
+
+export function listClaudeTranscriptPaths(root = PROJECTS_DIR) {
+  const paths = [];
+  const pending = [root];
+
+  while (pending.length) {
+    const dir = pending.pop();
+    let entries;
+
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+
+    for (const entry of entries) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) { pending.push(path); }
+      else if (entry.isFile() && entry.name.endsWith(".jsonl")) { paths.push(path); }
+    }
+  }
+
+  return paths.sort();
+}
+
+export async function observedClaudeModelIds(paths) {
+  const models = new Set();
+
+  for (const path of paths) {
+    try {
+      const lines = createInterface({ input: createReadStream(path), crlfDelay: Infinity });
+
+      for await (const line of lines) {
+        let row;
+        try { row = JSON.parse(line); } catch { continue; }
+        const model = row?.type === "assistant" ? row.message?.model : null;
+        if (isClaudeModelId(model)) { models.add(model); }
+      }
+    } catch {
+      // A concurrently removed or unreadable transcript should not make the
+      // whole provider list unavailable.
+    }
+  }
+
+  return [...models];
+}
 
 // Our permission modes -> Claude --permission-mode. The CLI accepts
 // acceptEdits | auto | bypassPermissions | manual | dontAsk | plan. Accepts the
@@ -130,6 +276,42 @@ function permissionModeFor(value) {
     default:
       return "default";
   }
+}
+
+export function claudeSessionArgs({ emitThreadId, model, effort, modeKey, isDraft, hookPath, endpoint, hookSecret, nodePath = process.execPath }) {
+  const args = [
+    "-p",
+    "--input-format", "stream-json",
+    "--output-format", "stream-json",
+    "--verbose",
+    "--include-partial-messages",
+  ];
+
+  if (!isDraft) { args.push("--resume", emitThreadId); }
+  if (model) { args.push("--model", model); }
+  if (effort) { args.push("--effort", effort); }
+
+  const interactive = hookPath && endpoint && (modeKey === "manual" || modeKey === "default" || modeKey == null);
+  if (interactive) {
+    args.push("--permission-mode", "default");
+    const url = `http://${endpoint.host}:${endpoint.port}/internal/claude-approval`;
+    const settings = {
+      hooks: {
+        PreToolUse: [{
+          matcher: "*",
+          hooks: [{
+            type: "command",
+            command: `"${nodePath}" "${hookPath}" ${url} ${hookSecret}`,
+          }],
+        }],
+      },
+    };
+    args.push("--settings", JSON.stringify(settings));
+  } else {
+    args.push("--permission-mode", permissionModeFor(modeKey));
+  }
+
+  return args;
 }
 
 // Read only the first bytes of a (potentially huge) transcript.
@@ -308,14 +490,39 @@ function toolUseToItem(block) {
   return { type: "mcpToolCall", id: block.id, server, tool: name, description };
 }
 
+const DEFAULT_ACCEPT_TIMEOUT_MS = 60_000;
+
+export function claudeUserContent(text, attachments = []) {
+  const content = [];
+
+  if (String(text ?? "").trim()) { content.push({ type: "text", text: String(text) }); }
+
+  for (const attachment of attachments) {
+    content.push({
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: attachment.mimeType,
+        data: readFileSync(attachment.path).toString("base64"),
+      },
+    });
+  }
+
+  return content;
+}
+
 export class ClaudeProvider extends BaseProvider {
-  constructor(emit) {
+  constructor(emit, { acceptTimeoutMs = DEFAULT_ACCEPT_TIMEOUT_MS, projectsDir = PROJECTS_DIR } = {}) {
     super(emit, "claude");
 
-    // Persistent warm sessions: threadId and (once known) native sessionId
-    // both point at the same session object.
+    // Active sessions: threadId and (once known) native sessionId both point at
+    // the same session object. A process is retained only through its live turn
+    // so steering remains possible; terminal results release it.
     this.sessions = new Map();
+    this.acceptTimeoutMs = acceptTimeoutMs;
+    this.projectsDir = projectsDir;
     this.summaryCache = new Map(); // path -> { mtime, summary }
+    this.modelCache = null; // { signature, data }
     this.drafts = new Map(); // draft id -> cwd (recovered on send)
     this.lastRateLimit = null; // last rate_limit_info seen (for usage())
     this.spawnCount = 0; // test observability: process reuse across turns
@@ -388,7 +595,7 @@ export class ClaudeProvider extends BaseProvider {
         this.pendingApprovals.delete(requestId);
         resolve({ decision: "deny", reason: "approval timed out" });
       }, APPROVAL_TIMEOUT_MS);
-      this.pendingApprovals.set(requestId, { resolve, timer });
+      this.pendingApprovals.set(requestId, { resolve, timer, method, params });
     });
   }
 
@@ -405,19 +612,27 @@ export class ClaudeProvider extends BaseProvider {
     return { ok: true };
   }
 
+  pendingApprovalsList() {
+    return [...this.pendingApprovals.entries()].map(([requestId, pending]) => ({
+      requestId,
+      method: pending.method,
+      params: pending.params,
+    }));
+  }
+
   // ---------- transcript scanning ----------
 
   listTranscriptFiles() {
     const files = [];
 
-    if (!existsSync(PROJECTS_DIR)) {
+    if (!existsSync(this.projectsDir)) {
       return files;
     }
 
     let dirs;
 
     try {
-      dirs = readdirSync(PROJECTS_DIR, { withFileTypes: true });
+      dirs = readdirSync(this.projectsDir, { withFileTypes: true });
     } catch {
       return files;
     }
@@ -427,7 +642,7 @@ export class ClaudeProvider extends BaseProvider {
         continue;
       }
 
-      const dirPath = join(PROJECTS_DIR, dir.name);
+      const dirPath = join(this.projectsDir, dir.name);
       let entries;
 
       try {
@@ -599,12 +814,19 @@ export class ClaudeProvider extends BaseProvider {
 
       if (obj.type === "user") {
         const textBlocks = blocks.filter((b) => b.type === "text" && (b.text ?? "").trim() && !(b.text ?? "").trim().startsWith("<"));
+        const imageBlocks = blocks.filter((b) => b.type === "image");
         const resultBlocks = blocks.filter((b) => b.type === "tool_result");
 
-        if (textBlocks.length) {
+        if (textBlocks.length || imageBlocks.length) {
           current = { items: [] };
           turns.push(current);
-          current.items.push({ type: "userMessage", content: textBlocks.map((b) => ({ type: "text", text: b.text })) });
+          current.items.push({
+            type: "userMessage",
+            content: [
+              ...textBlocks.map((b) => ({ type: "text", text: b.text })),
+              ...imageBlocks.map(() => ({ type: "image" })),
+            ],
+          });
         }
 
         for (const rb of resultBlocks) {
@@ -648,30 +870,6 @@ export class ClaudeProvider extends BaseProvider {
       }
     }
 
-    // Warm the stream-json process so the first send on this thread is fast —
-    // but only if nothing else is already driving this session. Warming
-    // unconditionally spawned `claude --resume <id>` for a session that might be
-    // live in a terminal or the VS Code extension, putting a second controller
-    // on one transcript; because that process carries the PreToolUse approval
-    // hook, the *original* session's tool calls began waiting on an approval
-    // nobody knew to give, and came back denied.
-    //
-    // Claude refuses outright for background agents ("currently running as a
-    // background agent"), so this is the second of two layers, not the only one.
-    try {
-      if (!this.sessions.has(id) && !sessionHeldElsewhere(id)) {
-        this.ensureSession(id, {
-          cwd: this.cwdForSession(id),
-          model: undefined,
-          effort: undefined,
-          modeKey: undefined,
-          isDraft: false,
-        });
-      }
-    } catch {
-      // ignore prewarm failures
-    }
-
     return { thread: { turns } };
   }
 
@@ -694,12 +892,28 @@ export class ClaudeProvider extends BaseProvider {
   }
 
   async models() {
-    const data = MODELS.map((m) => ({
+    const paths = listClaudeTranscriptPaths(this.projectsDir);
+    const signature = paths.map((path) => {
+      try {
+        const stat = statSync(path);
+        return `${path}:${stat.size}:${stat.mtimeMs}`;
+      } catch {
+        return `${path}:missing`;
+      }
+    }).join("\n");
+
+    if (this.modelCache?.signature === signature) {
+      return { data: this.modelCache.data };
+    }
+
+    const observed = await observedClaudeModelIds(paths);
+    const data = buildClaudeModelList(observed).map((m) => ({
       ...m,
       supportedReasoningEfforts: EFFORTS,
       defaultReasoningEffort: "high",
       hidden: false,
     }));
+    this.modelCache = { signature, data };
     return { data };
   }
 
@@ -841,56 +1055,16 @@ export class ClaudeProvider extends BaseProvider {
     const resolvedEffort = effort || undefined;
     const resolvedModeKey = modeKey || undefined;
 
-    const args = [
-      "-p",
-      "--input-format",
-      "stream-json",
-      "--output-format",
-      "stream-json",
-      "--verbose",
-      "--include-partial-messages",
-    ];
-
-    if (!isDraft) {
-      args.push("--resume", emitThreadId);
-    }
-
-    if (resolvedModel) {
-      args.push("--model", resolvedModel);
-    }
-
-    if (resolvedEffort) {
-      args.push("--effort", resolvedEffort);
-    }
-
-    // Interactive approvals for "manual" mode: run in default permission mode but
-    // gate sensitive tools through the PreToolUse hook (which asks the phone).
-    // acceptEdits/plan/bypass run non-interactively with their native mode.
-    const interactive =
-      this.hookPath && this.endpoint && (resolvedModeKey === "manual" || resolvedModeKey === "default" || resolvedModeKey == null);
-
-    if (interactive) {
-      args.push("--permission-mode", "default");
-      const url = `http://${this.endpoint.host}:${this.endpoint.port}/internal/claude-approval`;
-      const settings = {
-        hooks: {
-          PreToolUse: [
-            {
-              matcher: "*",
-              hooks: [
-                {
-                  type: "command",
-                  command: `"${process.execPath}" "${this.hookPath}" ${url} ${this.hookSecret}`,
-                },
-              ],
-            },
-          ],
-        },
-      };
-      args.push("--settings", JSON.stringify(settings));
-    } else {
-      args.push("--permission-mode", permissionModeFor(resolvedModeKey));
-    }
+    const args = claudeSessionArgs({
+      emitThreadId,
+      model: resolvedModel,
+      effort: resolvedEffort,
+      modeKey: resolvedModeKey,
+      isDraft,
+      hookPath: this.hookPath,
+      endpoint: this.endpoint,
+      hookSecret: this.hookSecret,
+    });
 
     let child;
 
@@ -918,6 +1092,11 @@ export class ClaudeProvider extends BaseProvider {
       ctx: this.newCtx(emitThreadId, isDraft),
       turnDone: null,
       _resolveTurnDone: null,
+      turnAccepted: null,
+      _resolveTurnAccepted: null,
+      _rejectTurnAccepted: null,
+      acceptTimer: null,
+      stderr: "",
     };
 
     // Store under emitThreadId before returning so concurrent callers share it.
@@ -927,6 +1106,7 @@ export class ClaudeProvider extends BaseProvider {
     child.stdout.on("data", (d) => session.feed(d));
 
     child.stderr.on("data", (d) => {
+      session.stderr = (session.stderr + d.toString()).slice(-8000);
       process.stderr.write(`[claude] ${d}`);
     });
 
@@ -943,9 +1123,23 @@ export class ClaudeProvider extends BaseProvider {
       }
 
       if (session.busy) {
+        const error = claudeTurnError(session.stderr || msg);
+        const failure = Object.assign(new Error(error.message), {
+          status: error.code === THREAD_CONFLICT_CODE ? 409 : 500,
+          code: error.code,
+        });
+
+        if (session._rejectTurnAccepted) {
+          this.clearAcceptTimer(session);
+          session._rejectTurnAccepted(failure);
+          session._resolveTurnAccepted = null;
+          session._rejectTurnAccepted = null;
+        }
+
         this.notify("turn/failed", {
           threadId: session.emitThreadId,
-          turn: { status: "failed", error: { message: msg } },
+          error,
+          turn: { status: "failed", error },
         });
         session.busy = false;
 
@@ -980,6 +1174,7 @@ export class ClaudeProvider extends BaseProvider {
       return;
     }
 
+    this.clearAcceptTimer(session);
     session.dead = true;
     this.sessions.delete(session.emitThreadId);
 
@@ -994,11 +1189,18 @@ export class ClaudeProvider extends BaseProvider {
     }
   }
 
-  async send(body = {}) {
-    const { threadId, text, model, effort, mode, sandbox, cwd, draft } = body;
+  clearAcceptTimer(session) {
+    if (session?.acceptTimer) {
+      clearTimeout(session.acceptTimer);
+      session.acceptTimer = null;
+    }
+  }
 
-    if (!text) {
-      throw Object.assign(new Error("text required"), { status: 400 });
+  async send(body = {}) {
+    const { threadId, text, attachments = [], model, effort, mode, sandbox, cwd, draft } = body;
+
+    if (!String(text ?? "").trim() && !attachments.length) {
+      throw Object.assign(new Error("message content required"), { status: 400 });
     }
 
     const isDraft = !!draft || !threadId || String(threadId).startsWith("draft-") || threadId === "new";
@@ -1016,13 +1218,11 @@ export class ClaudeProvider extends BaseProvider {
 
     await session.ready;
 
-    // Serialize turns on the same warm session.
-    if (session.busy && session.turnDone) {
-      await session.turnDone;
-    }
-
     if (session.busy) {
-      throw Object.assign(new Error("a turn is already running"), { status: 409 });
+      // Never wait indefinitely for an acknowledgement-timeout turn. It may be
+      // live but temporarily silent, so killing it would be unsafe; report the
+      // state and let the durable phone queue wait for canonical completion.
+      throw Object.assign(new Error("a turn is already running"), { status: 409, code: "turn_in_progress" });
     }
 
     if (session.dead) {
@@ -1030,38 +1230,62 @@ export class ClaudeProvider extends BaseProvider {
     }
 
     this.resetTurn(session.ctx);
+    session.stderr = "";
     session.busy = true;
     session.turnDone = new Promise((r) => {
       session._resolveTurnDone = r;
     });
+    session.turnAccepted = new Promise((resolve, reject) => {
+      session._resolveTurnAccepted = resolve;
+      session._rejectTurnAccepted = reject;
+    });
+    session.acceptTimer = setTimeout(() => {
+      session.acceptTimer = null;
+      const reject = session._rejectTurnAccepted;
+      session._resolveTurnAccepted = null;
+      session._rejectTurnAccepted = null;
+      reject?.(Object.assign(
+        new Error("Claude did not acknowledge this message in time; it may still have been delivered, so check the thread before retrying"),
+        { status: 504, code: "delivery_uncertain" },
+      ));
+    }, this.acceptTimeoutMs);
+    session.acceptTimer.unref?.();
 
     // Do NOT emit turn/started here — the translation already emits it from
     // message_start (handleAnthropicEvent), same as the cold-spawn path.
     const frame = JSON.stringify({
       type: "user",
-      message: { role: "user", content: [{ type: "text", text }] },
+      message: { role: "user", content: claudeUserContent(text, attachments) },
     });
 
     try {
       session.child.stdin.write(frame + "\n");
     } catch (e) {
       session.busy = false;
+      this.clearAcceptTimer(session);
 
       if (session._resolveTurnDone) {
         session._resolveTurnDone();
         session._resolveTurnDone = null;
       }
 
+      session._resolveTurnAccepted = null;
+      session._rejectTurnAccepted = null;
+
       throw Object.assign(new Error("failed to write to claude stdin: " + (e.message ?? e)), { status: 500 });
     }
 
     session.lastUsed = Date.now();
+    // Writing stdin only proves that the bridge handed bytes to a process. A
+    // resume conflict arrives asynchronously, so commit the durable send only
+    // after Claude actually begins the message (or explicitly rejects it).
+    await session.turnAccepted;
     return { ok: true, threadId: emitThreadId };
   }
 
-  async steer({ threadId, text } = {}) {
-    if (!text) {
-      throw Object.assign(new Error("text required"), { status: 409, code: "empty_input" });
+  async steer({ threadId, text, attachments = [] } = {}) {
+    if (!String(text ?? "").trim() && !attachments.length) {
+      throw Object.assign(new Error("message content required"), { status: 409, code: "empty_input" });
     }
 
     const session = this.sessions.get(threadId);
@@ -1078,7 +1302,7 @@ export class ClaudeProvider extends BaseProvider {
 
     const frame = JSON.stringify({
       type: "user",
-      message: { role: "user", content: [{ type: "text", text }] },
+      message: { role: "user", content: claudeUserContent(text, attachments) },
     });
 
     try {
@@ -1132,7 +1356,7 @@ export class ClaudeProvider extends BaseProvider {
     }
 
     if (obj.type === "stream_event") {
-      this.handleAnthropicEvent(obj.event ?? {}, ctx);
+      this.handleAnthropicEvent(obj.event ?? {}, ctx, session);
       return;
     }
 
@@ -1163,9 +1387,25 @@ export class ClaudeProvider extends BaseProvider {
       this.lastModelUsage = obj.modelUsage ?? this.lastModelUsage;
 
       const failed = obj.subtype && obj.subtype !== "success";
+      const error = failed ? claudeTurnError(obj.result ?? obj.subtype) : undefined;
+
+      if (failed && session._rejectTurnAccepted) {
+        this.clearAcceptTimer(session);
+        session._rejectTurnAccepted(Object.assign(new Error(error.message), {
+          status: error.code === THREAD_CONFLICT_CODE ? 409 : 500,
+          code: error.code,
+        }));
+      } else {
+        this.clearAcceptTimer(session);
+        session._resolveTurnAccepted?.();
+      }
+
+      session._resolveTurnAccepted = null;
+      session._rejectTurnAccepted = null;
       this.notify(failed ? "turn/failed" : "turn/completed", {
         threadId: tid,
-        turn: { id: ctx.turnId, status: failed ? "failed" : "completed", error: failed ? { message: String(obj.result ?? obj.subtype) } : undefined },
+        error,
+        turn: { id: ctx.turnId, status: failed ? "failed" : "completed", error },
       });
 
       // End the turn at the session level so the warm process can accept another.
@@ -1177,11 +1417,17 @@ export class ClaudeProvider extends BaseProvider {
         session._resolveTurnDone = null;
       }
 
+      // Claude 2.1.226 can write a second prompt/answer to the transcript while
+      // emitting no second stream/result envelope. Reusing that process would
+      // make the phone stay busy forever. Keep it for the active turn (and
+      // native steer), then release it; the next explicit send safely resumes.
+      this.closeSession(session);
+
       return;
     }
   }
 
-  handleAnthropicEvent(event, ctx) {
+  handleAnthropicEvent(event, ctx, session) {
     const tid = ctx.emitThreadId;
 
     switch (event.type) {
@@ -1192,6 +1438,14 @@ export class ClaudeProvider extends BaseProvider {
         if (!ctx.turnId) {
           ctx.turnId = id || "turn";
           this.notify("turn/started", { threadId: tid, turn: { id: ctx.turnId } });
+        }
+
+        session?._resolveTurnAccepted?.();
+
+        if (session) {
+          this.clearAcceptTimer(session);
+          session._resolveTurnAccepted = null;
+          session._rejectTurnAccepted = null;
         }
 
         ctx.blockKinds = new Map();
