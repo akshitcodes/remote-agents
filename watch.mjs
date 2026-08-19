@@ -20,9 +20,18 @@ import { join } from "node:path";
 
 const POLL_MS = 1000;
 
-// How long after its last write a thread with no explicit end-of-turn marker is
-// still assumed to be working. Only used for providers that don't log one.
-const ASSUME_ACTIVE_MS = 25000;
+// How long after its last write a thread whose turn markers we cannot read is
+// still assumed to be working.
+//
+// This is reached more often than "providers that don't log a marker" suggests:
+// it also catches any log whose most recent marker sits further back than
+// TAIL_BYTES, which is every long turn on a large rollout. In that state this
+// value is the *only* thing deciding the badge, so it must outlast an ordinary
+// quiet stretch — a single slow tool call or a long model think easily passes
+// 25s, and reporting such a thread "stopped" invites re-sending into a live
+// turn. Turns this bridge runs itself no longer come through here at all; the
+// server records those directly.
+const ASSUME_ACTIVE_MS = 90000;
 
 // A turn that is interrupted — you hit escape, the CLI was killed, the machine
 // slept — never writes its end marker, so its log is left looking mid-turn
@@ -179,7 +188,7 @@ function parseFromEnd(lines, decide) {
       continue;
     }
 
-    const verdict = decide(record);
+    const verdict = decide(record, lines[i]);
 
     if (verdict !== undefined) {
       return verdict;
@@ -190,12 +199,30 @@ function parseFromEnd(lines, decide) {
 }
 
 // Codex logs an explicit task_started / task_complete pair per turn.
-function codexRunning(lines) {
+function recordId(prefix, record, line) {
+  const native = record?.id ?? record?.uuid ?? record?.message?.id ?? record?.payload?.turn_id;
+  return native ? `${prefix}:${native}` : `${prefix}:${createHash("sha1").update(line).digest("hex").slice(0, 16)}`;
+}
+
+function contentText(content) {
+  if (typeof content === "string") { return content; }
+  if (!Array.isArray(content)) { return ""; }
+  return content.map((part) => part?.text ?? "").filter(Boolean).join("\n");
+}
+
+function codexObservation(lines) {
   return parseFromEnd(lines, (r) => {
     const type = r?.payload?.type;
 
-    if (type === "task_started") { return true; }
-    if (type === "task_complete") { return false; }
+    if (type === "task_started") { return { running: true }; }
+    if (type === "task_complete") {
+      return {
+        running: false,
+        terminalId: recordId("codex", r, JSON.stringify(r)),
+        terminalOutcome: r.payload?.error ? "failed" : "completed",
+        terminalText: String(r.payload?.last_agent_message ?? ""),
+      };
+    }
 
     return undefined;
   });
@@ -204,12 +231,19 @@ function codexRunning(lines) {
 // Claude ends a turn with an assistant message whose stop_reason is end_turn.
 // Everything between that and the user's prompt is tool_use / tool_result
 // traffic, which we skip over.
-function claudeRunning(lines) {
-  return parseFromEnd(lines, (r) => {
+function claudeObservation(lines) {
+  return parseFromEnd(lines, (r, line) => {
     if (r?.type === "assistant") {
       const reason = r?.message?.stop_reason;
 
-      if (reason && reason !== "tool_use") { return false; }
+      if (reason && reason !== "tool_use") {
+        return {
+          running: false,
+          terminalId: recordId("claude", r, line),
+          terminalOutcome: reason === "end_turn" ? "completed" : "failed",
+          terminalText: contentText(r.message?.content),
+        };
+      }
 
       return undefined;
     }
@@ -218,33 +252,78 @@ function claudeRunning(lines) {
       const content = r?.message?.content;
       const isToolResult = Array.isArray(content) && content.some((c) => c?.type === "tool_result");
 
-      if (!isToolResult) { return true; }
+      if (!isToolResult) { return { running: true }; }
     }
 
     return undefined;
   });
 }
 
+// Grok history has no explicit turn-completed envelope, but a real prompt is
+// tagged with prompt_index and the final assistant record has no tool calls.
+// Synthetic reminders are ignored. Tool-calling assistant records do not end a
+// turn; the later plain assistant response does.
+function grokObservation(lines) {
+  let terminal = null;
+
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let record;
+
+    try { record = JSON.parse(lines[i]); } catch { continue; }
+
+    if (!terminal && record?.type === "assistant") {
+      const hasToolCalls = Array.isArray(record.tool_calls) && record.tool_calls.length > 0;
+      const hasContent = typeof record.content === "string" ? !!record.content.trim() : Array.isArray(record.content) && record.content.length > 0;
+
+      if (!hasToolCalls && hasContent) { terminal = { record, line: lines[i] }; }
+      continue;
+    }
+
+    if (record?.type === "user" && Number.isInteger(record.prompt_index) && !record.synthetic_reason) {
+      if (!terminal) { return { running: true }; }
+
+      // Grok assistant records have no native message id. Include prompt_index
+      // so two turns that happen to return identical text still notify twice.
+      return {
+        running: false,
+        terminalId: `grok:${record.prompt_index}:${createHash("sha1").update(terminal.line).digest("hex").slice(0, 16)}`,
+        terminalOutcome: "completed",
+        terminalText: contentText(terminal.record.content),
+      };
+    }
+  }
+
+  if (!terminal) { return null; }
+  // Without the prompt_index there is no collision-safe turn identity. Keep
+  // the run-state exact, but do not manufacture a notification cursor.
+  return { running: false };
+}
+
+export function observeProviderTail(provider, lines) {
+  if (provider === "claude") { return claudeObservation(lines); }
+  if (provider === "grok") { return grokObservation(lines); }
+  return codexObservation(lines);
+}
+
 // Returns true/false, or null when this provider leaves no usable marker and the
 // caller should fall back to "was it written to recently".
-function runningFromFile(provider, path, stat) {
+function runningDetailFromFile(provider, path, stat) {
   const cacheKey = `${path}:${stat.mtimeMs}:${stat.size}`;
-  let marker;
+  let observation;
 
   // Only the marker is cached: it depends purely on the file's bytes. Staleness
   // depends on the clock, so it has to be re-applied every time or a stalled
   // thread would stay "running" forever behind an unchanging cache key.
   if (runCache.has(cacheKey)) {
-    marker = runCache.get(cacheKey);
+    observation = runCache.get(cacheKey);
   } else {
-    marker = null;
+    observation = null;
 
-    if (provider === "codex" || provider === "claude") {
-      const lines = tailLines(path, stat.size);
-      marker = provider === "codex" ? codexRunning(lines) : claudeRunning(lines);
-    }
+    const lines = tailLines(path, stat.size);
 
-    runCache.set(cacheKey, marker);
+    observation = observeProviderTail(provider, lines);
+
+    runCache.set(cacheKey, observation);
 
     if (runCache.size > 200) {
       runCache.clear();
@@ -253,11 +332,31 @@ function runningFromFile(provider, path, stat) {
 
   const silentFor = Date.now() - stat.mtimeMs;
 
-  if (marker === null) {
-    return silentFor < ASSUME_ACTIVE_MS;
+  const state = classifyRunningState(observation?.running ?? null, silentFor);
+
+  if (!state.running && state.confidence === "marker" && observation?.terminalId) {
+    state.terminalId = observation.terminalId;
+    state.terminalOutcome = observation.terminalOutcome ?? "completed";
+    state.terminalText = observation.terminalText ?? "";
   }
 
-  return marker && silentFor <= STALE_AFTER_MS;
+  return state;
+}
+
+export function classifyRunningState(marker, silentFor) {
+  if (marker === null) {
+    return { running: silentFor < ASSUME_ACTIVE_MS, confidence: "heuristic" };
+  }
+
+  if (marker && silentFor > STALE_AFTER_MS) {
+    return { running: false, confidence: "stale_timeout" };
+  }
+
+  return { running: marker, confidence: "marker" };
+}
+
+function runningFromFile(provider, path, stat) {
+  return runningDetailFromFile(provider, path, stat).running;
 }
 
 // Identity of a thread's log *and* of the code that parses it.
@@ -317,6 +416,25 @@ export function runningStates(provider, ids) {
   return out;
 }
 
+// Same point-in-time answer, but preserves whether the result came from an
+// explicit provider marker or a time-based guess. Guesses may decorate the UI;
+// they must never authorize dispatching a queued follow-up.
+export function runningDetails(provider, ids) {
+  const out = {};
+
+  for (const id of ids ?? []) {
+    const path = resolvePath(provider, id);
+
+    if (!path) { continue; }
+
+    try {
+      out[id] = runningDetailFromFile(provider, path, statSync(path));
+    } catch {}
+  }
+
+  return out;
+}
+
 // ---------- the poll loop ----------
 
 // Watch exactly the threads clients currently have open.
@@ -352,20 +470,21 @@ function poll() {
 
     const prev = seen.get(k);
     const moved = !prev || prev.mtimeMs !== stat.mtimeMs || prev.size !== stat.size;
-    const running = runningFromFile(provider, path, stat);
+    const detail = runningDetailFromFile(provider, path, stat);
+    const { running, confidence, terminalId, terminalOutcome, terminalText } = detail;
 
     // A thread that stops mid-turn (the CLI was killed) never writes its end
     // marker, so re-evaluate quietly once it has been silent for a while.
-    if (!moved && prev && prev.running === running) {
+    if (!moved && prev && prev.running === running && prev.confidence === confidence && prev.terminalId === terminalId) {
       continue;
     }
 
-    seen.set(k, { mtimeMs: stat.mtimeMs, size: stat.size, running });
+    seen.set(k, { mtimeMs: stat.mtimeMs, size: stat.size, running, confidence, terminalId });
 
     // Skip the very first observation: it only tells us the state at open, and
     // the client already fetched the thread itself. Running state still goes
     // out, since that is exactly what the client cannot know on its own.
-    onUpdate({ provider, threadId: id, running, changed: !!prev && moved });
+    onUpdate({ provider, threadId: id, running, runConfidence: confidence, terminalId, terminalOutcome, terminalText, changed: !!prev && moved });
   }
 }
 

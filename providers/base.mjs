@@ -74,6 +74,10 @@ export class BaseProvider {
   respondApproval() {
     return { ok: false, error: "approvals not supported" };
   }
+
+  pendingApprovalsList() {
+    return [];
+  }
 }
 
 // Normalize a value that CLIs sometimes provide as either epoch seconds, epoch

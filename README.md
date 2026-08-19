@@ -1,261 +1,230 @@
 # remote-agents
 
-**Use your coding agents from another device.** remote-agents is a tiny
-self-hosted bridge that puts your existing **Codex**, **Claude Code**, and
-**Grok** CLI sessions on a web page you can open from your phone, tablet, or any
-browser: browse every session, open one, read its full history, and continue it
-— with model/effort pickers, permission modes, live streaming, reasoning,
-command output, diffs, approvals, token usage, rich markdown, a
-markdown/code file viewer, and an installable, offline-capable PWA.
+remote-agents is a self-hosted phone UI for the Codex, Claude Code, and Grok
+sessions already on your computer. It reads each CLI's session files, lets you
+continue a thread, streams changes over Server-Sent Events, and can notify an
+installed PWA when a turn driven through the bridge finishes.
 
-It runs on your own machine and talks to your own already-logged-in CLIs. No
-accounts to create, nothing sent to a third party, no build step.
+The bridge runs on your computer and uses your already logged-in agent CLIs. It
+does not provide a hosted relay or a shared account.
 
----
+## macOS setup
 
-## Setup (one command)
+You need Node.js 22.5 or newer (the bridge uses Node's built-in SQLite module)
+and at least one supported CLI installed and logged in. Install Tailscale on the
+Mac, open it, and sign in. The recommended Funnel connection works from anywhere
+without installing Tailscale—or anything else—on the phone.
 
-**Prerequisites**
+Install the package, then run one setup command:
 
-1. [Node.js](https://nodejs.org) **18 or newer** (`node --version` to check).
-2. At least one coding CLI installed **and logged in**:
-   - **Codex** — [Codex CLI](https://developers.openai.com/codex/cli), then `codex login`
-   - **Claude** — [Claude Code](https://claude.com/product/claude-code), then run `claude` once to sign in
-   - **Grok** — the `grok` CLI, then sign in
+```bash
+npm install -g github:akshitcodes/remote-agents
+remote-agents setup
+```
 
-   (Having none logged in is fine to *start* the server — you'll just see no
-   sessions for that provider. Log in and it appears.)
+`setup` asks one plain question: who should be able to reach this Mac? Press
+Enter for the recommended “phone anywhere with the private pairing link” option;
+the choice is remembered, so later runs do not ask again. It
+generates a private per-install token, chooses and remembers a free port,
+checks all three provider CLIs, installs a per-user macOS LaunchAgent, configures
+Tailscale Funnel, and verifies that the authenticated app answers through the
+stable HTTPS name. First-time certificate issuance can take about 30 seconds, so
+the verifier waits up to 75 seconds and says what it is waiting for. Only then
+does it print the phone pairing QR.
 
-**Run it**
+If Tailscale is missing, signed out, or its HTTPS URL cannot be verified, setup
+prints the exact recovery steps and no phone QR. It never substitutes a LAN HTTP
+link that looks successful but cannot install the PWA or receive push.
+
+- iPhone/iPad: open in Safari, then **Share -> Add to Home Screen**.
+- Android Chrome: tap **Install app** to use Chrome's native install prompt.
+- Open the installed app and tap **Enable notifications** when offered.
+
+iPhone and iPad Web Push requires an installed Home Screen web app and iOS or
+iPadOS 16.4 or newer. A normal Safari tab cannot opt in.
+
+### Try it without installing a service
+
+This foreground command uses the same Tailscale-first flow and persistent
+config, but the local bridge stops when the terminal closes:
 
 ```bash
 npx github:akshitcodes/remote-agents
 ```
 
-That downloads and starts the server. It prints a **QR code** and a set of
-pairing URLs, and keeps running until you stop it (Ctrl-C).
+## Who can reach the Mac?
 
-The output looks like:
+1. **A phone anywhere with the private pairing link — recommended.** Tailscale
+   Funnel provides stable public HTTPS. Only the Mac needs Tailscale; the
+   bridge's long random token is still required for every app/API response.
+2. **Only devices in your Tailscale account.** Tailscale Serve keeps the HTTPS
+   address private, but every phone must install Tailscale and join the same
+   account.
+3. **People allowed by your Cloudflare policy — advanced.** A stable hostname on your
+   own domain with an identity sign-in policy; the cost is Cloudflare account,
+   domain/DNS, tunnel, and Access setup.
 
-```
-  remote-agents is running (bound 0.0.0.0:8484).
+There is intentionally no LAN HTTP mode. Plain LAN HTTP cannot provide the
+secure context needed for PWA installation or Web Push. Cloudflare Quick
+Tunnels are also excluded: their hostname changes on restart and Cloudflare
+documents that Quick Tunnels do not support Server-Sent Events, which is this
+app's live transport.
 
-  <QR code>
-
-  Open one of these, then Add to Home Screen:
-    Anywhere (Tailscale)   http://100.x.y.z:8484/?t=SECRET
-    Same Wi-Fi (LAN)       http://192.168.x.y:8484/?t=SECRET
-    This computer          http://127.0.0.1:8484/?t=SECRET
-```
-
-## Open it
-
-- **On this computer (no phone needed):** open the **"This computer"** link
-  (`http://127.0.0.1:<port>/?t=<token>`) in any browser. Works immediately.
-- **On your phone (same Wi-Fi):** scan the QR code, or open the **"Same Wi-Fi"**
-  link. Then **Share → Add to Home Screen** to get an app icon.
-- **On your phone (anywhere / cellular):** see [Access from anywhere](#access-from-anywhere).
-
-The pairing token in the URL is what authorizes the device — open the link once
-and it's stored as a cookie.
-
-## Verify it's working
-
-Open the "This computer" link in a browser (you should see the session list), or
-from a terminal:
+For the advanced option, first create a named tunnel, route its public hostname
+to the bridge, and create a Cloudflare Access self-hosted application with an
+Allow policy for that hostname. Then run:
 
 ```bash
-# reachable + provider list responds (replace <token> with the printed token)
-curl -s "http://127.0.0.1:8484/api/models?provider=codex" -H "Authorization: Bearer <token>"
+remote-agents setup --transport cloudflare
+remote-agents tunnel --name my-agents --hostname agents.example.com --access-protected
 ```
 
-A JSON list of models means it's up. The token is also always retrievable:
+The Cloudflare command refuses anonymous Quick Tunnels and withholds its QR
+until the stable hostname returns the authenticated app. A Cloudflare Access
+login page alone is deliberately not enough: it proves the policy exists, but
+not that the app and token work behind it. The URL still contains the bridge
+pairing token; treat it like a password.
+
+## Commands
+
+```text
+remote-agents                         foreground server + QR
+remote-agents setup                   install/start service; Funnel by default
+remote-agents setup --transport serve private Tailscale-only access
+remote-agents setup --transport cloudflare
+remote-agents tailscale               configure/retry saved Tailscale mode
+remote-agents tailscale --transport funnel|serve
+remote-agents tunnel --name NAME --hostname HOST --access-protected
+remote-agents url                     print pairing QR again
+remote-agents status                  show service status and pairing URLs
+remote-agents start|stop              control the installed service
+remote-agents uninstall               remove only the remote-agents service
+```
+
+Useful foreground overrides:
 
 ```bash
-cat ~/.codex-phone/config.json     # { "token": "...", "port": 8484 }
+remote-agents serve --host 127.0.0.1 --port 9317
+remote-agents serve --token 'at-least-32-random-characters'
 ```
 
----
+Values supplied with `--host`, `--port`, or `--token` are persisted. A new
+public origin is persisted only after it returns the authenticated app, so a
+typo cannot strand an existing installed PWA. Later setup, start, status, and
+url commands reuse the saved transport, origin, port, and token. If Tailscale
+re-registers the Mac under a different public name, the CLI refuses the change
+and explains why installed phones would look broken. `--replace-origin` is the
+explicit recovery path; after using it, reinstall the phone PWA and enable
+notifications again.
 
-## Access from anywhere
+`status` and `url` report the service manager, saved port and transport,
+Tailscale connection state, saved/verified public address, and readiness of
+Codex, Claude, and Grok. A missing provider does not block setup when another is
+ready. If none is installed and signed in, setup stops before installing a
+background service.
 
-By default the phone must be on the **same Wi-Fi**. Two ways to reach it from
-anywhere (cellular included):
+## Configuration and files
 
-**Option A — Tailscale (most private).** Install [Tailscale](https://tailscale.com)
-on **both** the computer and the phone and sign into the same tailnet. Nothing is
-exposed to the public internet; remote-agents auto-detects it and prints an
-"Anywhere" link + QR. (Note: the raw tailnet URL is HTTP, so the offline PWA
-needs `tailscale serve` to get HTTPS.)
+The existing configuration home is reused:
 
-**Option B — Cloudflare tunnel (no Tailscale, HTTPS, fast on poor networks).**
-Requires [`cloudflared`](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)
-(`brew install cloudflared`).
-
-```bash
-remote-agents tunnel        # quick tunnel: instant public HTTPS URL + QR (random URL)
+```text
+~/.codex-phone/config.json       token, port, public URL, VAPID keypair, options
+~/.codex-phone/push.json         browser Web Push subscriptions
+~/.codex-phone/logs/             background-service logs
 ```
 
-The URL is HTTPS, so the **installable, offline-capable PWA works on your phone**.
-The quick-tunnel URL changes each run; for a **stable** URL, use your own domain
-on Cloudflare (free) with a named tunnel:
+The directory is written with mode `0700` and secret-bearing JSON with `0600`.
+Set `REMOTE_AGENTS_HOME` to relocate it (also useful for isolated testing).
 
-```bash
-cloudflared tunnel login
-cloudflared tunnel create remote-agents
-cloudflared tunnel route dns remote-agents agents.your-domain.com
-remote-agents tunnel --name remote-agents --hostname agents.your-domain.com
+Supported optional config fields include:
+
+```json
+{
+  "codexBinary": "/path/to/codex",
+  "fileAccess": "project",
+  "pushSubject": "mailto:you@example.com"
+}
 ```
 
-> A tunnel exposes the server publicly behind Cloudflare — the **token is the
-> only lock**, so keep the link private. For identity-based access (email code /
-> Google), put **Cloudflare Access** (free) in front of the tunnel.
+`fileAccess` defaults to `project`, which limits the file viewer to a thread's
+working directory and sibling Git worktrees. `anywhere` removes that viewer
+check. The token is still the real security boundary because a paired client can
+drive an agent.
 
-## Keep it always running (optional)
+## Notifications
 
-For a background service that starts on login and restarts if it crashes,
-install it persistently first, then set up autostart:
+On first server start, a VAPID keypair is generated into the same config. After
+the installed PWA opts in, its Push subscription is stored in `push.json`.
+Completed turns are encrypted and signed with `web-push`; expired subscriptions
+are pruned when a push service returns 404 or 410. The service worker displays
+the notification and opens the matching provider/thread when tapped.
 
-```bash
-npm install -g github:akshitcodes/remote-agents   # persistent install
-remote-agents install                             # set up OS autostart
-```
+Notifications currently cover turns driven through this bridge. The filesystem
+watcher follows an external terminal/IDE thread only while a client is viewing
+it; remote-agents does not globally monitor every external session while the PWA
+is closed.
 
-This uses the right mechanism per OS — **launchd** (macOS), **systemd user
-service** (Linux), **Task Scheduler** (Windows). Manage it with:
+## Service behavior
 
-```bash
-remote-agents status      # running? + pairing links
-remote-agents stop        # stop the service
-remote-agents start       # start it
-remote-agents url         # print pairing links again
-remote-agents uninstall   # remove autostart
-```
+On macOS, `setup` creates
+`~/Library/LaunchAgents/com.remoteagents.bridge.plist` with `RunAtLoad` and
+`KeepAlive`. It records absolute Node/package paths and writes logs below the
+config directory. Nothing is installed from npm's `postinstall`; machine changes
+happen only after the explicit setup command. The supervised process starts only
+the local bridge; `setup` remains the single owner of Funnel/Serve changes,
+public verification, and QR output.
 
-> The machine must be **awake** to answer the phone (inherent to a self-hosted
-> service). Keep a laptop plugged in.
+Linux retains a best-effort user systemd service. It has not received the same
+platform verification as macOS.
 
----
+Windows is not supported yet. A correct port needs a restart-capable per-user
+service/supervisor, Windows-safe command quoting and firewall behavior, and
+verification of the native CLIs' session paths and schemas. The detailed scope
+is in the repository's
+[PORTABLE_PLAN.md](https://github.com/akshitcodes/remote-agents/blob/main/PORTABLE_PLAN.md#windows).
 
-## For an AI agent setting this up
+## Security notes
 
-This is designed to be set up unattended from the repo link:
-
-1. Confirm Node 18+ (`node --version`) and that `codex` and/or `claude` are on
-   `PATH` and logged in.
-2. Start it in the background and capture the output to read the token/links:
-   ```bash
-   npx -y github:akshitcodes/remote-agents serve --port 8484 > /tmp/ra.log 2>&1 &
-   # wait for it to listen, then read the token + URLs:
-   sleep 3; cat /tmp/ra.log
-   ```
-3. Verify with the `curl` command in [Verify it's working](#verify-its-working)
-   using the token from `~/.codex-phone/config.json`.
-4. Hand the user the **"This computer"** URL (open in a browser) and/or the
-   **"Same Wi-Fi"** URL for their phone.
-
-Everything is non-interactive: no prompts, config is auto-generated, and a
-missing provider CLI degrades gracefully (the server still runs; the other
-provider works).
-
----
-
-## Configuration
-
-- **Token & port** live in `~/.codex-phone/config.json`. A random token is
-  generated on first run and reused, so paired devices stay paired.
-- Override at launch: `remote-agents serve --host <ip> --port <n> --token <secret>`.
-- **Push keys** are generated once into the same file (`vapid`), so paired phones
-  stay subscribed. Set `pushSubject` there to your own `mailto:` or `https:` URL
-  if you like — it is the contact the push service sees. It must be real: Apple
-  rejects the whole request with `403 BadJwtToken` for a made-up domain.
-- Default bind is `0.0.0.0` (all interfaces) so localhost, LAN, and tailnet all
-  work; the token is the security boundary.
-
-## Troubleshooting
-
-- **`Port 8484 is already in use`** — another copy is running (`remote-agents
-  status`), or pick another: `remote-agents serve --port 8585`.
-- **No sessions listed for Codex/Claude** — that CLI isn't logged in. Run
-  `codex login` / start `claude` once, then reload.
-- **Phone can't reach the LAN link** — the phone must be on the same Wi-Fi, and
-  some networks block device-to-device traffic; use Tailscale instead.
-- **`command not found: node`** — install Node.js 18+.
-
-## Security
-
-- The only way in is a URL containing your pairing token — treat it like a
-  password. Anyone with it can drive your agents as you.
-- Prefer a trusted network (localhost / LAN / tailnet). If you use
-  `remote-agents tunnel`, the server is reachable publicly behind Cloudflare and
-  the **token is the only lock** — keep the link private, and add **Cloudflare
-  Access** for an identity gate.
-- Agent output is sanitized with DOMPurify, so untrusted HTML in a model reply
-  can't run scripts in your browser.
-- The file viewer is scoped to each thread's project — its `cwd` plus every git
-  worktree of the same repository, so files an agent wrote in a worktree open
-  normally. Anything else is rejected. This is a convenience boundary, not a
-  security one: the pairing token already lets anyone drive an agent in Full
-  Access. Set `fileAccess: "anywhere"` in `~/.codex-phone/config.json` to drop it.
-
----
+- Pairing through `?t=...` immediately redirects to a clean URL and stores an
+  HttpOnly, SameSite cookie. HTTPS pairings also receive the Secure flag.
+- Fresh installs generate a 256-bit random pairing token. Repeated bad token
+  attempts receive per-client exponential backoff and rate limiting.
+- App, API, manifest, service-worker, icon, and vendor responses all require the
+  pairing cookie or Bearer token. Unauthenticated responses contain only a
+  generic error and no bridge marker, thread data, local paths, or version.
+- Responses set clickjacking, MIME-sniffing, referrer, permissions, CSP, and
+  same-origin isolation headers; HTTPS responses also set HSTS.
+- Anyone with the pairing URL can drive agents with the permissions selected in
+  the UI. Rotate the token in config if it leaks, then restart the service.
+- Funnel is internet-reachable and the pairing URL is a password. Choose private
+  Serve or Cloudflare Access if the token boundary does not fit your threat model.
+- Agent Markdown is sanitized before rendering. The file viewer is a convenience
+  boundary, not a substitute for authentication.
 
 ## How it works
 
-A single Node process spawns your provider CLIs and normalizes them to one event
-model that the web UI renders:
+- Codex sessions: `~/.codex/sessions`, with `codex app-server` for active RPC.
+- Claude Code sessions: `~/.claude/projects`, using Claude's streaming JSON mode.
+- Grok sessions: `~/.grok/sessions`, using its streaming messages protocol.
+- Browser transport: authenticated HTTP APIs plus SSE from `/api/events`.
+- PWA: one hand-written `public/index.html`, a manifest, and `public/sw.js`; no
+  framework or build step.
 
-- **Codex** — runs `codex app-server` (JSON-RPC over stdio); reads sessions from `~/.codex/sessions`.
-- **Claude** — runs `claude` in `--output-format stream-json`; reads sessions from `~/.claude/projects`.
-- **Grok** — runs `grok` in `--output-format streaming-messages-json` (Anthropic wire format); reads sessions from `~/.grok/sessions`.
+## Package verification
 
-All three sit behind a common provider interface (`providers/base.mjs`), so the
-UI speaks to each the same way — switch with the Codex/Claude/Grok toggle. Adding
-another agent = one new `providers/<name>.mjs` implementing
-`list / read / send / events`. See `docs/architecture.html` for the full picture.
+Before publishing a release:
 
-## Features
+```bash
+npm pack --dry-run
+node --check server.mjs
+node --check bin/codex-phone.mjs
+```
 
-Session list (searchable, sorted by last activity) · full history · resume + live
-streaming · model & effort selectors · **provider-specific permission modes** ·
-reasoning · live command output · diffs · **markdown/code file viewer**
-(syntax-highlighted — tap any file path an agent links) · interactive approvals · **queue / steer** messages
-mid-turn · stop · live token counter · usage & rate limits · new-session flow ·
-**live running-thread status** · rich sanitized
-markdown. Codex, Claude, and Grok share all of it.
-
-**Turns you started somewhere else.** A turn begun in a terminal, in an IDE, or
-from another device belongs to a different process, so none of its output
-reaches this bridge. Instead the server watches that CLI's own session file for
-the threads you have open, and the app re-reads the thread whenever it moves —
-so a thread running on your Mac streams to your phone (about a second behind)
-instead of sitting frozen until you close and reopen it. Those threads are
-badged **running** in the session list too, which is read off disk, so it is
-right even for turns that started before you opened the app.
-
-**Notifications.** Turn them on in **Usage → Notifications** and your phone buzzes
-when a turn finishes — thread title plus the start of the reply, tap to jump
-straight into that chat. Works for all three providers, with the app closed. This
-is Web Push, so on iPhone it needs the **Home Screen install** (iOS 16.4+) — no
-native app, no third-party service; notifications go through Apple's own push
-service, signed with a VAPID key generated on first run.
-
-**Installable PWA + offline.** Add it to your home screen; it launches instantly
-and recently-opened chats are readable **offline** (cached in IndexedDB), then
-re-sync when you're back online. You only need the network to *send*.
-
-This covers **both** kinds of outage — your phone having no signal, *and* the Mac
-being asleep or its tunnel down. The second one is the sneaky case: a proxy like
-Cloudflare answers with a real HTTP error page ("tunnel not responding"), which
-looks like a perfectly successful response, so the app treats a 5xx from the
-proxy as an outage rather than rendering it. Either way you get the cached app
-and your saved chats, with a badge saying which side is down — `Offline` or
-`Mac offline` — and it reconnects and refreshes by itself when the Mac returns.
-
-**Permission modes** map to each CLI's real controls — Codex: Read Only /
-Auto / Full Access; Claude: Manual / Accept edits / Plan / Bypass; Grok: Manual /
-Bypass. **Known Claude limit:** approvals are gated via a PreToolUse hook in
-Manual mode (works, but hook-based rather than native).
+The package allowlist explicitly includes every top-level runtime module,
+including `config.mjs` and `onboarding.mjs`, plus providers, the PWA, and public
+docs. The internal portability audit is intentionally not published because it
+records details of the owner's previous installation. Do not add a
+service-installing `postinstall`.
 
 ## License
 

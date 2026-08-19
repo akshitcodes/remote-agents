@@ -2,6 +2,7 @@
   "name": "Remote Agents",
   "short_name": "Agents",
   "description": "Your Codex, Claude & Grok CLI sessions — from any device.",
+  "id": "/",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

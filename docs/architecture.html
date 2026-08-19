@@ -402,19 +402,19 @@
   <header class="hero">
     <div class="eyebrow">System Architecture</div>
     <h1>Driving Codex from your phone</h1>
-    <p class="dek">A single Node process on your Mac turns the Codex CLI into something you can open, read, and continue from your pocket — over a private mesh, with nothing exposed to the internet.</p>
+    <p class="dek">A single Node process on your Mac turns the Codex CLI into something you can open, read, and continue from your pocket — through verified HTTPS, protected by a long random pairing token.</p>
     <div class="meta">
-      <code class="mono">host <b>100.103.140.59:8484</b></code>
-      <code class="mono">transport <b>Tailscale</b></code>
-      <code class="mono">deps <b>0</b></code>
-      <code class="mono">~/Code/codex-phone</code>
+      <code class="mono">host <b>your-mac.tailnet.ts.net</b></code>
+      <code class="mono">transport <b>Tailscale Funnel</b></code>
+      <code class="mono">runtime <b>Node.js</b></code>
+      <code class="mono">package <b>remote-agents</b></code>
     </div>
   </header>
 
   <section class="prose">
     <div class="kicker">The whole idea</div>
-    <h2>One bridge, two protocols, a private wire</h2>
-    <p class="lead">Your phone can't talk to the Codex CLI directly — the CLI speaks a machine protocol over pipes, not HTTP. So the bridge does two translations at once: it turns your phone's taps into <strong>JSON-RPC calls</strong> the CLI understands, and it turns the CLI's streaming output into a <strong>live feed</strong> the browser can render. Everything rides an encrypted Tailscale connection, so the phone reaches the Mac from anywhere without opening a port.</p>
+    <h2>One bridge, two protocols, one verified address</h2>
+    <p class="lead">Your phone can't talk to the Codex CLI directly — the CLI speaks a machine protocol over pipes, not HTTP. So the bridge does two translations at once: it turns your phone's taps into <strong>JSON-RPC calls</strong> the CLI understands, and it turns the CLI's streaming output into a <strong>live feed</strong> the browser can render. Tailscale Funnel supplies encrypted public HTTPS without opening a router port or installing an app on the phone; the bridge still requires its pairing token.</p>
   </section>
 
   <div class="canvas">
@@ -427,15 +427,15 @@
         <div class="tech mono">fetch() · EventSource · cookie: cxp_session</div>
       </div>
 
-      <div class="hop"><span class="seg"></span><span class="lbl mono">HTTPS · encrypted WireGuard</span><span class="dir">↕</span><span class="seg"></span></div>
+      <div class="hop"><span class="seg"></span><span class="lbl mono">HTTPS · verified TLS</span><span class="dir">↕</span><span class="seg"></span></div>
 
       <div class="node mesh">
-        <div class="role"><span class="dot"></span>Transport · Tailscale mesh</div>
-        <div class="name">Private point-to-point tunnel</div>
-        <div class="desc">Both devices join the same tailnet. Traffic is end-to-end encrypted; no inbound firewall port is ever opened. Works on cellular, survives IP changes.</div>
+        <div class="role"><span class="dot"></span>Transport · Tailscale Funnel</div>
+        <div class="name">Public HTTPS, private pairing link</div>
+        <div class="desc">Only the Mac joins Tailscale. Funnel terminates verified HTTPS and forwards to the local bridge; the phone needs only a browser and the long random pairing link.</div>
       </div>
 
-      <div class="hop"><span class="seg"></span><span class="lbl mono">TCP · tailnet IP :8484</span><span class="dir">↕</span><span class="seg"></span></div>
+      <div class="hop"><span class="seg"></span><span class="lbl mono">HTTPS · stable tailnet DNS</span><span class="dir">↕</span><span class="seg"></span></div>
 
       <div class="host">
         <div class="role mono">Host · your Mac (awake, plugged in)<span class="tag mono">codex logged in</span></div>

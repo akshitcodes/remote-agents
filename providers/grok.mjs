@@ -6,17 +6,19 @@
 //   - listThreads / readThread / projects  read ~/.grok/sessions/**
 //   - send   drives a persistent `grok agent stdio` ACP process per open
 //            thread, translating session updates into normalized notify events.
-//   - models is a static list; usage is best-effort from result lines.
+//   - models comes from the installed CLI; usage is best-effort from result lines.
 //
-// Approvals: headless ACP auto-approves via requestPermission. Manual mode
-// never truly gated in headless (matches prior behavior).
+// Approvals: headless ACP auto-approves via requestPermission. Only the
+// truthful bypass mode is exposed until phone-side ACP approval interception
+// is implemented.
 
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { readdirSync, statSync, openSync, readSync, closeSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { Readable, Writable } from "node:stream";
+import { promisify } from "node:util";
 
 import { ClientSideConnection, ndJsonStream } from "@zed-industries/agent-client-protocol";
 
@@ -32,14 +34,8 @@ const FILE_TOOLS = new Set(["search_replace", "write", "Write", "Edit", "MultiEd
 // Shell-style tools that become commandExecution items.
 const SHELL_TOOLS = new Set(["run_terminal_command", "Bash", "bash"]);
 
-const MODELS = [
-  {
-    id: "grok-4.5",
-    displayName: "Grok 4.5",
-    description: "xAI's frontier model for agentic coding and reasoning.",
-    isDefault: true,
-  },
-];
+const execFileAsync = promisify(execFile);
+const MODEL_CACHE_MS = 5 * 60 * 1000;
 
 const EFFORTS = [
   { reasoningEffort: "low", description: "Quick, fast implementations." },
@@ -47,10 +43,27 @@ const EFFORTS = [
   { reasoningEffort: "high", description: "Highest implementation quality with extensive reasoning (default)." },
 ];
 
+export function parseGrokModels(output) {
+  const text = String(output ?? "");
+  const defaultId = /^Default model:\s*(\S+)\s*$/m.exec(text)?.[1] ?? null;
+  const ids = [];
+  for (const match of text.matchAll(/^\s*[*-]\s+(\S+)\s*(?:\(default\))?\s*$/gm)) {
+    if (!ids.includes(match[1])) { ids.push(match[1]); }
+  }
+  if (defaultId && !ids.includes(defaultId)) { ids.unshift(defaultId); }
+  if (!ids.length) { throw new Error("grok models returned no model IDs"); }
+  return ids.map((id) => ({
+    id,
+    displayName: id.replace(/^grok-/i, "Grok ").replace(/-/g, "."),
+    description: id === defaultId ? "Default reported by the installed Grok CLI." : "Available from the installed Grok CLI.",
+    isDefault: id === defaultId,
+  }));
+}
+
 // Our UI mode keys → whether to auto-approve tools. Grok also supports
 // --permission-mode (default|acceptEdits|auto|dontAsk|bypassPermissions|plan);
 // we use --always-approve for full bypass and --permission-mode for the rest.
-function permissionArgsFor(value) {
+export function permissionArgsFor(value) {
   switch (value) {
     case "bypass":
     case "full":
@@ -66,11 +79,19 @@ function permissionArgsFor(value) {
       return ["--permission-mode", "acceptEdits"];
     case "manual":
     case "default":
+      throw new Error("Grok manual approvals are not supported by this bridge");
     default:
-      // No --always-approve: Grok handles approvals itself. Phone-side
-      // interactive interception is not wired for headless grok.
-      return [];
+      throw new Error(`Unknown Grok permission mode: ${value}`);
   }
+}
+
+export function grokSessionArgs({ model, effort, modeKey }) {
+  const args = ["agent"];
+  if (model) { args.push("--model", model); }
+  if (effort) { args.push("--reasoning-effort", effort); }
+  args.push(...permissionArgsFor(modeKey));
+  args.push("stdio");
+  return args;
 }
 
 // Read only the first bytes of a (potentially huge) transcript.
@@ -280,6 +301,7 @@ export class GrokProvider extends BaseProvider {
     this.sessionCost = 0;
     this.lastUsage = null;
     this.lastModelUsage = null;
+    this.modelCache = null;
 
     // Idle reaper: drop warm sessions idle > 10 minutes.
     this.reaper = setInterval(() => {
@@ -754,7 +776,12 @@ export class GrokProvider extends BaseProvider {
   }
 
   async models() {
-    const data = MODELS.map((m) => ({
+    if (!this.modelCache || Date.now() - this.modelCache.at > MODEL_CACHE_MS) {
+      const { stdout } = await execFileAsync("grok", ["models"], { timeout: 15000, maxBuffer: 1024 * 1024 });
+      this.modelCache = { at: Date.now(), data: parseGrokModels(stdout) };
+    }
+
+    const data = this.modelCache.data.map((m) => ({
       ...m,
       supportedReasoningEfforts: EFFORTS,
       defaultReasoningEffort: "high",
@@ -839,17 +866,18 @@ export class GrokProvider extends BaseProvider {
 
   // ---------- live turn (persistent ACP session pool) ----------
 
-  // Normalize model/effort for pool key matching (undefined == no override).
-  modelEffortMatch(session, model, effort) {
+  // Normalize model/effort/mode for pool key matching (undefined == no override).
+  modelEffortMatch(session, model, effort, modeKey) {
     const m = model || undefined;
     const e = effort || undefined;
-    return session.model === m && session.effort === e;
+    const k = modeKey || undefined;
+    return session.model === m && session.effort === e && session.mode === k;
   }
 
-  async ensureSession(emitThreadId, { cwd, model, effort, isDraft }) {
+  async ensureSession(emitThreadId, { cwd, model, effort, modeKey, isDraft }) {
     const existing = this.sessions.get(emitThreadId);
 
-    if (existing && !existing.dead && this.modelEffortMatch(existing, model, effort)) {
+    if (existing && !existing.dead && this.modelEffortMatch(existing, model, effort, modeKey)) {
       existing.lastUsed = Date.now();
       return existing;
     }
@@ -860,17 +888,8 @@ export class GrokProvider extends BaseProvider {
 
     const resolvedModel = model || undefined;
     const resolvedEffort = effort || undefined;
-    const args = ["agent"];
-
-    if (resolvedModel) {
-      args.push("--model", resolvedModel);
-    }
-
-    if (resolvedEffort) {
-      args.push("--reasoning-effort", resolvedEffort);
-    }
-
-    args.push("stdio");
+    const resolvedMode = modeKey || undefined;
+    const args = grokSessionArgs({ model: resolvedModel, effort: resolvedEffort, modeKey: resolvedMode });
 
     let child;
 
@@ -897,7 +916,7 @@ export class GrokProvider extends BaseProvider {
       lastUsed: Date.now(),
       emitThreadId,
       dead: false,
-      mode: null,
+      mode: resolvedMode,
     };
 
     // Store under emitThreadId before awaiting so concurrent callers share ready.
@@ -1273,7 +1292,11 @@ export class GrokProvider extends BaseProvider {
   }
 
   async send(body = {}) {
-    const { threadId, text, model, effort, mode, sandbox, cwd, draft } = body;
+    const { threadId, text, attachments = [], model, effort, mode, sandbox, cwd, draft } = body;
+
+    if (attachments.length) {
+      throw Object.assign(new Error("This Grok CLI reports that image prompts are unsupported"), { status: 409, code: "images_unsupported" });
+    }
 
     if (!text) {
       throw Object.assign(new Error("text required"), { status: 400 });
@@ -1288,10 +1311,10 @@ export class GrokProvider extends BaseProvider {
       cwd: resolvedCwd,
       model,
       effort,
+      modeKey,
       isDraft,
     });
 
-    session.mode = modeKey;
     await session.ready;
 
     // Serialize turns on the same warm session (frontend usually enqueues; this
@@ -1326,16 +1349,44 @@ export class GrokProvider extends BaseProvider {
     return { ok: true, threadId: emitThreadId };
   }
 
-  async steer() {
+  async steer({ attachments = [] } = {}) {
+    if (attachments.length) {
+      throw Object.assign(new Error("This Grok CLI reports that image prompts are unsupported"), { status: 409, code: "images_unsupported" });
+    }
+
     // ACP has prompt and cancel, but no primitive that injects into a live turn.
     throw Object.assign(new Error("Grok does not support native steering"), { status: 409, code: "steer_unsupported" });
   }
 
-  async interrupt({ threadId } = {}) {
+  async interrupt({ threadId, requireActive = false } = {}) {
     const session = this.sessions.get(threadId);
 
+    if (requireActive && (!session || !session.busy || !session.sessionId || !session.conn)) {
+      throw Object.assign(new Error("the active Grok turn is not owned by this bridge"), {
+        status: 409,
+        code: "not_our_turn",
+      });
+    }
+
     if (session && session.busy && session.sessionId && session.conn) {
-      session.conn.cancel({ sessionId: session.sessionId }).catch(() => {});
+      await session.conn.cancel({ sessionId: session.sessionId });
+
+      if (session.turnDone) {
+        let timer;
+        const timeout = new Promise((resolve) => {
+          timer = setTimeout(() => resolve(false), 5000);
+          timer.unref?.();
+        });
+        const confirmed = await Promise.race([session.turnDone.then(() => true), timeout]);
+        clearTimeout(timer);
+
+        if (!confirmed || session.busy) {
+          throw Object.assign(new Error("Grok cancellation was not confirmed; the queued message was not sent"), {
+            status: 504,
+            code: "interrupt_uncertain",
+          });
+        }
+      }
     }
 
     return { ok: true };

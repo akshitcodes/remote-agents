@@ -33,6 +33,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
+import { dataPath } from "./config.mjs";
 import { codexBinary } from "./providers/codex.mjs";
 
 const CODEX_HOME = join(homedir(), ".codex");
@@ -42,7 +43,7 @@ const TTL_MS = 10000;
 const REFRESH_MS = 5 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 20000;
 const NAME_LIMIT = 400;
-const NAMES_FILE = join(homedir(), ".codex-phone", "thread-names.json");
+const NAMES_FILE = dataPath("thread-names.json");
 
 let cache = { at: 0, titles: new Map() };
 let names = null; // id -> name, loaded from disk on first use
@@ -131,7 +132,12 @@ function fetchNames() {
     };
 
     try {
-      child = spawn(codexBinary(), ["app-server"], { stdio: ["pipe", "pipe", "ignore"] });
+      // No MCP servers. config.toml declares eleven, and app-server starts them
+      // all on launch — the exact thing that used to wedge it and take the
+      // session list down. thread/list only reads local state, so this probe has
+      // no use for them: it removes the failure mode rather than timing it out,
+      // and is measurably faster for it (927ms vs 1660ms locally).
+      child = spawn(codexBinary(), ["app-server", "-c", "mcp_servers={}"], { stdio: ["pipe", "pipe", "ignore"] });
     } catch {
       resolve(null);
       return;

@@ -2,72 +2,125 @@
 // remote-agents CLI — run the bridge or manage always-on autostart.
 //
 //   remote-agents                 start the server (foreground) + print pairing QR
-//   remote-agents install         set up autostart (launchd / systemd / Task Scheduler)
+//   remote-agents setup           set up autostart and stable Tailscale HTTPS
+//   remote-agents install         alias for setup
 //   remote-agents uninstall       remove autostart
 //   remote-agents start|stop|status   control the autostart service
 //   remote-agents url             print pairing URLs again
 //
-// Flags (serve): --host <ip> (default 0.0.0.0), --port <n> (default 8484),
+// Flags (serve): --host <ip> (default 0.0.0.0), --port <n> (default: chosen once),
 //                --token <secret> (default: generated once, saved to ~/.codex-phone)
 
 import { spawn, spawnSync } from "node:child_process";
-import { connect } from "node:net";
+import { connect, createServer as createNetServer } from "node:net";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
-import { homedir, networkInterfaces, platform } from "node:os";
-import { dirname, join } from "node:path";
+import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { homedir, platform } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 
-import { startServer } from "../server.mjs";
-import qrcode from "qrcode-terminal";
+import { dataPath, readConfig, writeConfig } from "../config.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = fileURLToPath(import.meta.url);
-const NODE = process.execPath;
+const LABEL = "com.remoteagents.bridge";
+const TRANSPORTS = new Set(["funnel", "serve", "cloudflare"]);
+const APP_TAILSCALE = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
+const APP_CODEX = "/Applications/ChatGPT.app/Contents/Resources/codex";
 
-const CONFIG_DIR = join(homedir(), ".codex-phone");
-const CONFIG_FILE = join(CONFIG_DIR, "config.json");
-const LABEL = "com.codexphone.server";
+function normalizeTransport(value) {
+  // The portability prototype used `tailscale` to mean private Serve. Preserve
+  // that saved choice on upgrade; new installs default to public Funnel.
+  return value === "tailscale" ? "serve" : value;
+}
 
-// ---------- config / token ----------
-
-function loadConfig() {
-  try {
-    return JSON.parse(readFileSync(CONFIG_FILE, "utf8"));
-  } catch {
-    return {};
+function transportName(value) {
+  switch (normalizeTransport(value)) {
+    case "funnel": return "Tailscale Funnel (reachable from anywhere)";
+    case "serve": return "Tailscale Serve (only your Tailscale devices)";
+    case "cloudflare": return "Cloudflare named tunnel + Access";
+    default: return "not configured";
   }
 }
 
-function saveConfig(cfg) {
-  mkdirSync(CONFIG_DIR, { recursive: true });
-  writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2));
+// ---------- config / token ----------
+
+function validPort(value) {
+  const port = Number(value);
+  return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null;
 }
 
-function resolveConfig(args) {
-  const cfg = loadConfig();
+function chooseFreePort() {
+  return new Promise((resolve, reject) => {
+    const probe = createNetServer();
+    probe.unref();
+    probe.on("error", reject);
+    probe.listen(0, "127.0.0.1", () => {
+      const port = probe.address().port;
+      probe.close((error) => error ? reject(error) : resolve(port));
+    });
+  });
+}
+
+export async function resolveConfig(args = {}) {
+  const cfg = readConfig();
   let changed = false;
 
   if (args.token) {
+    if (args.token.length < 32) {
+      throw new Error("--token must contain at least 32 characters; the generated default uses 256 random bits");
+    }
+
     cfg.token = args.token;
     changed = true;
   }
 
   if (!cfg.token) {
-    cfg.token = randomBytes(9).toString("base64url");
+    cfg.token = randomBytes(32).toString("base64url");
     changed = true;
   }
 
   if (args.port) {
-    cfg.port = Number(args.port);
+    const port = validPort(args.port);
+
+    if (!port) {
+      throw new Error("--port must be an integer from 1 to 65535");
+    }
+
+    cfg.port = port;
     changed = true;
   }
 
-  if (changed) {
-    saveConfig(cfg);
+  if (!validPort(cfg.port)) {
+    cfg.port = await chooseFreePort();
+    changed = true;
   }
 
-  return { host: args.host || "0.0.0.0", port: cfg.port || 8484, token: cfg.token };
+  if (args.host) {
+    cfg.host = args.host;
+    changed = true;
+  }
+
+  let requestedPublicUrl;
+
+  if (args.publicUrl) {
+    const url = new URL(args.publicUrl);
+
+    if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash || url.pathname !== "/") {
+      throw new Error("--public-url must be an https:// origin without credentials, a path, query, or fragment");
+    }
+
+    // Do not persist a new origin until the authenticated app has answered
+    // there. A typo must not silently strand an already-installed PWA.
+    requestedPublicUrl = url.origin;
+  }
+
+  if (changed) {
+    writeConfig(cfg);
+  }
+
+  return { ...cfg, host: cfg.host || "0.0.0.0", port: cfg.port, token: cfg.token, requestedPublicUrl };
 }
 
 function parseArgs(argv) {
@@ -81,6 +134,12 @@ function parseArgs(argv) {
     else if (a === "--token") { args.token = argv[++i]; }
     else if (a === "--name") { args.name = argv[++i]; }
     else if (a === "--hostname") { args.hostname = argv[++i]; }
+    else if (a === "--public-url") { args.publicUrl = argv[++i]; }
+    else if (a === "--transport") { args.transport = argv[++i]; }
+    else if (a === "--service") { args.service = true; }
+    else if (a === "--access-protected") { args.accessProtected = true; }
+    else if (a === "--replace-origin") { args.replaceOrigin = true; }
+    else if (a.startsWith("--")) { throw new Error(`unknown option: ${a}`); }
   }
 
   return args;
@@ -88,6 +147,146 @@ function parseArgs(argv) {
 
 function commandExists(bin) {
   return spawnSync(platform() === "win32" ? "where" : "which", [bin], { stdio: "ignore" }).status === 0;
+}
+
+export function tailscaleBinary() {
+  const override = String(process.env.REMOTE_AGENTS_TAILSCALE_BIN ?? "").trim();
+  if (override) { return override.includes("/") ? (existsSync(override) ? override : null) : (commandExists(override) ? override : null); }
+
+  // Prefer the app's CLI on macOS. A separately installed Homebrew client can
+  // be one release behind the daemon and prepend warnings to otherwise valid
+  // output; the app binary always matches its own backend.
+  const candidates = platform() === "darwin" ? [APP_TAILSCALE, "tailscale"] : ["tailscale"];
+
+  return candidates.find((bin) => bin.includes("/") ? existsSync(bin) : commandExists(bin)) ?? null;
+}
+
+function noisyJson(value) {
+  const text = String(value ?? "");
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start < 0 || end < start) { return null; }
+
+  try { return JSON.parse(text.slice(start, end + 1)); } catch { return null; }
+}
+
+function commandOutput(result) {
+  return `${result?.stdout ?? ""}\n${result?.stderr ?? ""}`.trim();
+}
+
+function runProbe(bin, args, timeout = 8000) {
+  return spawnSync(bin, args, { encoding: "utf8", timeout, env: process.env });
+}
+
+export function tailscalePreflight() {
+  const bin = tailscaleBinary();
+
+  if (!bin) {
+    return {
+      installed: false,
+      connected: false,
+      state: "not_installed",
+      detail: "Tailscale is not installed.",
+      remediation: "Install it from https://tailscale.com/download, open it, and sign in.",
+    };
+  }
+
+  const result = runProbe(bin, ["status", "--json"], 8000);
+  const parsed = noisyJson(result.stdout) ?? noisyJson(result.stderr);
+  const backend = String(parsed?.BackendState ?? "").trim();
+  const dnsName = String(parsed?.Self?.DNSName ?? "").replace(/\.$/, "");
+  const combined = commandOutput(result);
+  const connected = result.status === 0 && backend === "Running" && !!dnsName;
+
+  if (connected) {
+    return { installed: true, connected: true, state: "connected", detail: `connected as ${dnsName}`, dnsName, bin };
+  }
+
+  const stopped = /tailscale is stopped|stopped/i.test(combined) || /stopped/i.test(backend);
+  const signedOut = /needslogin|no state|logged out|not logged in|sign.?in/i.test(`${backend}\n${combined}`);
+  const state = stopped ? "stopped" : signedOut ? "signed_out" : "not_connected";
+  const reason = stopped
+    ? "Tailscale is installed but stopped."
+    : signedOut
+      ? "Tailscale is installed but not signed in."
+      : `Tailscale is installed but not connected${backend ? ` (state: ${backend})` : ""}.`;
+
+  return {
+    installed: true,
+    connected: false,
+    state,
+    detail: reason,
+    remediation: "Open the Tailscale app on this Mac, sign in if asked, and switch it on; then re-run this command.",
+    bin,
+  };
+}
+
+function resolveProviderBinary(configured, candidates) {
+  if (configured) {
+    return configured.includes("/") ? (existsSync(configured) ? configured : null) : (commandExists(configured) ? configured : null);
+  }
+
+  return candidates.find((candidate) => candidate.includes("/") ? existsSync(candidate) : commandExists(candidate)) ?? null;
+}
+
+function providerRow(name, label, bin, command, inspect, remediation) {
+  if (!bin) {
+    return { name, label, installed: false, authenticated: false, usable: false, detail: "not installed", remediation };
+  }
+
+  const result = runProbe(bin, command, name === "grok" ? 15000 : 8000);
+  const output = commandOutput(result);
+  const auth = inspect(result, output);
+  return {
+    name,
+    label,
+    path: bin,
+    installed: true,
+    authenticated: auth === true,
+    usable: auth === true,
+    detail: auth === true ? "installed and signed in" : auth || "installed, but sign-in could not be confirmed",
+    remediation,
+  };
+}
+
+export function providerPreflight(cfg = readConfig()) {
+  const codexBin = resolveProviderBinary(cfg.codexBinary, cfg.codexBinary ? [] : [APP_CODEX, "codex"]);
+  const rows = [
+    providerRow("codex", "Codex", codexBin, ["login", "status"], (result, output) => {
+      if (/not logged in|logged out|sign.?in required/i.test(output)) { return "installed, but not signed in"; }
+      return result.status === 0 && /logged in|authenticated/i.test(output) ? true : "installed, but sign-in could not be confirmed";
+    }, "Run `codex login`."),
+    providerRow("claude", "Claude", resolveProviderBinary(null, ["claude"]), ["auth", "status"], (result, output) => {
+      const parsed = noisyJson(result.stdout) ?? noisyJson(result.stderr);
+      if (parsed?.loggedIn === true) { return true; }
+      if (parsed?.loggedIn === false || /not logged in|logged out/i.test(output)) { return "installed, but not signed in"; }
+      return result.status === 0 && /logged.?in/i.test(output) ? true : "installed, but sign-in could not be confirmed";
+    }, "Run `claude login`."),
+    providerRow("grok", "Grok", resolveProviderBinary(null, ["grok"]), ["models"], (result, output) => {
+      if (/not logged in|logged out|sign.?in required|authentication required/i.test(output)) { return "installed, but not signed in"; }
+      return result.status === 0 && /you are logged in|available models:/i.test(output) ? true : "installed, but sign-in could not be confirmed";
+    }, "Run `grok login`."),
+  ];
+
+  return { rows, usable: rows.filter((row) => row.usable) };
+}
+
+function printProviderPreflight(result) {
+  console.log("\n  Provider CLIs:");
+  for (const row of result.rows) {
+    const mark = row.usable ? "✓" : "!";
+    console.log(`    ${mark} ${row.label}: ${row.detail}${row.usable ? "" : `. ${row.remediation}`}`);
+  }
+  console.log(`  At least one provider ready: ${result.usable.length ? `yes (${result.usable.map((row) => row.label).join(", ")})` : "no"}`);
+}
+
+function requireUsableProvider(cfg) {
+  const result = providerPreflight(cfg);
+  printProviderPreflight(result);
+  if (!result.usable.length) {
+    throw new Error("No provider CLI is ready. Install and sign in to Codex, Claude, or Grok, then re-run this command.");
+  }
+  return result;
 }
 
 function portReachable(port) {
@@ -98,77 +297,188 @@ function portReachable(port) {
   });
 }
 
-// ---------- network discovery ----------
+// ---------- secure phone transport ----------
 
-function tailscaleIP() {
-  const candidates = ["tailscale"];
+function printTransportRanking(selected = "funnel") {
+  console.log("\n  Who should be able to reach this Mac?");
+  console.log(`    1. A phone anywhere with the private pairing link${selected === "funnel" ? " (selected)" : ""} — recommended; the phone installs nothing extra.`);
+  console.log(`    2. Only devices signed in to my Tailscale account${selected === "serve" ? " (selected)" : ""} — private; every phone needs Tailscale.`);
+  console.log(`    3. People allowed by my Cloudflare Access policy${selected === "cloudflare" ? " (selected)" : ""} — advanced; requires your own domain.`);
+}
 
-  if (platform() === "darwin") {
-    candidates.push("/Applications/Tailscale.app/Contents/MacOS/Tailscale");
+async function chooseTransport(cfg, args) {
+  let selected = normalizeTransport(args.transport || cfg.transport);
+  let rankingShown = false;
+
+  if (selected && !TRANSPORTS.has(selected)) {
+    throw new Error("--transport must be funnel, serve, or cloudflare");
   }
 
-  for (const bin of candidates) {
+  if (!selected && process.stdin.isTTY && process.stdout.isTTY) {
+    printTransportRanking();
+    rankingShown = true;
+    const prompt = createInterface({ input: process.stdin, output: process.stdout });
+
     try {
-      const r = spawnSync(bin, ["ip", "-4"], { encoding: "utf8", timeout: 4000 });
-      const ip = (r.stdout || "").split("\n").map((l) => l.trim()).find((l) => /^100\./.test(l));
-
-      if (ip) {
-        return ip;
-      }
-    } catch {
-      // try next candidate
+      const answer = (await prompt.question("\n  Choose who can reach it [1]: ")).trim().toLowerCase();
+      selected = answer === "2" || answer === "serve"
+        ? "serve"
+        : answer === "3" || answer === "cloudflare"
+          ? "cloudflare"
+          : "funnel";
+    } finally {
+      prompt.close();
     }
   }
 
-  return null;
+  selected ||= "funnel";
+  if (!rankingShown) {
+    printTransportRanking(selected);
+  } else {
+    console.log(`\n  Selected: ${transportName(selected)}`);
+  }
+
+  if (!args.transport && !cfg.transport) {
+    console.log("  No choice supplied; using and saving the recommended anywhere-from-phone default.");
+  } else if (args.transport) {
+    console.log(`  Explicit choice: --transport ${selected}`);
+  } else {
+    console.log(`  Reusing saved choice: ${selected}`);
+  }
+
+  if (cfg.transport !== selected) {
+    writeConfig({ ...readConfig(), transport: selected });
+  }
+
+  return selected;
 }
 
-function lanIP() {
-  for (const addrs of Object.values(networkInterfaces())) {
-    for (const a of addrs ?? []) {
-      if (a.family === "IPv4" && !a.internal) {
-        return a.address;
-      }
+export function pairingUrl(cfg) {
+  if (!cfg.publicUrl || new URL(cfg.publicUrl).protocol !== "https:") {
+    throw new Error("a verified stable HTTPS origin is required before printing a phone QR");
+  }
+
+  return `${cfg.publicUrl.replace(/\/$/, "")}/?t=${encodeURIComponent(cfg.token)}`;
+}
+
+async function printPairing(cfg, { verification = "Authenticated app answered through stable HTTPS." } = {}) {
+  const { default: qrcode } = await import("qrcode-terminal");
+  const url = pairingUrl(cfg);
+  console.log(`\n  ${verification}`);
+  console.log("  Scan this QR on your phone:\n");
+  qrcode.generate(url, { small: true });
+  console.log(`    ${url}`);
+  console.log(`\n  Connection: ${transportName(cfg.transport)}`);
+  console.log("  This exact origin, port, and pairing token are saved and will be reused.");
+  console.log(`  Local diagnostic only: http://127.0.0.1:${cfg.port}/ (not a phone install URL)\n`);
+}
+
+function printTailscaleRecovery(preflight, transport = "funnel") {
+  console.error(`\n  No phone QR was printed: ${preflight.detail || preflight.message || preflight}`);
+  console.error(`  ${preflight.remediation || "Open Tailscale on this Mac, connect it, and re-run the same command."}`);
+  if (normalizeTransport(transport) === "serve") {
+    console.error("  Private mode also requires Tailscale on the phone, signed into the same account.");
+  } else {
+    console.error("  The recommended anywhere mode does not require Tailscale on the phone.");
+  }
+  console.error("  The saved token and port will be reused when you retry.");
+  console.error("  A LAN http:// address is intentionally not offered: PWA install and push would not work.\n");
+}
+
+export async function verifyHttpsApp(base, cfg, {
+  timeoutMs = 75000,
+  requestTimeoutMs = 45000,
+  retryMs = 1500,
+  fetchImpl = fetch,
+} = {}) {
+  const started = Date.now();
+  const deadline = started + timeoutMs;
+  let lastMessage = "HTTPS check did not complete";
+  let attempts = 0;
+
+  while (Date.now() < deadline) {
+    attempts += 1;
+    const remaining = Math.max(1, deadline - Date.now());
+    let response;
+
+    try {
+      response = await fetchImpl(`${base.replace(/\/$/, "")}/`, {
+        headers: { authorization: `Bearer ${cfg.token}` },
+        redirect: "manual",
+        signal: AbortSignal.timeout(Math.min(requestTimeoutMs, remaining)),
+      });
+    } catch (error) {
+      lastMessage = `HTTPS check failed (${error.message})`;
     }
+
+    if (response?.status === 200 && response.headers.get("x-remote-agents") === "bridge") {
+      return { ok: true, attempts, elapsedMs: Date.now() - started };
+    }
+
+    if (response) {
+      lastMessage = `HTTPS check returned ${response.status}, not the authenticated Remote Agents app`;
+      // A concrete non-server-error response is not certificate warm-up. It is
+      // the wrong app, token, or route, so waiting longer cannot make it safe.
+      if (response.status < 500) { break; }
+    }
+
+    const wait = Math.min(retryMs, deadline - Date.now());
+    if (wait > 0) { await new Promise((resolve) => setTimeout(resolve, wait)); }
   }
 
-  return null;
+  return { ok: false, message: lastMessage, attempts, elapsedMs: Date.now() - started };
 }
 
-function pairingLinks(port, token) {
-  const links = [];
-  const ts = tailscaleIP();
-  const lan = lanIP();
+export async function verifyCloudflareEntry(base, cfg, { fetchImpl = fetch } = {}) {
+  const app = await verifyHttpsApp(base, cfg, { fetchImpl });
 
-  if (ts) {
-    links.push({ label: "Anywhere (Tailscale)", url: `http://${ts}:${port}/?t=${token}` });
+  if (app.ok) {
+    return { ok: true, verification: "Authenticated app answered through stable Cloudflare HTTPS." };
   }
 
-  if (lan) {
-    links.push({ label: "Same Wi-Fi (LAN)", url: `http://${lan}:${port}/?t=${token}` });
+  let response;
+
+  try {
+    response = await fetchImpl(`${base.replace(/\/$/, "")}/`, {
+      redirect: "manual",
+      signal: AbortSignal.timeout(10000),
+    });
+  } catch (error) {
+    return { ok: false, message: error.message };
   }
 
-  links.push({ label: "This computer", url: `http://127.0.0.1:${port}/?t=${token}` });
-  return links;
+  const location = response.headers.get("location") || "";
+  let accessLogin = false;
+
+  try {
+    const redirect = new URL(location, base);
+    accessLogin = redirect.hostname.endsWith(".cloudflareaccess.com") || redirect.pathname.startsWith("/cdn-cgi/access/");
+  } catch {}
+
+  if (response.status >= 300 && response.status < 400 && accessLogin) {
+    return {
+      ok: false,
+      message: "Cloudflare Access answered, but the authenticated Remote Agents app behind it was not verified; no QR can be shown yet",
+    };
+  }
+
+  return { ok: false, message: `hostname returned ${response.status} without the Remote Agents marker or a Cloudflare Access login` };
 }
 
-function printLinks(port, token) {
-  const links = pairingLinks(port, token);
-  const primary = links[0];
+export function rememberTransport(transport, publicUrl, { allowOriginChange = false } = {}) {
+  const current = readConfig();
 
-  console.log("\n  Scan on your phone:\n");
-  qrcode.generate(primary.url, { small: true });
-  console.log("  Open one of these, then Add to Home Screen:\n");
-
-  for (const l of links) {
-    console.log(`    ${l.label.padEnd(22)} ${l.url}`);
+  if (current.publicUrl && current.publicUrl !== publicUrl && !allowOriginChange) {
+    throw new Error(originChangeMessage(current.publicUrl, publicUrl));
   }
 
-  if (!tailscaleIP()) {
-    console.log("\n  Tip: install Tailscale on this machine + your phone for access from anywhere (not just same Wi-Fi).");
-  }
+  const next = { ...current, transport, publicUrl, transportVerifiedAt: new Date().toISOString() };
+  writeConfig(next);
+  return next;
+}
 
-  console.log("");
+export function originChangeMessage(oldUrl, newUrl) {
+  return `The public web address changed from ${oldUrl} to ${newUrl}. Phones installed from the old address keep a separate login and notification subscription, so silently switching would make the app look broken. If this name change is intentional, re-run with --replace-origin, then reinstall the phone app and enable notifications again.`;
 }
 
 // Autostart launchers (launchd/systemd) run with a minimal PATH that omits
@@ -186,36 +496,89 @@ function augmentPath() {
 
 // ---------- serve ----------
 
-async function serve(args) {
-  augmentPath();
-  const { host, port, token } = resolveConfig(args);
+async function startLocalBridge(cfg) {
+  const { host, port, token } = cfg;
+  const { startServer } = await import("../server.mjs");
 
   try {
     await startServer({ host, port, token });
   } catch (e) {
     if (e.code === "EADDRINUSE") {
-      console.error(`\n  Port ${port} is already in use. Another codex-phone may be running (try: codex-phone status),\n  or pass a different --port.\n`);
+      console.error(`\n  Port ${port} is already in use. Another remote-agents bridge may be running.\n  Run \`remote-agents status\` or pass a different --port.\n`);
       process.exit(1);
     }
 
     throw e;
   }
 
-  console.log(`\n  codex-phone is running (bound ${host}:${port}).`);
-  printLinks(port, token);
+  console.log(`\n  remote-agents is running (bound ${host}:${port}).`);
 }
 
-// ---------- tunnel (Cloudflare, no Tailscale needed) ----------
+async function serve(args) {
+  augmentPath();
+  const cfg = await resolveConfig(args);
 
-// Expose the local server over a public HTTPS URL via cloudflared.
-//   remote-agents tunnel                          quick tunnel (random URL)
-//   remote-agents tunnel --name <t> --hostname h  named tunnel (stable URL)
-// A named tunnel needs a one-time setup:
+  // Supervised restarts own only the local bridge. The explicit setup/foreground
+  // process owns reachability checks, Funnel/Serve changes, and QR output; this
+  // avoids two processes racing to configure transport during first install.
+  if (args.service) {
+    await startLocalBridge(cfg);
+    return;
+  }
+
+  const transport = await chooseTransport(cfg, args);
+  requireUsableProvider(cfg);
+
+  if (transport !== "cloudflare") {
+    const preflight = tailscalePreflight();
+    if (!preflight.connected) {
+      printTailscaleRecovery(preflight, transport);
+      process.exitCode = 1;
+      return;
+    }
+    console.log(`\n  Tailscale: ${preflight.detail}`);
+  }
+
+  await startLocalBridge(cfg);
+
+  if (transport === "cloudflare") {
+    console.error("\n  Cloudflare is the advanced option and is not provisioned automatically.");
+    console.error("  Create a named tunnel, route your hostname to this local port, and protect it");
+    console.error("  with a Cloudflare Access self-hosted application. Then run:");
+    console.error(`    remote-agents tunnel --name NAME --hostname agents.example.com --access-protected`);
+    console.error("  No QR is printed until that stable, access-controlled origin is available.\n");
+    return;
+  }
+
+  const result = await configureTailscale(readConfig(), { transport, allowOriginChange: args.replaceOrigin });
+
+  if (!result.ok) {
+    printTailscaleRecovery(result, transport);
+    process.exitCode = 1;
+    return;
+  }
+
+  await printPairing(result.config);
+}
+
+// ---------- Cloudflare named tunnel (advanced option) ----------
+
+// Quick tunnels are deliberately unsupported: their origin changes and they do
+// not carry this app's SSE live stream. A named tunnel needs one-time setup:
 //   cloudflared tunnel login
 //   cloudflared tunnel create <name>
 //   cloudflared tunnel route dns <name> <hostname>
 async function tunnel(args) {
-  const { port, token } = resolveConfig(args);
+  const cfg = await resolveConfig(args);
+  const { port, token } = cfg;
+
+  if (!args.name || !args.hostname || !args.accessProtected) {
+    console.error("\n  Cloudflare requires a named tunnel, a stable hostname, and Access protection.");
+    console.error("  First create the tunnel/DNS route and a Cloudflare Access self-hosted app");
+    console.error("  with an Allow policy for that hostname. Then run:");
+    console.error("    remote-agents tunnel --name NAME --hostname agents.example.com --access-protected\n");
+    process.exit(1);
+  }
 
   if (!commandExists("cloudflared")) {
     console.error("\n  cloudflared is not installed. Install it, then re-run:");
@@ -230,44 +593,46 @@ async function tunnel(args) {
     process.exit(1);
   }
 
-  const named = !!args.name;
-  const cfArgs = named
-    ? ["tunnel", "run", "--url", `http://localhost:${port}`, args.name]
-    : ["tunnel", "--url", `http://localhost:${port}`];
+  const cfArgs = ["tunnel", "run", "--url", `http://localhost:${port}`, args.name];
+  const publicUrl = `https://${args.hostname}`;
 
-  console.log(`\n  Starting Cloudflare tunnel → localhost:${port} ${named ? `(named: ${args.name})` : "(quick tunnel)"}…`);
+  if (cfg.publicUrl && cfg.publicUrl !== publicUrl && !args.replaceOrigin) {
+    throw new Error(originChangeMessage(cfg.publicUrl, publicUrl));
+  }
+
+  console.log(`\n  Starting named Cloudflare tunnel ${args.name} → localhost:${port}…`);
+  console.log("  Waiting for the stable HTTPS hostname to return the authenticated app.");
 
   const child = spawn("cloudflared", cfArgs, { stdio: ["ignore", "pipe", "pipe"] });
   let announced = false;
 
-  function announce(base) {
+  async function announce() {
     if (announced) { return; }
 
+    const check = await verifyCloudflareEntry(publicUrl, { ...cfg, token });
+
+    if (!check.ok) { return; }
+
     announced = true;
-    const url = `${base.replace(/\/$/, "")}/?t=${token}`;
-    console.log("\n  Tunnel is live — open this from anywhere (cellular included):\n");
-    qrcode.generate(url, { small: true });
-    console.log(`    ${url}\n`);
-    console.log("  This is a PUBLIC HTTPS endpoint — the token is the only lock. Keep the");
-    console.log("  link private; for stronger auth put Cloudflare Access in front of the tunnel.");
-    console.log("  HTTPS here also means the installable PWA + offline mode work on your phone.\n");
+    await printPairing(
+      rememberTransport("cloudflare", publicUrl, { allowOriginChange: args.replaceOrigin }),
+      { verification: check.verification },
+    );
   }
 
-  // Named tunnels have a known hostname up front; quick tunnels print theirs.
-  if (named && args.hostname) {
-    announce(`https://${args.hostname}`);
-  }
-
-  function scan(buf) {
-    const m = String(buf).match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
-
-    if (m) { announce(m[0]); }
-  }
-
-  child.stdout.on("data", scan);
-  child.stderr.on("data", (d) => { scan(d); process.stderr.write(d); });
+  child.stdout.on("data", (d) => process.stdout.write(d));
+  child.stderr.on("data", (d) => process.stderr.write(d));
+  const checkTimer = setInterval(() => announce().catch(() => {}), 2000);
+  checkTimer.unref?.();
 
   child.on("exit", (code) => {
+    clearInterval(checkTimer);
+
+    if (!announced) {
+      console.error("\n  No QR was printed because the hostname never returned the authenticated app.");
+      console.error("  Check the tunnel's public-hostname route and Cloudflare Access policy.\n");
+    }
+
     console.log(`\n  cloudflared exited (${code ?? 0}).`);
     process.exit(code ?? 0);
   });
@@ -275,34 +640,148 @@ async function tunnel(args) {
   process.on("SIGINT", () => { child.kill("SIGINT"); });
 }
 
+export async function configureTailscale(cfg, { transport = normalizeTransport(cfg.transport) || "funnel", allowOriginChange = false } = {}) {
+  transport = normalizeTransport(transport);
+  if (!new Set(["funnel", "serve"]).has(transport)) {
+    return { ok: false, detail: `Unsupported Tailscale mode: ${transport}` };
+  }
+
+  const preflight = tailscalePreflight();
+  if (!preflight.connected) { return { ok: false, ...preflight }; }
+
+  const publicUrl = `https://${preflight.dnsName}`;
+
+  // Check the currently derived address before changing Serve/Funnel state.
+  // A renamed/re-registered node must never silently strand installed phones.
+  if (cfg.publicUrl && cfg.publicUrl !== publicUrl && !allowOriginChange) {
+    return {
+      ok: false,
+      detail: originChangeMessage(cfg.publicUrl, publicUrl),
+      remediation: "Restore the previous Tailscale machine name, or follow the explicit --replace-origin path above.",
+      state: "origin_changed",
+    };
+  }
+
+  if (normalizeTransport(cfg.transport) === transport && cfg.publicUrl === publicUrl) {
+    const savedCheck = await verifyHttpsApp(cfg.publicUrl, cfg);
+
+    if (savedCheck.ok) {
+      return { ok: true, url: cfg.publicUrl, config: cfg, reused: true };
+    }
+  }
+
+  const command = transport === "funnel"
+    ? ["funnel", "--bg", String(cfg.port)]
+    : ["serve", "--bg", "--yes", `http://127.0.0.1:${cfg.port}`];
+  const served = spawnSync(preflight.bin, command, {
+    encoding: "utf8",
+    timeout: 15000,
+  });
+
+  if (served.status !== 0) {
+    const detail = (served.stderr || served.stdout || "tailscale serve failed").trim();
+    return { ok: false, detail, remediation: "Open Tailscale, confirm it is connected, and retry." };
+  }
+
+  console.log("  Waiting for the public HTTPS address to issue its certificate and return this authenticated app (up to 75 seconds)…");
+  const check = await verifyHttpsApp(publicUrl, cfg);
+
+  if (!check.ok) {
+    return {
+      ok: false,
+      detail: `${transport === "funnel" ? "Tailscale Funnel" : "Tailscale Serve"} was configured, but ${check.message}`,
+      remediation: "Keep the bridge running, confirm Tailscale is connected, and retry; first-time certificate issuance can take about 30 seconds.",
+    };
+  }
+
+  const saved = rememberTransport(transport, publicUrl, { allowOriginChange });
+  return { ok: true, url: publicUrl, config: saved };
+}
+
+async function tailscale(args) {
+  const cfg = await resolveConfig(args);
+
+  if (!(await portReachable(cfg.port))) {
+    console.error(`\n  Nothing is listening on localhost:${cfg.port}. Start the bridge first:`);
+    console.error("    remote-agents start        (background service)");
+    console.error("    remote-agents              (foreground)\n");
+    process.exit(1);
+  }
+
+  const transport = normalizeTransport(args.transport || cfg.transport) || "funnel";
+  const result = await configureTailscale(cfg, { transport, allowOriginChange: args.replaceOrigin });
+
+  if (!result.ok) {
+    printTailscaleRecovery(result, transport);
+    process.exit(1);
+  }
+
+  console.log(`\n  ${transportName(transport)} is ready at ${result.url}`);
+  await printPairing(result.config);
+}
+
 // ---------- autostart: platform back-ends ----------
+
+function stableNodePath() {
+  const candidates = [
+    CLI_PATH.startsWith("/opt/homebrew/") && "/opt/homebrew/bin/node",
+    CLI_PATH.startsWith("/usr/local/") && "/usr/local/bin/node",
+    process.execPath,
+  ].filter(Boolean);
+  return candidates.find(existsSync) || process.execPath;
+}
+
+function servicePath() {
+  const inherited = (process.env.PATH || "").split(":").filter(Boolean);
+  const common = ["/opt/homebrew/bin", "/usr/local/bin", join(homedir(), ".local", "bin"), join(homedir(), ".npm-global", "bin"), "/usr/bin", "/bin"];
+  return [...new Set([...inherited, ...common])].join(":");
+}
+
+function xmlEscape(value) {
+  return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
 
 function macAgent() {
   const plist = join(homedir(), "Library", "LaunchAgents", `${LABEL}.plist`);
   const domain = `gui/${process.getuid()}`;
-  const logDir = join(CONFIG_DIR, "logs");
+  const logDir = dataPath("logs");
+  const node = stableNodePath();
+  const configHome = process.env.REMOTE_AGENTS_HOME;
 
   return {
     install() {
       mkdirSync(dirname(plist), { recursive: true });
       mkdirSync(logDir, { recursive: true });
-      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+      const plistXml = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>${LABEL}</string>
   <key>ProgramArguments</key><array>
-    <string>${NODE}</string><string>${CLI_PATH}</string><string>serve</string>
+    <string>${xmlEscape(node)}</string><string>${xmlEscape(CLI_PATH)}</string><string>serve</string><string>--service</string>
   </array>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>${xmlEscape(servicePath())}</string>
+    ${configHome ? `<key>REMOTE_AGENTS_HOME</key><string>${xmlEscape(configHome)}</string>` : ""}
+  </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ProcessType</key><string>Background</string>
-  <key>StandardOutPath</key><string>${join(logDir, "out.log")}</string>
-  <key>StandardErrorPath</key><string>${join(logDir, "err.log")}</string>
+  <key>StandardOutPath</key><string>${xmlEscape(join(logDir, "out.log"))}</string>
+  <key>StandardErrorPath</key><string>${xmlEscape(join(logDir, "err.log"))}</string>
 </dict></plist>`;
-      writeFileSync(plist, xml);
+      writeFileSync(plist, plistXml, { mode: 0o600 });
       spawnSync("launchctl", ["bootout", `${domain}/${LABEL}`], { stdio: "ignore" });
-      spawnSync("launchctl", ["bootstrap", domain, plist], { stdio: "inherit" });
-      spawnSync("launchctl", ["kickstart", `${domain}/${LABEL}`], { stdio: "ignore" });
+      const loaded = spawnSync("launchctl", ["bootstrap", domain, plist], { stdio: "inherit" });
+
+      if (loaded.status !== 0) {
+        throw new Error(`launchctl bootstrap failed (${loaded.status ?? "unknown status"})`);
+      }
+
+      const started = spawnSync("launchctl", ["kickstart", `${domain}/${LABEL}`], { stdio: "inherit" });
+
+      if (started.status !== 0) {
+        throw new Error(`launchctl kickstart failed (${started.status ?? "unknown status"})`);
+      }
     },
     uninstall() {
       spawnSync("launchctl", ["bootout", `${domain}/${LABEL}`], { stdio: "ignore" });
@@ -311,7 +790,15 @@ function macAgent() {
         rmSync(plist);
       }
     },
-    start() { spawnSync("launchctl", ["bootstrap", domain, plist], { stdio: "ignore" }); spawnSync("launchctl", ["kickstart", `${domain}/${LABEL}`], { stdio: "ignore" }); },
+    start() {
+      if (!existsSync(plist)) { throw new Error("service is not installed; run remote-agents setup"); }
+      const loaded = spawnSync("launchctl", ["bootstrap", domain, plist], { stdio: "ignore" });
+      const started = spawnSync("launchctl", ["kickstart", `${domain}/${LABEL}`], { stdio: "inherit" });
+
+      if (loaded.status !== 0 && started.status !== 0) {
+        throw new Error("launchctl could not start the service");
+      }
+    },
     stop() { spawnSync("launchctl", ["bootout", `${domain}/${LABEL}`], { stdio: "ignore" }); },
     status() {
       const r = spawnSync("launchctl", ["print", `${domain}/${LABEL}`], { encoding: "utf8" });
@@ -323,7 +810,7 @@ function macAgent() {
 
 function linuxAgent() {
   const unitDir = join(homedir(), ".config", "systemd", "user");
-  const unit = join(unitDir, "codex-phone.service");
+  const unit = join(unitDir, "remote-agents.service");
 
   function sc(...a) { return spawnSync("systemctl", ["--user", ...a], { stdio: "inherit" }); }
 
@@ -331,11 +818,11 @@ function linuxAgent() {
     install() {
       mkdirSync(unitDir, { recursive: true });
       writeFileSync(unit, `[Unit]
-Description=codex-phone
+Description=remote-agents
 After=network.target
 
 [Service]
-ExecStart=${NODE} ${CLI_PATH} serve
+ExecStart=${stableNodePath()} ${CLI_PATH} serve --service
 Restart=always
 RestartSec=2
 
@@ -343,11 +830,11 @@ RestartSec=2
 WantedBy=default.target
 `);
       sc("daemon-reload");
-      sc("enable", "--now", "codex-phone.service");
+      sc("enable", "--now", "remote-agents.service");
       console.log("\n  Tip: run `loginctl enable-linger $USER` so it also runs before you log in.");
     },
     uninstall() {
-      sc("disable", "--now", "codex-phone.service");
+      sc("disable", "--now", "remote-agents.service");
 
       if (existsSync(unit)) {
         rmSync(unit);
@@ -355,31 +842,11 @@ WantedBy=default.target
 
       sc("daemon-reload");
     },
-    start() { sc("start", "codex-phone.service"); },
-    stop() { sc("stop", "codex-phone.service"); },
+    start() { sc("start", "remote-agents.service"); },
+    stop() { sc("stop", "remote-agents.service"); },
     status() {
-      const r = spawnSync("systemctl", ["--user", "is-active", "codex-phone.service"], { encoding: "utf8" });
+      const r = spawnSync("systemctl", ["--user", "is-active", "remote-agents.service"], { encoding: "utf8" });
       return (r.stdout || "").trim() || "unknown";
-    },
-  };
-}
-
-function windowsAgent() {
-  const tn = "codex-phone";
-  const tr = `\"${NODE}\" \"${CLI_PATH}\" serve`;
-
-  return {
-    install() {
-      spawnSync("schtasks", ["/create", "/tn", tn, "/sc", "onlogon", "/rl", "limited", "/tr", tr, "/f"], { stdio: "inherit" });
-      spawnSync("schtasks", ["/run", "/tn", tn], { stdio: "ignore" });
-      console.log("\n  Note: Windows Task Scheduler starts it at logon but won't auto-restart on crash.");
-    },
-    uninstall() { spawnSync("schtasks", ["/delete", "/tn", tn, "/f"], { stdio: "inherit" }); },
-    start() { spawnSync("schtasks", ["/run", "/tn", tn], { stdio: "inherit" }); },
-    stop() { spawnSync("schtasks", ["/end", "/tn", tn], { stdio: "inherit" }); },
-    status() {
-      const r = spawnSync("schtasks", ["/query", "/tn", tn], { encoding: "utf8" });
-      return r.status === 0 ? "installed" : "not installed";
     },
   };
 }
@@ -388,7 +855,6 @@ function agent() {
   switch (platform()) {
     case "darwin": return macAgent();
     case "linux": return linuxAgent();
-    case "win32": return windowsAgent();
     default: return null;
   }
 }
@@ -397,7 +863,7 @@ function warnIfEphemeral() {
   if (/[/\\](_npx|npm-cache|\.npm)[/\\]/.test(CLI_PATH)) {
     console.log("\n  ⚠  You're running via a temporary npx download, so autostart would point at a path that disappears.");
     console.log("     Install it persistently first:  npm install -g github:<you>/remote-agents");
-    console.log("     Then run:  remote-agents install\n");
+    console.log("     Then run:  remote-agents setup\n");
     return true;
   }
 
@@ -406,12 +872,113 @@ function warnIfEphemeral() {
 
 // ---------- dispatch ----------
 
+async function waitForPort(port, attempts = 20) {
+  for (let i = 0; i < attempts; i++) {
+    if (await portReachable(port)) { return true; }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+
+  return false;
+}
+
+async function diagnostics(a, cfg, { verifyOrigin = true } = {}) {
+  const service = a?.status?.() ?? "unsupported";
+  const local = validPort(cfg.port) ? await portReachable(cfg.port) : false;
+  const tailscale = tailscalePreflight();
+  const providers = providerPreflight(cfg);
+  let originReachable = null;
+  let originMessage = "no verified public address is saved";
+
+  if (cfg.publicUrl) {
+    originMessage = cfg.transportVerifiedAt
+      ? `saved and previously verified at ${cfg.transportVerifiedAt}`
+      : "saved, but no successful verification time is recorded";
+
+    if (verifyOrigin && cfg.token) {
+      const check = await verifyHttpsApp(cfg.publicUrl, cfg, { timeoutMs: 12000, requestTimeoutMs: 10000, retryMs: 1000 });
+      originReachable = check.ok;
+      if (!check.ok) { originMessage += `; not reachable now (${check.message})`; }
+    }
+  }
+
+  return { service, local, tailscale, providers, originReachable, originMessage };
+}
+
+function printDiagnostics(cfg, report) {
+  console.log("\n  Remote Agents status");
+  console.log(`    Service manager: ${report.service}`);
+  console.log(`    Local bridge: ${report.local ? `running on port ${cfg.port}` : validPort(cfg.port) ? `not listening on saved port ${cfg.port}` : "not configured"}`);
+  console.log(`    Transport: ${transportName(cfg.transport)}`);
+  console.log(`    Tailscale: ${report.tailscale.connected ? report.tailscale.detail : `${report.tailscale.detail} ${report.tailscale.remediation}`}`);
+  console.log(`    Public address: ${cfg.publicUrl || "not configured"}`);
+  console.log(`    Origin verification: ${report.originMessage}`);
+  if (report.originReachable !== null) {
+    console.log(`    Public address reachable now: ${report.originReachable ? "yes" : "no"}`);
+  }
+  printProviderPreflight(report.providers);
+}
+
+async function setup(a, args) {
+  if (warnIfEphemeral()) { process.exit(1); }
+
+  augmentPath();
+  const cfg = await resolveConfig(args);
+  const transport = await chooseTransport(cfg, args);
+  requireUsableProvider(cfg);
+
+  if (transport !== "cloudflare") {
+    const preflight = tailscalePreflight();
+    if (!preflight.connected) {
+      printTailscaleRecovery(preflight, transport);
+      process.exitCode = 1;
+      return;
+    }
+    console.log(`\n  Tailscale: ${preflight.detail}`);
+  }
+
+  const serviceState = a.status();
+
+  if (await portReachable(cfg.port) && !serviceState.startsWith("running")) {
+    throw new Error(`port ${cfg.port} is already in use by another process; choose a different --port`);
+  }
+
+  a.install();
+
+  if (!(await waitForPort(cfg.port))) {
+    throw new Error(`the service was installed but did not begin listening on port ${cfg.port}; check ${dataPath("logs/err.log")}`);
+  }
+
+  console.log("\n  Installed. remote-agents will start at login and restart after a crash.");
+
+  if (transport === "cloudflare") {
+    writeConfig({ ...readConfig(), transport: "cloudflare" });
+    console.error("\n  The local bridge is ready, but no phone QR was printed yet.");
+    console.error("  Finish the advanced Cloudflare option:");
+    console.error("    1. Create a named tunnel and route a hostname on your domain to this bridge.");
+    console.error("    2. Create a self-hosted Cloudflare Access app with an Allow policy for you.");
+    console.error("    3. Run:");
+    console.error("       remote-agents tunnel --name NAME --hostname agents.example.com --access-protected");
+    console.error("  That command withholds the QR until the hostname returns this authenticated app.\n");
+    process.exitCode = 1;
+    return;
+  }
+
+  const ts = await configureTailscale({ ...cfg, transport }, { transport, allowOriginChange: args.replaceOrigin });
+
+  if (ts.ok) {
+    console.log(`  ${transportName(transport)} is ready at ${ts.url}`);
+  } else {
+    printTailscaleRecovery(ts, transport);
+    process.exitCode = 1;
+    return;
+  }
+
+  await printPairing(ts.config);
+}
+
 async function main() {
   const [cmd, ...rest] = process.argv.slice(2);
   const args = parseArgs(rest);
-  const cfg = loadConfig();
-  const port = cfg.port || 8484;
-  const token = cfg.token || "(run once to generate)";
 
   if (!cmd || cmd === "serve" || cmd === "run") {
     return serve(args);
@@ -421,21 +988,22 @@ async function main() {
     return tunnel(args);
   }
 
+  if (cmd === "tailscale") {
+    return tailscale(args);
+  }
+
   const a = agent();
 
-  if (["install", "uninstall", "start", "stop", "status"].includes(cmd) && !a) {
-    console.error(`  Autostart isn't supported on this platform (${platform()}). Run \`codex-phone\` in a terminal or your own supervisor.`);
+  if (["setup", "install", "uninstall", "start", "stop", "status"].includes(cmd) && !a) {
+    console.error(`  Autostart isn't supported on this platform (${platform()}). Run \`remote-agents\` in a terminal or use a tested supervisor.`);
+    console.error("  Windows requires a dedicated service-supervision and provider-path port; see PORTABLE_PLAN.md.");
     process.exit(1);
   }
 
   switch (cmd) {
+    case "setup":
     case "install":
-      if (warnIfEphemeral()) { process.exit(1); }
-
-      resolveConfig(args); // ensure token exists before the service starts
-      a.install();
-      console.log(`\n  Installed. codex-phone will start automatically and stay running.`);
-      printLinks(port, cfg.token);
+      await setup(a, args);
       break;
 
     case "uninstall":
@@ -444,10 +1012,21 @@ async function main() {
       break;
 
     case "start":
+      {
+      const cfg = await resolveConfig(args);
       a.start();
+      if (!(await waitForPort(cfg.port))) { throw new Error(`service did not listen on port ${cfg.port}`); }
       console.log("  Started.");
-      printLinks(port, token);
+      const current = readConfig();
+      const check = current.publicUrl ? await verifyHttpsApp(current.publicUrl, current) : { ok: false, message: "no verified HTTPS origin is saved" };
+
+      if (check.ok) {
+        await printPairing(current);
+      } else {
+        console.error(`  No phone QR: ${check.message}. Run \`remote-agents tailscale\`.`);
+      }
       break;
+      }
 
     case "stop":
       a.stop();
@@ -455,20 +1034,45 @@ async function main() {
       break;
 
     case "status":
-      console.log(`  ${a.status()}`);
-      printLinks(port, token);
+      {
+        const current = readConfig();
+        printDiagnostics(current, await diagnostics(a, current));
+      }
       break;
 
     case "url":
-      printLinks(port, token);
+      {
+        const current = await resolveConfig(args);
+        printDiagnostics(current, await diagnostics(a, current, { verifyOrigin: false }));
+        const candidate = current.requestedPublicUrl || current.publicUrl;
+
+        if (!candidate) {
+          throw new Error("No verified public address is configured. Run `remote-agents setup` (recommended) or `remote-agents tailscale --transport funnel` while the bridge is running.");
+        }
+
+        console.log("\n  Verifying the authenticated app through HTTPS before showing a QR (allowing up to 75 seconds for first-time certificate issuance)…");
+        const check = await verifyHttpsApp(candidate, current);
+
+        if (!check.ok) {
+          throw new Error(`no QR printed: ${check.message}`);
+        }
+
+        const saved = current.requestedPublicUrl
+          ? rememberTransport(args.transport || current.transport || "cloudflare", candidate, { allowOriginChange: args.replaceOrigin })
+          : readConfig();
+        await printPairing(saved);
+      }
       break;
 
     default:
-      console.log("usage: remote-agents [serve|tunnel|install|uninstall|start|stop|status|url]");
+      console.log("usage: remote-agents [serve|setup|tailscale|tunnel|uninstall|start|stop|status|url]");
+      console.log("       default: --transport funnel; private: --transport serve; advanced: --transport cloudflare");
   }
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+if (process.argv[1] && resolve(process.argv[1]) === CLI_PATH) {
+  main().catch((e) => {
+    console.error(`\n  Error: ${e?.message ?? e}\n`);
+    process.exit(1);
+  });
+}

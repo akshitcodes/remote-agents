@@ -1,24 +1,39 @@
 {
   "name": "remote-agents",
-  "version": "0.3.0",
-  "description": "Self-hosted mobile web UI for your Codex and Claude Code CLI sessions — browse, resume, and drive your coding agents from your phone.",
+  "version": "0.4.0",
+  "description": "Self-hosted mobile web UI for your Codex, Claude Code, and Grok CLI sessions.",
   "type": "module",
   "bin": {
     "remote-agents": "bin/codex-phone.mjs"
   },
   "main": "server.mjs",
   "scripts": {
-    "start": "node bin/codex-phone.mjs"
+    "start": "node bin/codex-phone.mjs",
+    "test": "node --test test/*.test.mjs"
   },
   "files": [
     "bin/",
     "server.mjs",
+    "app-home.mjs",
+    "attachments.mjs",
+    "send-ledger.mjs",
+    "thread-subscriptions.mjs",
+    "thread-settings.mjs",
+    "watch.mjs",
+    "push.mjs",
+    "codex-rollout.mjs",
+    "dispatch-settings.mjs",
+    "codex-titles.mjs",
+    "recent-threads.mjs",
+    "config.mjs",
+    "onboarding.mjs",
     "providers/",
     "public/",
+    "docs/",
     "README.md"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=22.5.0"
   },
   "dependencies": {
     "@zed-industries/agent-client-protocol": "^0.4.5",
@@ -34,5 +49,11 @@
     "remote",
     "coding-agent"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/akshitcodes/remote-agents.git"
+  },
+  "homepage": "https://github.com/akshitcodes/remote-agents#readme",
+  "bugs": "https://github.com/akshitcodes/remote-agents/issues",
   "license": "MIT"
 }
