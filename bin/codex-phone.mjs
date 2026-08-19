@@ -28,6 +28,20 @@ const LABEL = "com.remoteagents.bridge";
 const TRANSPORTS = new Set(["funnel", "serve", "cloudflare"]);
 const APP_TAILSCALE = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
 const APP_CODEX = "/Applications/ChatGPT.app/Contents/Resources/codex";
+const PROVIDER_SETUP = {
+  codex: {
+    installCommand: "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
+    loginCommand: "codex login",
+  },
+  claude: {
+    installCommand: "curl -fsSL https://claude.ai/install.sh | bash",
+    loginCommand: "claude auth login",
+  },
+  grok: {
+    installCommand: "curl -fsSL https://x.ai/cli/install.sh | bash",
+    loginCommand: "grok login",
+  },
+};
 
 function normalizeTransport(value) {
   // The portability prototype used `tailscale` to mean private Serve. Preserve
@@ -195,11 +209,20 @@ export function tailscalePreflight() {
   const parsed = noisyJson(result.stdout) ?? noisyJson(result.stderr);
   const backend = String(parsed?.BackendState ?? "").trim();
   const dnsName = String(parsed?.Self?.DNSName ?? "").replace(/\.$/, "");
+  const magicDnsEnabled = parsed?.CurrentTailnet?.MagicDNSEnabled === true;
   const combined = commandOutput(result);
   const connected = result.status === 0 && backend === "Running" && !!dnsName;
 
   if (connected) {
-    return { installed: true, connected: true, state: "connected", detail: `connected as ${dnsName}`, dnsName, bin };
+    return {
+      installed: true,
+      connected: true,
+      state: "connected",
+      detail: `connected as ${dnsName}`,
+      dnsName,
+      magicDnsEnabled,
+      bin,
+    };
   }
 
   const stopped = /tailscale is stopped|stopped/i.test(combined) || /stopped/i.test(backend);
@@ -229,9 +252,11 @@ function resolveProviderBinary(configured, candidates) {
   return candidates.find((candidate) => candidate.includes("/") ? existsSync(candidate) : commandExists(candidate)) ?? null;
 }
 
-function providerRow(name, label, bin, command, inspect, remediation) {
+function providerRow(name, label, bin, command, inspect) {
+  const setup = PROVIDER_SETUP[name];
+
   if (!bin) {
-    return { name, label, installed: false, authenticated: false, usable: false, detail: "not installed", remediation };
+    return { name, label, installed: false, authenticated: false, usable: false, detail: "not installed", ...setup };
   }
 
   const result = runProbe(bin, command, name === "grok" ? 15000 : 8000);
@@ -245,7 +270,7 @@ function providerRow(name, label, bin, command, inspect, remediation) {
     authenticated: auth === true,
     usable: auth === true,
     detail: auth === true ? "installed and signed in" : auth || "installed, but sign-in could not be confirmed",
-    remediation,
+    ...setup,
   };
 }
 
@@ -255,17 +280,17 @@ export function providerPreflight(cfg = readConfig()) {
     providerRow("codex", "Codex", codexBin, ["login", "status"], (result, output) => {
       if (/not logged in|logged out|sign.?in required/i.test(output)) { return "installed, but not signed in"; }
       return result.status === 0 && /logged in|authenticated/i.test(output) ? true : "installed, but sign-in could not be confirmed";
-    }, "Run `codex login`."),
+    }),
     providerRow("claude", "Claude", resolveProviderBinary(null, ["claude"]), ["auth", "status"], (result, output) => {
       const parsed = noisyJson(result.stdout) ?? noisyJson(result.stderr);
       if (parsed?.loggedIn === true) { return true; }
       if (parsed?.loggedIn === false || /not logged in|logged out/i.test(output)) { return "installed, but not signed in"; }
       return result.status === 0 && /logged.?in/i.test(output) ? true : "installed, but sign-in could not be confirmed";
-    }, "Run `claude login`."),
+    }),
     providerRow("grok", "Grok", resolveProviderBinary(null, ["grok"]), ["models"], (result, output) => {
       if (/not logged in|logged out|sign.?in required|authentication required/i.test(output)) { return "installed, but not signed in"; }
       return result.status === 0 && /you are logged in|available models:/i.test(output) ? true : "installed, but sign-in could not be confirmed";
-    }, "Run `grok login`."),
+    }),
   ];
 
   return { rows, usable: rows.filter((row) => row.usable) };
@@ -275,7 +300,11 @@ function printProviderPreflight(result) {
   console.log("\n  Provider CLIs:");
   for (const row of result.rows) {
     const mark = row.usable ? "✓" : "!";
-    console.log(`    ${mark} ${row.label}: ${row.detail}${row.usable ? "" : `. ${row.remediation}`}`);
+    console.log(`    ${mark} ${row.label}: ${row.detail}`);
+    if (!row.usable) {
+      console.log(`      Install: ${row.installCommand}`);
+      console.log(`      Sign in: ${row.loginCommand}`);
+    }
   }
   console.log(`  At least one provider ready: ${result.usable.length ? `yes (${result.usable.map((row) => row.label).join(", ")})` : "no"}`);
 }
@@ -465,6 +494,49 @@ export async function verifyCloudflareEntry(base, cfg, { fetchImpl = fetch } = {
   return { ok: false, message: `hostname returned ${response.status} without the Remote Agents marker or a Cloudflare Access login` };
 }
 
+export function runTailscaleSetupCommand(bin, args, {
+  timeoutMs = 120000,
+  waitNoticeMs = 15000,
+  spawnImpl = spawn,
+  writeStdout = (chunk) => process.stdout.write(chunk),
+  writeStderr = (chunk) => process.stderr.write(chunk),
+} = {}) {
+  return new Promise((resolve) => {
+    let output = "";
+    let timedOut = false;
+    let settled = false;
+    let forceTimer;
+    const child = spawnImpl(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+
+    const finish = (result) => {
+      if (settled) { return; }
+      settled = true;
+      clearTimeout(timer);
+      clearTimeout(forceTimer);
+      clearInterval(waitTimer);
+      resolve({ ...result, output: output.trim(), timedOut });
+    };
+    const remember = (writer) => (chunk) => {
+      const text = String(chunk ?? "");
+      output = (output + text).slice(-65536);
+      writer(text);
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+      forceTimer = setTimeout(() => child.kill("SIGKILL"), 2000);
+    }, timeoutMs);
+    const waitTimer = setInterval(() => {
+      writeStdout("  Still waiting for Tailscale to finish. If Funnel opened an approval tab, approve it there…\n");
+    }, waitNoticeMs);
+
+    child.stdout?.on("data", remember(writeStdout));
+    child.stderr?.on("data", remember(writeStderr));
+    child.on("error", (error) => finish({ status: null, error }));
+    child.on("close", (code, signal) => finish({ status: code, signal }));
+  });
+}
+
 export function rememberTransport(transport, publicUrl, { allowOriginChange = false } = {}) {
   const current = readConfig();
 
@@ -496,12 +568,17 @@ function augmentPath() {
 
 // ---------- serve ----------
 
-async function startLocalBridge(cfg) {
+async function startLocalBridge(cfg, providerResult = providerPreflight(cfg)) {
   const { host, port, token } = cfg;
   const { startServer } = await import("../server.mjs");
 
   try {
-    await startServer({ host, port, token });
+    await startServer({
+      host,
+      port,
+      token,
+      usableProviders: providerResult.usable.map((row) => row.name),
+    });
   } catch (e) {
     if (e.code === "EADDRINUSE") {
       console.error(`\n  Port ${port} is already in use. Another remote-agents bridge may be running.\n  Run \`remote-agents status\` or pass a different --port.\n`);
@@ -527,7 +604,7 @@ async function serve(args) {
   }
 
   const transport = await chooseTransport(cfg, args);
-  requireUsableProvider(cfg);
+  const providerResult = requireUsableProvider(cfg);
 
   if (transport !== "cloudflare") {
     const preflight = tailscalePreflight();
@@ -539,7 +616,7 @@ async function serve(args) {
     console.log(`\n  Tailscale: ${preflight.detail}`);
   }
 
-  await startLocalBridge(cfg);
+  await startLocalBridge(cfg, providerResult);
 
   if (transport === "cloudflare") {
     console.error("\n  Cloudflare is the advanced option and is not provisioned automatically.");
@@ -640,7 +717,13 @@ async function tunnel(args) {
   process.on("SIGINT", () => { child.kill("SIGINT"); });
 }
 
-export async function configureTailscale(cfg, { transport = normalizeTransport(cfg.transport) || "funnel", allowOriginChange = false } = {}) {
+export async function configureTailscale(cfg, {
+  transport = normalizeTransport(cfg.transport) || "funnel",
+  allowOriginChange = false,
+  approvalTimeoutMs = 120000,
+  commandRunner = runTailscaleSetupCommand,
+  verify = verifyHttpsApp,
+} = {}) {
   transport = normalizeTransport(transport);
   if (!new Set(["funnel", "serve"]).has(transport)) {
     return { ok: false, detail: `Unsupported Tailscale mode: ${transport}` };
@@ -648,6 +731,17 @@ export async function configureTailscale(cfg, { transport = normalizeTransport(c
 
   const preflight = tailscalePreflight();
   if (!preflight.connected) { return { ok: false, ...preflight }; }
+
+  if (!preflight.magicDnsEnabled) {
+    return {
+      ok: false,
+      state: "magic_dns_disabled",
+      detail: "MagicDNS is disabled for this tailnet. Funnel needs the tailnet's stable .ts.net name before Remote Agents can verify HTTPS.",
+      remediation: "Open the Tailscale admin console, go to DNS, enable MagicDNS, then re-run this command. MagicDNS is enabled by default on new tailnets.",
+    };
+  }
+
+  console.log("  MagicDNS: enabled for this tailnet.");
 
   const publicUrl = `https://${preflight.dnsName}`;
 
@@ -663,7 +757,7 @@ export async function configureTailscale(cfg, { transport = normalizeTransport(c
   }
 
   if (normalizeTransport(cfg.transport) === transport && cfg.publicUrl === publicUrl) {
-    const savedCheck = await verifyHttpsApp(cfg.publicUrl, cfg);
+    const savedCheck = await verify(cfg.publicUrl, cfg);
 
     if (savedCheck.ok) {
       return { ok: true, url: cfg.publicUrl, config: cfg, reused: true };
@@ -673,18 +767,35 @@ export async function configureTailscale(cfg, { transport = normalizeTransport(c
   const command = transport === "funnel"
     ? ["funnel", "--bg", String(cfg.port)]
     : ["serve", "--bg", "--yes", `http://127.0.0.1:${cfg.port}`];
-  const served = spawnSync(preflight.bin, command, {
-    encoding: "utf8",
-    timeout: 15000,
-  });
+  if (transport === "funnel") {
+    console.log("\n  Enabling Tailscale Funnel. On a tailnet using Funnel for the first time,");
+    console.log("  Tailscale opens an approval page in your browser. Approve enabling Funnel");
+    console.log("  in that tab; this command will keep waiting. Funnel is available on every");
+    console.log("  Tailscale plan, including the free plan.");
+  }
+
+  const served = await commandRunner(preflight.bin, command, { timeoutMs: approvalTimeoutMs });
+
+  if (served.timedOut) {
+    return {
+      ok: false,
+      state: "funnel_approval_timeout",
+      detail: `Tailscale did not finish enabling ${transport === "funnel" ? "Funnel" : "Serve"} within ${Math.ceil(approvalTimeoutMs / 1000)} seconds.`,
+      remediation: transport === "funnel"
+        ? "Return to the Tailscale approval tab, approve enabling Funnel, then re-run this command. No phone QR was created."
+        : "Confirm Tailscale is connected, then re-run this command. No phone QR was created.",
+    };
+  }
 
   if (served.status !== 0) {
-    const detail = (served.stderr || served.stdout || "tailscale serve failed").trim();
+    const detail = served.output || served.error?.message || "tailscale serve failed";
     return { ok: false, detail, remediation: "Open Tailscale, confirm it is connected, and retry." };
   }
 
-  console.log("  Waiting for the public HTTPS address to issue its certificate and return this authenticated app (up to 75 seconds)…");
-  const check = await verifyHttpsApp(publicUrl, cfg);
+  console.log(`  ${transport === "funnel" ? "Funnel" : "Serve"} is configured. Waiting for the public HTTPS address to issue`);
+  console.log("  its certificate and return this authenticated app (up to 75 seconds; the");
+  console.log("  first request can take about 28 seconds)…");
+  const check = await verify(publicUrl, cfg);
 
   if (!check.ok) {
     return {
@@ -910,6 +1021,9 @@ function printDiagnostics(cfg, report) {
   console.log(`    Local bridge: ${report.local ? `running on port ${cfg.port}` : validPort(cfg.port) ? `not listening on saved port ${cfg.port}` : "not configured"}`);
   console.log(`    Transport: ${transportName(cfg.transport)}`);
   console.log(`    Tailscale: ${report.tailscale.connected ? report.tailscale.detail : `${report.tailscale.detail} ${report.tailscale.remediation}`}`);
+  if (report.tailscale.connected) {
+    console.log(`    MagicDNS: ${report.tailscale.magicDnsEnabled ? "enabled" : "disabled — enable it in the Tailscale admin console under DNS"}`);
+  }
   console.log(`    Public address: ${cfg.publicUrl || "not configured"}`);
   console.log(`    Origin verification: ${report.originMessage}`);
   if (report.originReachable !== null) {

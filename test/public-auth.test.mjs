@@ -95,3 +95,19 @@ test("authenticated iOS and Android requests get their exact install guidance", 
   assert.match(androidBody, /Install app/);
   assert.match(androidBody, /beforeinstallprompt/);
 });
+
+test("the authenticated app exposes only providers that passed CLI and login preflight", async () => {
+  resetAuthRateLimits();
+  configureServer({ host: "127.0.0.1", port: 0, token: TOKEN, usableProviders: ["claude"] });
+  const auth = { authorization: `Bearer ${TOKEN}` };
+  const shell = await request("/", { headers: auth });
+
+  assert.equal(shell.statusCode, 200);
+  assert.match(shell.body, /const AVAILABLE_PROVIDER_NAMES = \["claude"\]/);
+  assert.match(shell.body, /Object\.fromEntries\(AVAILABLE_PROVIDER_NAMES/);
+  assert.match(shell.body, /button\.style\.display = PROVIDER_LABELS\[button\.dataset\.provider\]/);
+
+  const deadCodex = await request("/api/models?provider=codex", { headers: auth });
+  assert.equal(deadCodex.statusCode, 400);
+  assert.match(deadCodex.body, /unknown provider: codex/);
+});

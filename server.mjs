@@ -41,6 +41,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 let HOST = "127.0.0.1";
 let PORT = 0;
 let TOKEN = "";
+let USABLE_PROVIDER_NAMES = new Set(["codex", "claude", "grok"]);
 const COOKIE_NAME = "cxp_session";
 const APP_HOME = remoteAgentsHome();
 const AUTH_WINDOW_MS = 60_000;
@@ -687,6 +688,10 @@ const providers = {
   grok: new GrokProvider(makeEmit("grok")),
 };
 
+function usableProviderEntries() {
+  return Object.entries(providers).filter(([name]) => USABLE_PROVIDER_NAMES.has(name));
+}
+
 function readCodexThreadSettings(threadId) {
   const database = readCodexDbThreadSettings(threadId);
   const rolloutSettings = readCodexRolloutThreadSettings(findRollout(threadId));
@@ -712,7 +717,8 @@ threadSettings = new ThreadSettingsService({
 });
 
 function pickProvider(name) {
-  return providers[name || "codex"] ?? null;
+  const selected = name || "codex";
+  return USABLE_PROVIDER_NAMES.has(selected) ? providers[selected] ?? null : null;
 }
 
 // ---------- http helpers ----------
@@ -1065,8 +1071,10 @@ const routes = {
 
   "GET /api/threads/recent": async (_req, res, url) => {
     const search = url.searchParams.get("search");
-    const cursorState = decodeRecentCursor(url.searchParams.get("cursor"));
-    const entries = Object.entries(providers).filter(([name]) => cursorState[name] !== false && !recentProviderUnavailable(cursorState[name]));
+    const decodedCursor = decodeRecentCursor(url.searchParams.get("cursor"));
+    const providerEntries = usableProviderEntries();
+    const cursorState = Object.fromEntries(providerEntries.map(([name]) => [name, decodedCursor[name]]));
+    const entries = providerEntries.filter(([name]) => cursorState[name] !== false && !recentProviderUnavailable(cursorState[name]));
     const settled = await Promise.allSettled(entries.map(([name, p]) => listThreadsWithState(p, {
       search,
       cursor: typeof cursorState[name] === "string" ? cursorState[name] : null,
@@ -1463,6 +1471,10 @@ export async function handleRequest(req, res) {
       return json(res, 403, { error: "loopback only" });
     }
 
+    if (!USABLE_PROVIDER_NAMES.has("claude")) {
+      return json(res, 404, { error: "not found" });
+    }
+
     try {
       const body = await readBody(req);
       const result = await providers.claude.handleHookRequest(body);
@@ -1506,7 +1518,7 @@ export async function handleRequest(req, res) {
 
     clearAuthFailures(req);
 
-    const body = renderIndexHtml(req.headers["user-agent"] ?? "");
+    const body = renderIndexHtml(req.headers["user-agent"] ?? "", [...USABLE_PROVIDER_NAMES]);
     res.writeHead(200, {
       "content-type": "text/html; charset=utf-8",
       "referrer-policy": "no-referrer",
@@ -1587,7 +1599,7 @@ const server = createServer(handleRequest);
 
 // Start the bridge. Resolves once listening. Caller owns host/port/token
 // resolution and any user-facing output (pairing URL, QR).
-export function configureServer({ host = "0.0.0.0", port = 0, token } = {}) {
+export function configureServer({ host = "0.0.0.0", port = 0, token, usableProviders } = {}) {
   if (typeof token !== "string" || token.length < 16) {
     throw new Error("A pairing token of at least 16 characters is required");
   }
@@ -1595,6 +1607,13 @@ export function configureServer({ host = "0.0.0.0", port = 0, token } = {}) {
   HOST = host;
   PORT = Number(port);
   TOKEN = token;
+
+  const names = usableProviders == null ? Object.keys(providers) : [...new Set(usableProviders)];
+  const unknown = names.filter((name) => !providers[name]);
+  if (unknown.length) {
+    throw new Error(`Unknown usable provider: ${unknown.join(", ")}`);
+  }
+  USABLE_PROVIDER_NAMES = new Set(names);
 }
 
 export function startServer(options = {}) {
@@ -1608,7 +1627,7 @@ export function startServer(options = {}) {
   watch.start(emitExternal);
   setInterval(refreshInterest, 30000).unref?.();
 
-  for (const p of Object.values(providers)) {
+  for (const [, p] of usableProviderEntries()) {
     Promise.resolve(p.init()).catch((e) => console.error(`provider ${p.name} init failed:`, e));
   }
 
@@ -1617,7 +1636,7 @@ export function startServer(options = {}) {
     server.listen(PORT, HOST, () => {
       PORT = server.address().port;
 
-      for (const p of Object.values(providers)) {
+      for (const [, p] of usableProviderEntries()) {
         p.setEndpoint?.({ host: HOST, port: PORT });
       }
 

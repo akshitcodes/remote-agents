@@ -9,7 +9,9 @@ import {
   providerPreflight,
   rememberTransport,
   resolveConfig,
+  runTailscaleSetupCommand,
   tailscalePreflight,
+  configureTailscale,
   verifyCloudflareEntry,
   verifyHttpsApp,
 } from "../bin/codex-phone.mjs";
@@ -20,9 +22,9 @@ function tempDir(t, prefix) {
   return dir;
 }
 
-function fakeCommand(t, body) {
+function fakeCommand(t, body, name = "command") {
   const dir = tempDir(t, "remote-agents-command-");
-  const file = join(dir, "command");
+  const file = join(dir, name);
   writeFileSync(file, `#!/bin/sh\n${body}\n`);
   chmodSync(file, 0o755);
   return file;
@@ -68,9 +70,9 @@ test("HTTPS verification tolerates a slow first attempt and requires the authent
   assert.match(wrongApp.message, /not the authenticated Remote Agents app/);
 });
 
-test("Tailscale preflight parses JSON even when a warning line comes first", (t) => {
+test("Tailscale preflight parses JSON and verifies MagicDNS even when a warning line comes first", (t) => {
   const previous = process.env.REMOTE_AGENTS_TAILSCALE_BIN;
-  process.env.REMOTE_AGENTS_TAILSCALE_BIN = fakeCommand(t, `printf '%s\\n' 'version mismatch warning' '{"BackendState":"Running","Self":{"DNSName":"mac.example.ts.net."}}'`);
+  process.env.REMOTE_AGENTS_TAILSCALE_BIN = fakeCommand(t, `printf '%s\\n' 'version mismatch warning' '{"BackendState":"Running","Self":{"DNSName":"mac.example.ts.net."},"CurrentTailnet":{"MagicDNSEnabled":true}}'`);
   t.after(() => {
     if (previous === undefined) { delete process.env.REMOTE_AGENTS_TAILSCALE_BIN; } else { process.env.REMOTE_AGENTS_TAILSCALE_BIN = previous; }
   });
@@ -81,8 +83,65 @@ test("Tailscale preflight parses JSON even when a warning line comes first", (t)
     state: "connected",
     detail: "connected as mac.example.ts.net",
     dnsName: "mac.example.ts.net",
+    magicDnsEnabled: true,
     bin: process.env.REMOTE_AGENTS_TAILSCALE_BIN,
   });
+});
+
+test("MagicDNS disabled is reported before changing Funnel state", async (t) => {
+  const previous = process.env.REMOTE_AGENTS_TAILSCALE_BIN;
+  process.env.REMOTE_AGENTS_TAILSCALE_BIN = fakeCommand(t, `printf '%s\\n' '{"BackendState":"Running","Self":{"DNSName":"mac.example.ts.net."},"CurrentTailnet":{"MagicDNSEnabled":false}}'`);
+  t.after(() => {
+    if (previous === undefined) { delete process.env.REMOTE_AGENTS_TAILSCALE_BIN; } else { process.env.REMOTE_AGENTS_TAILSCALE_BIN = previous; }
+  });
+  let configured = false;
+  const result = await configureTailscale({ port: 9440, token: "x".repeat(43) }, {
+    commandRunner: async () => { configured = true; return { status: 0 }; },
+  });
+
+  assert.equal(configured, false);
+  assert.equal(result.state, "magic_dns_disabled");
+  assert.match(result.detail, /MagicDNS is disabled/);
+  assert.match(result.remediation, /admin console.*DNS.*enable MagicDNS/i);
+});
+
+test("first-use Funnel waits for browser approval and times out actionably", async (t) => {
+  const finishes = fakeCommand(t, `node -e 'setTimeout(() => {}, 30)'`);
+  const started = Date.now();
+  let waitOutput = "";
+  const patient = await runTailscaleSetupCommand(finishes, [], {
+    timeoutMs: 3000,
+    waitNoticeMs: 50,
+    writeStdout: (chunk) => { waitOutput += chunk; },
+    writeStderr: () => {},
+  });
+  assert.equal(patient.status, 0);
+  assert.equal(patient.timedOut, false);
+  assert.ok(Date.now() - started >= 20, "the CLI waits for the approval command instead of treating it as hung");
+  assert.match(waitOutput, /Still waiting for Tailscale.*Funnel opened an approval tab/);
+
+  const slow = fakeCommand(t, `node -e 'setTimeout(() => {}, 200)'`);
+  const completed = await runTailscaleSetupCommand(slow, [], {
+    timeoutMs: 10,
+    writeStdout: () => {},
+    writeStderr: () => {},
+  });
+  assert.equal(completed.timedOut, true);
+
+  const previous = process.env.REMOTE_AGENTS_TAILSCALE_BIN;
+  process.env.REMOTE_AGENTS_TAILSCALE_BIN = fakeCommand(t, `printf '%s\\n' '{"BackendState":"Running","Self":{"DNSName":"mac.example.ts.net."},"CurrentTailnet":{"MagicDNSEnabled":true}}'`);
+  t.after(() => {
+    if (previous === undefined) { delete process.env.REMOTE_AGENTS_TAILSCALE_BIN; } else { process.env.REMOTE_AGENTS_TAILSCALE_BIN = previous; }
+  });
+
+  const result = await configureTailscale({ port: 9441, token: "x".repeat(43) }, {
+    approvalTimeoutMs: 25,
+    commandRunner: async (_bin, _args, options) => ({ status: null, timedOut: true, timeoutMs: options.timeoutMs }),
+  });
+  assert.equal(result.state, "funnel_approval_timeout");
+  assert.match(result.detail, /25 milliseconds|1 seconds|within 1 seconds/i);
+  assert.match(result.remediation, /approval tab.*approve enabling Funnel.*re-run/i);
+  assert.match(result.remediation, /No phone QR/);
 });
 
 test("Tailscale stopped is distinct from not installed and has exact recovery", (t) => {
@@ -111,6 +170,26 @@ test("provider preflight reports every missing CLI and refuses to invent readine
     ["codex", false, false],
     ["claude", false, false],
     ["grok", false, false],
+  ]);
+  assert.deepEqual(result.rows.map((row) => [row.name, row.installCommand, row.loginCommand]), [
+    ["codex", "curl -fsSL https://chatgpt.com/codex/install.sh | sh", "codex login"],
+    ["claude", "curl -fsSL https://claude.ai/install.sh | bash", "claude auth login"],
+    ["grok", "curl -fsSL https://x.ai/cli/install.sh | bash", "grok login"],
+  ]);
+});
+
+test("a Claude-only machine marks only Claude usable", (t) => {
+  const previousPath = process.env.PATH;
+  const claude = fakeCommand(t, `printf '%s\\n' '{"loggedIn":true}'`, "claude");
+  process.env.PATH = `${join(claude, "..")}:/usr/bin:/bin`;
+  t.after(() => { process.env.PATH = previousPath; });
+
+  const result = providerPreflight({ codexBinary: "/definitely/missing/codex" });
+  assert.deepEqual(result.usable.map((row) => row.name), ["claude"]);
+  assert.deepEqual(result.rows.map((row) => [row.name, row.usable]), [
+    ["codex", false],
+    ["claude", true],
+    ["grok", false],
   ]);
 });
 

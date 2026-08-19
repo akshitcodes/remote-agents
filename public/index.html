@@ -474,9 +474,9 @@
   <aside id="listView" aria-label="Agent sessions">
     <div id="searchWrap">
       <div class="seg" id="providerSeg">
-        <button data-provider="codex" class="on" aria-pressed="true">Codex</button>
-        <button data-provider="claude" aria-pressed="false">Claude</button>
-        <button data-provider="grok" aria-pressed="false">Grok</button>
+        <button data-provider="codex" class="on" aria-pressed="true" style="display:none">Codex</button>
+        <button data-provider="claude" aria-pressed="false" style="display:none">Claude</button>
+        <button data-provider="grok" aria-pressed="false" style="display:none">Grok</button>
       </div>
       <input id="search" type="search" placeholder="Search sessions…" autocomplete="off">
     </div>
@@ -595,7 +595,9 @@ const state = {
   expandedSubagents: new Set(),
 };
 
-const PROVIDER_LABELS = { codex: "Codex", claude: "Claude", grok: "Grok" };
+const AVAILABLE_PROVIDER_NAMES = /* USABLE_PROVIDERS */ ["codex", "claude", "grok"];
+const ALL_PROVIDER_LABELS = { codex: "Codex", claude: "Claude", grok: "Grok" };
+const PROVIDER_LABELS = Object.fromEntries(AVAILABLE_PROVIDER_NAMES.map((name) => [name, ALL_PROVIDER_LABELS[name]]).filter(([, label]) => label));
 const PROVIDER_ICONS = { codex: "/icons/provider-codex.svg", claude: "/icons/provider-claude.svg", grok: "/icons/provider-grok.svg" };
 
 function providerLabel() { return PROVIDER_LABELS[state.provider] || "Codex"; }
@@ -2471,7 +2473,7 @@ function backToList() {
 }
 
 async function switchProvider(name) {
-  if (name === state.provider) { return; }
+  if (!PROVIDER_LABELS[name] || name === state.provider) { return; }
 
   state.provider = name;
   persistPrefs();
@@ -4198,6 +4200,11 @@ async function openNewSheet(provider = state.provider) {
 }
 
 function openNewSession() {
+  if (!AVAILABLE_PROVIDER_NAMES.length) {
+    openSheet('<h2>No agent is ready</h2><div class="hint">Install and sign in to a provider on the Mac, then restart Remote Agents.</div>');
+    return;
+  }
+
   if (state.active) {
     // The desktop New button starts another task with the open task's provider;
     // this keeps its exact validated catalog intact even if the sidebar is
@@ -5161,9 +5168,16 @@ window.addEventListener("offline", () => setOfflineNote(true, "phone"));
 function initProvider() {
   const prefs = loadPrefs();
 
+  state.provider = AVAILABLE_PROVIDER_NAMES[0] || null;
   if (prefs.provider && PROVIDER_LABELS[prefs.provider]) { state.provider = prefs.provider; }
   if (["recent", "provider"].includes(prefs.listView)) { state.listView = prefs.listView; }
   state.sidebarCollapsed = prefs.sidebarCollapsed === true;
+
+  $("providerSeg").querySelectorAll("[data-provider]").forEach((button) => {
+    button.style.display = PROVIDER_LABELS[button.dataset.provider] ? "" : "none";
+  });
+  $("newBtn").disabled = !AVAILABLE_PROVIDER_NAMES.length;
+  $("newBtn").title = AVAILABLE_PROVIDER_NAMES.length ? "New session" : "No signed-in provider is available";
 
   syncProviderSeg();
   syncSidebarToggle();
@@ -5185,7 +5199,7 @@ try { localStorage.removeItem("cxp_thread_prefs"); } catch {}
 initProvider();
 state.failedSends = loadFailedSends();
 connectEvents();
-initModels();
+if (state.provider) { initModels(); }
 Promise.all([loadNotificationRules(), loadThreads(false)]).then(() => {
   openLinkedThread().catch(() => {});
 });

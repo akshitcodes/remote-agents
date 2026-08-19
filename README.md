@@ -28,9 +28,13 @@ the choice is remembered, so later runs do not ask again. It
 generates a private per-install token, chooses and remembers a free port,
 checks all three provider CLIs, installs a per-user macOS LaunchAgent, configures
 Tailscale Funnel, and verifies that the authenticated app answers through the
-stable HTTPS name. First-time certificate issuance can take about 30 seconds, so
-the verifier waits up to 75 seconds and says what it is waiting for. Only then
-does it print the phone pairing QR.
+stable HTTPS name. On a tailnet that has never used Funnel, Tailscale opens a
+browser approval page; approve enabling Funnel in that tab while setup keeps
+waiting. Funnel is available on every Tailscale plan, including free. Setup
+also verifies that MagicDNS is enabled and names that setting specifically if
+it is not. After approval, the first HTTPS request can take about 28 seconds
+while Tailscale issues the certificate, so the verifier waits up to 75 seconds.
+Only then does it print the phone pairing QR.
 
 If Tailscale is missing, signed out, or its HTTPS URL cannot be verified, setup
 prints the exact recovery steps and no phone QR. It never substitutes a LAN HTTP
@@ -121,7 +125,21 @@ notifications again.
 Tailscale connection state, saved/verified public address, and readiness of
 Codex, Claude, and Grok. A missing provider does not block setup when another is
 ready. If none is installed and signed in, setup stops before installing a
-background service.
+background service. Missing or signed-out providers are never installed or
+authenticated automatically; the CLI prints both commands for each one:
+
+```text
+Codex  install: curl -fsSL https://chatgpt.com/codex/install.sh | sh
+       sign in: codex login
+Claude install: curl -fsSL https://claude.ai/install.sh | bash
+       sign in: claude auth login
+Grok   install: curl -fsSL https://x.ai/cli/install.sh | bash
+       sign in: grok login
+```
+
+The web app exposes only providers that passed both checks when the bridge
+started. After installing or signing in to another CLI, restart Remote Agents
+to add it to the provider picker.
 
 ## Configuration and files
 

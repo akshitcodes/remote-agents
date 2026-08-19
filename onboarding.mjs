@@ -31,6 +31,9 @@ export function onboardingHtml(userAgent = "") {
   </section>`;
 }
 
-export function renderIndexHtml(userAgent = "") {
-  return indexHtml.replace("<!-- PLATFORM_ONBOARDING -->", onboardingHtml(userAgent));
+export function renderIndexHtml(userAgent = "", usableProviders = ["codex", "claude", "grok"]) {
+  const allowed = [...new Set(usableProviders)].filter((name) => ["codex", "claude", "grok"].includes(name));
+  return indexHtml
+    .replace("<!-- PLATFORM_ONBOARDING -->", onboardingHtml(userAgent))
+    .replace('/* USABLE_PROVIDERS */ ["codex", "claude", "grok"]', JSON.stringify(allowed));
 }
