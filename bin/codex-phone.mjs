@@ -14,7 +14,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { connect, createServer as createNetServer } from "node:net";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, rmSync, realpathSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -1184,7 +1184,21 @@ async function main() {
   }
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === CLI_PATH) {
+// npm install -g puts a SYMLINK at bin/<name>, so process.argv[1] is the link,
+// not this file. resolve() does not follow symlinks, so comparing the two paths
+// directly made main() never run for an installed package: the CLI printed
+// nothing and exited 0, which reads as "broken" rather than "misconfigured".
+function isThisModuleMain(entry) {
+  if (!entry) { return false; }
+
+  try {
+    return realpathSync(resolve(entry)) === realpathSync(CLI_PATH);
+  } catch {
+    return resolve(entry) === CLI_PATH;
+  }
+}
+
+if (isThisModuleMain(process.argv[1])) {
   main().catch((e) => {
     console.error(`\n  Error: ${e?.message ?? e}\n`);
     process.exit(1);
