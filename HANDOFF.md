@@ -16,6 +16,46 @@ It reads each CLI's session files from disk (`~/.codex/sessions`,
 - Deploy: client changes need a **PWA reload**; server changes need
   `launchctl kickstart -k gui/501/com.codexphone.server`.
 
+## Control ownership update — 2026-08-24
+
+The browser must use `GET /api/thread`'s `runtime.source` and `runtime.turnId` as
+the ownership authority. Reopening a bridge-owned turn restores its real turn
+ID, so Stop and Codex `turn/steer` continue to work; a stale turn ID is rejected
+instead of steering a replacement turn.
+
+A Codex Desktop-owned turn cannot be steered or interrupted from this separate
+bridge app-server. Controlled two-process tests confirmed that boundary. Such a
+follow-up uses Codex's native `thread/queue/*` API instead: stable client message
+IDs prevent replay, queued messages survive browser/bridge restart, and the UI
+can edit or cancel them before Codex consumes them. Queue ownership is never
+inferred from a failed steer alone; `/api/thread/runtime` is rechecked after a
+short settle at the turn-end boundary. If ownership cannot be confirmed, the UI
+stores the message locally and explicitly leaves it unsent until sync recovers.
+
+Grok keeps its provider-specific owned behavior: “Interrupt & send” waits for
+confirmed ACP cancellation before dispatch. Claude keeps its owned live-steer
+and interrupt paths. External turns for either provider are never process-killed
+or force-taken. Planned deploys remain gated on zero bridge-owned live turns.
+
+The deterministic suite is currently 162/162, and a real foreign-writer Codex
+test passed native queue add/list/edit/delete with cleanup.
+
+Thread ordering is also a live invariant in both list modes: provider/SSE run
+events rerank the visible list immediately, running tasks form the leading
+group, a newly-started task reveals that group at scroll position zero, and
+every async list response is reranked again before paint so stale fetch order
+cannot undo it. Portable onboarding refreshes `public/index.html` on navigation
+while retaining the last complete shell if a package upgrade is replacing files;
+after the first rollout containing this change, future UI-only fixes need a page
+reload but no bridge restart.
+
+Account-wide usage limits now use provider-native sources with private
+last-known snapshots, so a transient refresh failure does not blank the Usage
+sheet. Notification titles are thread-only and response previews retain the
+beginning of the final answer instead of a rolling tail. The operating system's
+PWA source label (for example, “from Agents”) is platform attribution and cannot
+be removed from the Web Push payload.
+
 ## Current foundation — 2026-08-11 (supersedes older in-flight notes below)
 
 **Deployed 2026-08-11 13:01 IST.** LaunchAgent PID changed to `18801`; port

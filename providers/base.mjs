@@ -12,6 +12,10 @@
 //   newThread({ cwd, model })                  -> { thread: { id, ... } }
 //   send(body)                                 stream events via this.emit()
 //   interrupt({ threadId, turnId })
+//   queue({ threadId, text, requestId })        persist a provider-native follow-up when supported
+//   queueList({ threadId })                     -> { data:[QueuedSubmission] }
+//   queueUpdate({ threadId, queuedSubmissionId, text })
+//   queueDelete({ threadId, queuedSubmissionId })
 //   models()                                   -> { data:[Model] }
 //   usage({ refresh })                         -> { account, rateLimits, usage }  (may be partial)
 //   projects()                                 -> { projects:[{ path, name, count, lastUsed }] }
@@ -51,6 +55,26 @@ export class BaseProvider {
 
   async interrupt() {
     return { ok: true };
+  }
+
+  activeTurnId() {
+    return null;
+  }
+
+  async queue() {
+    throw Object.assign(new Error("native queue not supported"), { status: 409, code: "queue_unsupported" });
+  }
+
+  async queueList() {
+    throw Object.assign(new Error("native queue not supported"), { status: 409, code: "queue_unsupported" });
+  }
+
+  async queueUpdate() {
+    throw Object.assign(new Error("native queue not supported"), { status: 409, code: "queue_unsupported" });
+  }
+
+  async queueDelete() {
+    throw Object.assign(new Error("native queue not supported"), { status: 409, code: "queue_unsupported" });
   }
 
   async models() {

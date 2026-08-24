@@ -254,3 +254,18 @@ test("the supervised service starts only the local bridge and cannot race setup 
   assert.match(source, /<string>serve<\/string><string>--service<\/string>/);
   assert.match(source, /ExecStart=\$\{stableNodePath\(\)\} \$\{CLI_PATH\} serve --service/);
 });
+
+test("the published package allowlist includes current and portable runtime modules", () => {
+  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const required = [
+    "usage-state.mjs",
+    "notification-content.mjs",
+    "provider-detect.mjs",
+    "config.mjs",
+    "onboarding.mjs",
+  ];
+
+  for (const file of required) {
+    assert.ok(pkg.files.includes(file), `${file} must be included in the npm package`);
+  }
+});

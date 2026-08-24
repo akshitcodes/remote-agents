@@ -6,7 +6,24 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const moduleDir = dirname(fileURLToPath(import.meta.url));
-const indexHtml = readFileSync(join(moduleDir, "public", "index.html"), "utf8");
+const indexHtmlPath = join(moduleDir, "public", "index.html");
+
+export function createIndexShellReader(path, read = readFileSync) {
+  let lastGood = read(path, "utf8");
+
+  return () => {
+    try {
+      lastGood = read(path, "utf8");
+    } catch {
+      // An npm upgrade may replace package files while an owned turn is live.
+      // Keep serving the last complete shell instead of crashing the bridge.
+    }
+
+    return lastGood;
+  };
+}
+
+const readIndexShell = createIndexShellReader(indexHtmlPath);
 
 export function onboardingHtml(userAgent = "") {
   const ios = /iPad|iPhone|iPod/.test(userAgent) || (/Macintosh/.test(userAgent) && /Mobile/.test(userAgent));
@@ -33,7 +50,10 @@ export function onboardingHtml(userAgent = "") {
 
 export function renderIndexHtml(userAgent = "", usableProviders = ["codex", "claude", "grok"]) {
   const allowed = [...new Set(usableProviders)].filter((name) => ["codex", "claude", "grok"].includes(name));
-  return indexHtml
+  // UI-only updates must not require restarting the bridge, because a restart
+  // can terminate a turn the bridge owns. Inject onboarding/provider state into
+  // a fresh shell on each navigation instead of caching it at process startup.
+  return readIndexShell()
     .replace("<!-- PLATFORM_ONBOARDING -->", onboardingHtml(userAgent))
     .replace('/* USABLE_PROVIDERS */ ["codex", "claude", "grok"]', JSON.stringify(allowed));
 }

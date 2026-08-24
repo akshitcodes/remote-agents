@@ -28,6 +28,8 @@
     "provider-detect.mjs",
     "config.mjs",
     "onboarding.mjs",
+    "usage-state.mjs",
+    "notification-content.mjs",
     "providers/",
     "public/",
     "README.md"

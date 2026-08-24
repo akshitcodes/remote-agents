@@ -25,6 +25,8 @@ import * as push from "./push.mjs";
 import { SendLedger } from "./send-ledger.mjs";
 import { ThreadSubscriptions } from "./thread-subscriptions.mjs";
 import { pruneAttachments, readAttachment, resolveAttachmentIds, storeAttachment } from "./attachments.mjs";
+import { UsageStateStore } from "./usage-state.mjs";
+import { captureReplyStart, notificationBody, notificationTitle } from "./notification-content.mjs";
 import {
   readClaudeTranscriptThreadSettings,
   readCodexDbThreadSettings,
@@ -50,6 +52,7 @@ const AUTH_MAX_BACKOFF_SECONDS = 60;
 const authFailures = new Map();
 const threadSubscriptions = new ThreadSubscriptions({ file: join(APP_HOME, "thread-subscriptions.json") });
 const threadSettingsStore = new ThreadSettingsStore({ file: join(APP_HOME, "thread-settings.json") });
+const usageState = new UsageStateStore({ file: join(APP_HOME, "usage-state.json") });
 let threadSettings = null;
 
 // PWA assets available after the pairing cookie is established.
@@ -131,6 +134,13 @@ function trackActiveTurn(event, data) {
 function broadcast(event, data) {
   trackActiveTurn(event, data);
   trackForPush(event, data);
+
+  if (event === "notify" && data?.method === "account/rateLimits/updated" && data.provider) {
+    try { usageState.merge(data.provider, { rateLimits: data.params?.rateLimits }); } catch (error) {
+      console.error("failed to persist provider usage state:", error);
+    }
+  }
+
   const frame = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 
   for (const res of sseClients) {
@@ -145,7 +155,6 @@ function broadcast(event, data) {
 // the last agent message per thread to use as the notification body, and the
 // thread's title from the last list response for the headline.
 
-const PROVIDER_LABELS = { codex: "Codex", claude: "Claude", grok: "Grok" };
 const lastAgentText = new Map(); // "provider:threadId" -> most recent reply text
 const threadTitles = new Map(); // "provider:threadId" -> name/preview
 const adoptedIds = new Map(); // "provider:draftId" -> the real session id
@@ -543,12 +552,12 @@ function trackForPush(event, data) {
   }
 
   if (method === "item/agentMessage/delta") {
-    lastAgentText.set(key, ((lastAgentText.get(key) ?? "") + (params.delta ?? "")).slice(-400));
+    lastAgentText.set(key, captureReplyStart(lastAgentText.get(key), params.delta));
     return;
   }
 
   if (method === "item/completed" && params.item?.type === "agentMessage") {
-    lastAgentText.set(key, String(params.item.text ?? "").slice(-400));
+    lastAgentText.set(key, captureReplyStart("", params.item.text));
     return;
   }
 
@@ -578,7 +587,6 @@ function trackForPush(event, data) {
 
   recentlyPushed.set(dedupe, now);
 
-  const label = PROVIDER_LABELS[provider] || "Agent";
   const realId = adoptedIds.get(key) || threadId;
 
   // Already reading it? Then it is not unread — say nothing.
@@ -587,10 +595,7 @@ function trackForPush(event, data) {
     return;
   }
 
-  const reply = (lastAgentText.get(key) ?? "").trim().replace(/\s+/g, " ");
-  const body = failed
-    ? (errorText || "Turn failed")
-    : (reply.slice(0, 180) || "Turn finished");
+  const body = notificationBody(lastAgentText.get(key), { failed, errorText });
 
   lastAgentText.delete(key);
 
@@ -603,7 +608,7 @@ function trackForPush(event, data) {
     }
 
     await push.send({
-      title: `${label}${failed ? " · failed" : " finished"}${title ? " · " + title.slice(0, 60) : ""}`,
+      title: notificationTitle(title),
       body,
       threadId: realId,
       provider: provider || "codex",
@@ -658,11 +663,10 @@ async function trackExternalCompletion({ provider = "codex", threadId, terminalI
   if (!title) { title = await lookupThreadTitle(provider, threadId); }
 
   const failed = terminalOutcome === "failed";
-  const body = String(reply ?? "").trim().replace(/\s+/g, " ").slice(0, 180) || (failed ? "Turn failed" : "Turn finished");
-  const label = PROVIDER_LABELS[provider] || "Agent";
+  const body = notificationBody(reply, { failed });
 
   await push.send({
-    title: `${label}${failed ? " · failed" : " finished"}${title ? " · " + title.slice(0, 60) : ""}`,
+    title: notificationTitle(title),
     body,
     threadId,
     provider,
@@ -874,6 +878,18 @@ function providerFromBody(res, body) {
   }
 
   return p;
+}
+
+function threadRuntime(provider, threadId) {
+  const owned = activeTurns.has(turnKey(provider.name, threadId));
+  const observed = watch.runningDetails(provider.name, [threadId])[threadId];
+
+  return {
+    running: owned || !!observed?.running,
+    confidence: owned ? "bridge" : (observed?.confidence ?? "unknown"),
+    source: owned ? "bridge" : "session_file",
+    turnId: owned ? (provider.activeTurnId?.(threadId) ?? null) : null,
+  };
 }
 
 // Read a file for the viewer, scoped to the thread's project. "Project" means
@@ -1210,13 +1226,7 @@ const routes = {
     const id = url.searchParams.get("id");
     const full = await p.readThread(id);
     const before = Number(url.searchParams.get("before")) || null;
-    const owned = activeTurns.has(turnKey(p.name, id));
-    const observed = watch.runningDetails(p.name, [id])[id];
-    const runtime = {
-      running: owned || !!observed?.running,
-      confidence: owned ? "bridge" : (observed?.confidence ?? "unknown"),
-      source: owned ? "bridge" : "session_file",
-    };
+    const runtime = threadRuntime(p, id);
 
     // Seed the delta baseline from exactly what this client is being given, so
     // the next change is measured against it. Paging backwards is not a new
@@ -1226,6 +1236,20 @@ const routes = {
       : { generation: snapshots.get(metaKey(p.name, id))?.generation ?? null, revision: snapshots.get(metaKey(p.name, id))?.revision ?? 0 };
 
     json(res, 200, { ...tailOfThread(full, before), ...cursor, runtime });
+  },
+
+  "GET /api/thread/runtime": async (req, res, url) => {
+    const p = providerFromQuery(res, url);
+
+    if (!p) { return; }
+
+    const threadId = url.searchParams.get("threadId");
+
+    if (!threadId) {
+      return json(res, 400, { error: "threadId required", code: "invalid_runtime_request" });
+    }
+
+    json(res, 200, { runtime: threadRuntime(p, threadId) });
   },
 
   "GET /api/models": async (req, res, url) => {
@@ -1279,7 +1303,20 @@ const routes = {
       return;
     }
 
-    json(res, 200, await p.usage({ refresh: url.searchParams.get("refresh") === "1" }));
+    try {
+      const live = await p.usage({ refresh: url.searchParams.get("refresh") === "1" });
+      json(res, 200, usageState.merge(p.name, live));
+    } catch (error) {
+      const fallback = usageState.merge(p.name, {});
+
+      if (fallback.rateLimits) {
+        fallback._meta.refreshError = true;
+        fallback._meta.refreshErrorMessage = String(error?.message ?? error);
+        return json(res, 200, fallback);
+      }
+
+      throw error;
+    }
   },
 
   "GET /api/approvals": async (req, res, url) => {
@@ -1381,6 +1418,51 @@ const routes = {
     }
 
     json(res, 200, await sendOnce(p, body, "steer"));
+  },
+
+  "POST /api/queue": async (req, res) => {
+    const body = await readBody(req);
+    const p = providerFromBody(res, body);
+
+    if (!p) { return; }
+
+    json(res, 200, await p.queue({
+      ...body,
+      attachments: resolveAttachmentIds(body?.attachmentIds ?? []),
+    }));
+  },
+
+  "GET /api/queue": async (req, res, url) => {
+    const p = providerFromQuery(res, url);
+
+    if (!p) { return; }
+
+    json(res, 200, await p.queueList({
+      threadId: url.searchParams.get("threadId"),
+      cursor: url.searchParams.get("cursor") || null,
+      limit: Number(url.searchParams.get("limit")) || 100,
+    }));
+  },
+
+  "POST /api/queue/update": async (req, res) => {
+    const body = await readBody(req);
+    const p = providerFromBody(res, body);
+
+    if (!p) { return; }
+
+    json(res, 200, await p.queueUpdate({
+      ...body,
+      attachments: resolveAttachmentIds(body?.attachmentIds ?? []),
+    }));
+  },
+
+  "POST /api/queue/delete": async (req, res) => {
+    const body = await readBody(req);
+    const p = providerFromBody(res, body);
+
+    if (!p) { return; }
+
+    json(res, 200, await p.queueDelete(body));
   },
 
   "POST /api/interrupt": async (req, res) => {

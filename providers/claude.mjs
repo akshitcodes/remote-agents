@@ -16,15 +16,16 @@
 // (Bash + file edits), calls back to the bridge and blocks until the phone
 // answers — surfacing the same approval banner Codex uses.
 
-import { spawn } from "node:child_process";
-import { augmentedPath, providerBinary } from "../provider-detect.mjs";
+import { execFile, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 
 import { createReadStream, readdirSync, statSync, openSync, readSync, closeSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
+import { promisify } from "node:util";
 
+import { augmentedPath, providerBinary } from "../provider-detect.mjs";
 import { BaseProvider, toEpochSec, makeLineReader } from "./base.mjs";
 
 const PROJECTS_DIR = join(homedir(), ".claude", "projects");
@@ -32,6 +33,7 @@ const HEAD_BYTES = 65536; // enough to reach the first user line + cwd
 // Enough to reach the newest ai-title record without reading a whole transcript.
 const TITLE_TAIL_BYTES = 64 * 1024;
 const PAGE_SIZE = 25;
+const execFileAsync = promisify(execFile);
 
 // Bookkeeping line types in the transcript that are not conversation content.
 const CONTENT_TYPES = new Set(["user", "assistant"]);
@@ -386,6 +388,39 @@ function readTailTitle(path, bytes = TITLE_TAIL_BYTES) {
   }
 }
 
+export function claudeSwapUsage(payload) {
+  const active = payload?.active;
+  const usage = active?.usage;
+
+  if (!active || !usage || active.usageStatus === "unavailable") { return null; }
+
+  const window = (value, minutes) => value && typeof value.pct === "number"
+    ? { usedPercent: value.pct, windowDurationMins: minutes, resetsAt: toEpochSec(value.resetsAt) }
+    : null;
+  const primary = window(usage.fiveHour, 300);
+  const secondary = window(usage.sevenDay, 10080);
+
+  if (!primary && !secondary) { return null; }
+
+  return {
+    account: {
+      type: "claude",
+      accountId: active.organizationUuid ?? null,
+      email: active.email ?? null,
+      planType: "Claude",
+      organizationName: active.organizationName ?? null,
+      accountLabel: active.alias || (active.number ? `Account-${active.number}` : null),
+    },
+    rateLimits: {
+      rateLimits: { primary, secondary },
+      fetchedAt: toEpochSec(active.usageFetchedAt),
+      ageSeconds: active.usageAgeSeconds ?? null,
+      totalManagedAccounts: payload.totalManagedAccounts ?? null,
+    },
+    usage: null,
+  };
+}
+
 // Flatten a message.content value (string | block[]) into a block array.
 function toBlocks(content) {
   if (typeof content === "string") {
@@ -513,7 +548,7 @@ export function claudeUserContent(text, attachments = []) {
 }
 
 export class ClaudeProvider extends BaseProvider {
-  constructor(emit, { acceptTimeoutMs = DEFAULT_ACCEPT_TIMEOUT_MS, projectsDir = PROJECTS_DIR } = {}) {
+  constructor(emit, { acceptTimeoutMs = DEFAULT_ACCEPT_TIMEOUT_MS, projectsDir = PROJECTS_DIR, usageCommand = "cswap" } = {}) {
     super(emit, "claude");
 
     // Active sessions: threadId and (once known) native sessionId both point at
@@ -522,6 +557,7 @@ export class ClaudeProvider extends BaseProvider {
     this.sessions = new Map();
     this.acceptTimeoutMs = acceptTimeoutMs;
     this.projectsDir = projectsDir;
+    this.usageCommand = usageCommand;
     this.summaryCache = new Map(); // path -> { mtime, summary }
     this.modelCache = null; // { signature, data }
     this.drafts = new Map(); // draft id -> cwd (recovered on send)
@@ -533,11 +569,6 @@ export class ClaudeProvider extends BaseProvider {
     this.hookSecret = randomBytes(16).toString("hex");
     this.hookPath = null; // temp file, written on setEndpoint
     this.pendingApprovals = new Map(); // id -> { resolve, timer }
-
-    // usage enrichment
-    this.sessionCost = 0; // cumulative $ this server run
-    this.lastUsage = null; // last result.usage
-    this.lastModelUsage = null; // last result.modelUsage
 
     // Idle reaper: drop warm sessions idle > 10 minutes.
     this.reaper = setInterval(() => {
@@ -919,45 +950,42 @@ export class ClaudeProvider extends BaseProvider {
   }
 
   async usage() {
+    let commandError = null;
+    try {
+      const { stdout } = await execFileAsync(this.usageCommand, ["status", "--json"], {
+        timeout: 15000,
+        maxBuffer: 1024 * 1024,
+        env: { ...process.env, PATH: augmentedPath() },
+      });
+      const fromSwap = claudeSwapUsage(JSON.parse(stdout));
+      if (fromSwap) { return fromSwap; }
+    } catch (error) {
+      commandError = error;
+      // claude-swap is optional. Fall back to the last native rate-limit event
+      // observed by this bridge; the server retains the last good snapshot.
+    }
+
     const info = this.lastRateLimit;
-    const primary = info
+    const resetAt = toEpochSec(info?.resetsAt);
+    const primary = info && (!resetAt || resetAt > Date.now() / 1000)
       ? {
           usedPercent: null,
           windowDurationMins: 300,
-          resetsAt: toEpochSec(info.resetsAt),
+          resetsAt: resetAt,
           status: info.status ?? null,
           overageStatus: info.overageStatus ?? null,
           isUsingOverage: info.isUsingOverage ?? null,
         }
       : null;
 
-    // Token totals from the most recent turn's result.usage.
-    let usage = null;
-
-    if (this.lastUsage) {
-      const u = this.lastUsage;
-      const input = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
-      const models = this.lastModelUsage
-        ? Object.entries(this.lastModelUsage).map(([id, m]) => ({
-            model: id,
-            tokens: (m.inputTokens ?? 0) + (m.outputTokens ?? 0),
-            costUSD: m.costUSD ?? null,
-          }))
-        : [];
-      usage = {
-        sessionCostUSD: Math.round(this.sessionCost * 10000) / 10000,
-        lastInputTokens: input,
-        lastOutputTokens: u.output_tokens ?? 0,
-        models,
-      };
-    } else if (this.sessionCost > 0) {
-      usage = { sessionCostUSD: Math.round(this.sessionCost * 10000) / 10000, models: [] };
+    if (!primary && commandError) {
+      throw new Error(`Claude usage check failed: ${commandError.code || commandError.message || "unknown error"}`);
     }
 
     return {
-      account: { type: "chatgpt", email: null, planType: "claude" },
+      account: { type: "claude", email: null, planType: "Claude" },
       rateLimits: primary ? { rateLimits: { primary } } : null,
-      usage,
+      usage: null,
     };
   }
 
@@ -1380,13 +1408,6 @@ export class ClaudeProvider extends BaseProvider {
       }
 
       // Enrich usage(): accumulate spend and remember the last token/model breakdown.
-      if (typeof obj.total_cost_usd === "number") {
-        this.sessionCost += obj.total_cost_usd;
-      }
-
-      this.lastUsage = obj.usage ?? this.lastUsage;
-      this.lastModelUsage = obj.modelUsage ?? this.lastModelUsage;
-
       const failed = obj.subtype && obj.subtype !== "success";
       const error = failed ? claudeTurnError(obj.result ?? obj.subtype) : undefined;
 
