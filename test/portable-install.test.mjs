@@ -159,10 +159,30 @@ test("Tailscale stopped is distinct from not installed and has exact recovery", 
   assert.match(result.remediation, /Open the Tailscale app/);
 });
 
+// Confine provider discovery to a fake machine: the detector also looks in real
+// system directories, so without this these cases pass or fail depending on what
+// the developer running them happens to have installed.
+function confineProviderSearch(t, dirs) {
+  const saved = {
+    PATH: process.env.PATH,
+    DIRS: process.env.REMOTE_AGENTS_BIN_DIRS,
+    APP: process.env.REMOTE_AGENTS_CODEX_APP,
+  };
+
+  process.env.PATH = [...dirs, "/usr/bin", "/bin"].join(":");
+  process.env.REMOTE_AGENTS_BIN_DIRS = dirs.join(":") || "/nonexistent";
+  process.env.REMOTE_AGENTS_CODEX_APP = "/nonexistent/ChatGPT.app/codex";
+
+  t.after(() => {
+    process.env.PATH = saved.PATH;
+    for (const [key, value] of [["REMOTE_AGENTS_BIN_DIRS", saved.DIRS], ["REMOTE_AGENTS_CODEX_APP", saved.APP]]) {
+      if (value === undefined) { delete process.env[key]; } else { process.env[key] = value; }
+    }
+  });
+}
+
 test("provider preflight reports every missing CLI and refuses to invent readiness", (t) => {
-  const previousPath = process.env.PATH;
-  process.env.PATH = tempDir(t, "remote-agents-empty-path-");
-  t.after(() => { process.env.PATH = previousPath; });
+  confineProviderSearch(t, [tempDir(t, "remote-agents-empty-path-")]);
 
   const result = providerPreflight({ codexBinary: "/definitely/missing/codex" });
   assert.equal(result.usable.length, 0);
@@ -179,10 +199,8 @@ test("provider preflight reports every missing CLI and refuses to invent readine
 });
 
 test("a Claude-only machine marks only Claude usable", (t) => {
-  const previousPath = process.env.PATH;
   const claude = fakeCommand(t, `printf '%s\\n' '{"loggedIn":true}'`, "claude");
-  process.env.PATH = `${join(claude, "..")}:/usr/bin:/bin`;
-  t.after(() => { process.env.PATH = previousPath; });
+  confineProviderSearch(t, [join(claude, "..")]);
 
   const result = providerPreflight({ codexBinary: "/definitely/missing/codex" });
   assert.deepEqual(result.usable.map((row) => row.name), ["claude"]);

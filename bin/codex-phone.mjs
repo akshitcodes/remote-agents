@@ -17,32 +17,18 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync, rmSync, realpathSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { createInterface } from "node:readline/promises";
+
+import select, { Separator } from "@inquirer/select";
 import { fileURLToPath } from "node:url";
 
 import { dataPath, readConfig, writeConfig } from "../config.mjs";
+import { augmentedPath, detectProviders, resolvedBinaries, setupBlocker } from "../provider-detect.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = fileURLToPath(import.meta.url);
 const LABEL = "com.remoteagents.bridge";
 const TRANSPORTS = new Set(["funnel", "serve", "cloudflare"]);
 const APP_TAILSCALE = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
-const APP_CODEX = "/Applications/ChatGPT.app/Contents/Resources/codex";
-const PROVIDER_SETUP = {
-  codex: {
-    installCommand: "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
-    loginCommand: "codex login",
-  },
-  claude: {
-    installCommand: "curl -fsSL https://claude.ai/install.sh | bash",
-    loginCommand: "claude auth login",
-  },
-  grok: {
-    installCommand: "curl -fsSL https://x.ai/cli/install.sh | bash",
-    loginCommand: "grok login",
-  },
-};
-
 function normalizeTransport(value) {
   // The portability prototype used `tailscale` to mean private Serve. Preserve
   // that saved choice on upgrade; new installs default to public Funnel.
@@ -244,77 +230,55 @@ export function tailscalePreflight() {
   };
 }
 
-function resolveProviderBinary(configured, candidates) {
-  if (configured) {
-    return configured.includes("/") ? (existsSync(configured) ? configured : null) : (commandExists(configured) ? configured : null);
-  }
-
-  return candidates.find((candidate) => candidate.includes("/") ? existsSync(candidate) : commandExists(candidate)) ?? null;
-}
-
-function providerRow(name, label, bin, command, inspect) {
-  const setup = PROVIDER_SETUP[name];
-
-  if (!bin) {
-    return { name, label, installed: false, authenticated: false, usable: false, detail: "not installed", ...setup };
-  }
-
-  const result = runProbe(bin, command, name === "grok" ? 15000 : 8000);
-  const output = commandOutput(result);
-  const auth = inspect(result, output);
-  return {
-    name,
-    label,
-    path: bin,
-    installed: true,
-    authenticated: auth === true,
-    usable: auth === true,
-    detail: auth === true ? "installed and signed in" : auth || "installed, but sign-in could not be confirmed",
-    ...setup,
-  };
-}
-
 export function providerPreflight(cfg = readConfig()) {
-  const codexBin = resolveProviderBinary(cfg.codexBinary, cfg.codexBinary ? [] : [APP_CODEX, "codex"]);
-  const rows = [
-    providerRow("codex", "Codex", codexBin, ["login", "status"], (result, output) => {
-      if (/not logged in|logged out|sign.?in required/i.test(output)) { return "installed, but not signed in"; }
-      return result.status === 0 && /logged in|authenticated/i.test(output) ? true : "installed, but sign-in could not be confirmed";
-    }),
-    providerRow("claude", "Claude", resolveProviderBinary(null, ["claude"]), ["auth", "status"], (result, output) => {
-      const parsed = noisyJson(result.stdout) ?? noisyJson(result.stderr);
-      if (parsed?.loggedIn === true) { return true; }
-      if (parsed?.loggedIn === false || /not logged in|logged out/i.test(output)) { return "installed, but not signed in"; }
-      return result.status === 0 && /logged.?in/i.test(output) ? true : "installed, but sign-in could not be confirmed";
-    }),
-    providerRow("grok", "Grok", resolveProviderBinary(null, ["grok"]), ["models"], (result, output) => {
-      if (/not logged in|logged out|sign.?in required|authentication required/i.test(output)) { return "installed, but not signed in"; }
-      return result.status === 0 && /you are logged in|available models:/i.test(output) ? true : "installed, but sign-in could not be confirmed";
-    }),
-  ];
-
-  return { rows, usable: rows.filter((row) => row.usable) };
+  return detectProviders({ cfg });
 }
 
 function printProviderPreflight(result) {
   console.log("\n  Provider CLIs:");
+
   for (const row of result.rows) {
-    const mark = row.usable ? "✓" : "!";
+    const mark = row.confirmed ? "\u2713" : row.installed ? "\u2022" : "!";
     console.log(`    ${mark} ${row.label}: ${row.detail}`);
-    if (!row.usable) {
+
+    if (!row.installed) {
       console.log(`      Install: ${row.installCommand}`);
+      if (row.altInstallCommand) { console.log(`      Or:      ${row.altInstallCommand}`); }
       console.log(`      Sign in: ${row.loginCommand}`);
+    } else if (row.state === "signed_out") {
+      console.log(`      Sign in: ${row.loginCommand}`);
+    } else if (row.state === "unknown") {
+      // Unverified is not broken. Say so plainly, and say what to run if it is.
+      console.log(`      Keeping it enabled. If sending fails, run: ${row.loginCommand}`);
     }
   }
-  console.log(`  At least one provider ready: ${result.usable.length ? `yes (${result.usable.map((row) => row.label).join(", ")})` : "no"}`);
+
+  const names = (rows) => rows.map((row) => row.label).join(", ");
+  console.log(`  Ready to use: ${result.usable.length ? names(result.usable) : "none"}`);
+  if (result.usable.length > result.confirmed.length) {
+    console.log(`  Sign-in confirmed for: ${result.confirmed.length ? names(result.confirmed) : "none"}`);
+  }
 }
 
+// Setup is blocked only by something we can state as a fact: no provider CLI is
+// installed at all. An installed CLI whose sign-in we could not read is carried
+// forward, because the session attempt reports the real reason far better than a
+// probe guessing at setup time — and refusing here strands a working machine.
 function requireUsableProvider(cfg) {
   const result = providerPreflight(cfg);
   printProviderPreflight(result);
-  if (!result.usable.length) {
-    throw new Error("No provider CLI is ready. Install and sign in to Codex, Claude, or Grok, then re-run this command.");
-  }
+
+  const blocker = setupBlocker(result);
+  if (blocker) { throw new Error(blocker); }
+
+  // Remember where the binaries actually are. launchd hands services a minimal
+  // PATH, so the absolute path found here is what makes the service agree with
+  // the shell that just ran setup.
+  try {
+    const resolved = resolvedBinaries(result.rows);
+    if (Object.keys(resolved).length) { writeConfig({ ...readConfig(), ...resolved }); }
+  } catch {}
+
   return result;
 }
 
@@ -335,6 +299,54 @@ function printTransportRanking(selected = "funnel") {
   console.log(`    3. People allowed by my Cloudflare Access policy${selected === "cloudflare" ? " (selected)" : ""} — advanced; requires your own domain.`);
 }
 
+function interactive() {
+  return !!process.stdin.isTTY && !!process.stdout.isTTY;
+}
+
+// The options, separate from the prompt, so a test can assert every value is one
+// setup actually understands: a typo here would be a prompt that cannot be obeyed.
+export const TRANSPORT_CHOICES = [
+  {
+    name: "A phone anywhere with the private pairing link",
+    value: "funnel",
+    description: "Recommended. Public HTTPS address, guarded by your pairing token; the phone installs nothing extra.",
+  },
+  {
+    name: "Only devices signed in to my Tailscale account",
+    value: "serve",
+    description: "Most private. Never exposed to the internet, but every phone you use must install and sign in to Tailscale.",
+  },
+  {
+    name: "People allowed by my Cloudflare Access policy",
+    value: "cloudflare",
+    description: "Advanced. Needs a domain you own and a Cloudflare account; useful if you already run Cloudflare Access.",
+  },
+];
+
+// Arrow keys, number keys and Enter, with each option's trade-off visible while
+// it is highlighted. Choosing who can reach your machine is the one decision in
+// setup that is hard to undo later, so it should not be answered blind.
+export async function askTransport() {
+  const [recommended, private_, advanced] = TRANSPORT_CHOICES;
+
+  try {
+    return await select({
+      message: "Who should be able to reach this Mac?",
+      default: "funnel",
+      choices: [recommended, private_, new Separator(), advanced],
+      theme: { prefix: " ", helpMode: "always" },
+    });
+  } catch (error) {
+    // Ctrl-C at a prompt is a decision to stop, not a crash to report.
+    if (error?.name === "ExitPromptError") {
+      console.log("\n  Setup cancelled. Nothing was changed.");
+      process.exit(130);
+    }
+
+    throw error;
+  }
+}
+
 async function chooseTransport(cfg, args) {
   let selected = normalizeTransport(args.transport || cfg.transport);
   let rankingShown = false;
@@ -343,21 +355,12 @@ async function chooseTransport(cfg, args) {
     throw new Error("--transport must be funnel, serve, or cloudflare");
   }
 
-  if (!selected && process.stdin.isTTY && process.stdout.isTTY) {
-    printTransportRanking();
-    rankingShown = true;
-    const prompt = createInterface({ input: process.stdin, output: process.stdout });
+  let picked = false;
 
-    try {
-      const answer = (await prompt.question("\n  Choose who can reach it [1]: ")).trim().toLowerCase();
-      selected = answer === "2" || answer === "serve"
-        ? "serve"
-        : answer === "3" || answer === "cloudflare"
-          ? "cloudflare"
-          : "funnel";
-    } finally {
-      prompt.close();
-    }
+  if (!selected && interactive()) {
+    selected = await askTransport();
+    picked = true;
+    rankingShown = true;
   }
 
   selected ||= "funnel";
@@ -367,7 +370,10 @@ async function chooseTransport(cfg, args) {
     console.log(`\n  Selected: ${transportName(selected)}`);
   }
 
-  if (!args.transport && !cfg.transport) {
+  if (picked) {
+    // They answered the prompt; do not tell them they supplied nothing.
+    console.log("  Saving this choice; change it later with --transport.");
+  } else if (!args.transport && !cfg.transport) {
     console.log("  No choice supplied; using and saving the recommended anywhere-from-phone default.");
   } else if (args.transport) {
     console.log(`  Explicit choice: --transport ${selected}`);
@@ -561,9 +567,7 @@ function augmentPath() {
     return;
   }
 
-  const extra = ["/opt/homebrew/bin", "/usr/local/bin", join(homedir(), ".local", "bin"), join(homedir(), ".npm-global", "bin"), "/usr/bin", "/bin"];
-  const cur = (process.env.PATH || "").split(":").filter(Boolean);
-  process.env.PATH = [...new Set([...cur, ...extra])].join(":");
+  process.env.PATH = augmentedPath();
 }
 
 // ---------- serve ----------

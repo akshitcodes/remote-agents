@@ -17,6 +17,7 @@
 // answers — surfacing the same approval banner Codex uses.
 
 import { spawn } from "node:child_process";
+import { augmentedPath, providerBinary } from "../provider-detect.mjs";
 import { randomBytes } from "node:crypto";
 
 import { createReadStream, readdirSync, statSync, openSync, readSync, closeSync, existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -1069,7 +1070,7 @@ export class ClaudeProvider extends BaseProvider {
     let child;
 
     try {
-      child = spawn("claude", args, { cwd, stdio: ["pipe", "pipe", "pipe"] });
+      child = spawn(providerBinary("claude"), args, { cwd, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, PATH: augmentedPath() } });
     } catch (e) {
       throw Object.assign(new Error("failed to spawn claude: " + (e.message ?? e)), { status: 500 });
     }

@@ -159,6 +159,8 @@ Supported optional config fields include:
 ```json
 {
   "codexBinary": "/path/to/codex",
+  "claudeBinary": "/path/to/claude",
+  "grokBinary": "/path/to/grok",
   "fileAccess": "project",
   "pushSubject": "mailto:you@example.com"
 }
@@ -168,6 +170,42 @@ Supported optional config fields include:
 working directory and sibling Git worktrees. `anywhere` removes that viewer
 check. The token is still the real security boundary because a paired client can
 drive an agent.
+
+## When a provider is not detected
+
+Setup lists each provider CLI as one of four states, and only two of them stop
+it:
+
+| State | Meaning | Does it block setup? |
+| --- | --- | --- |
+| `installed and signed in` | a signed-in account was confirmed | no |
+| `sign-in unverified` | the CLI is there, but nothing proved either way | **no** — it stays enabled |
+| `installed, but not signed in` | the CLI itself said nobody is signed in | only if every provider says this |
+| `not installed` | no binary found | only if no provider is installed |
+
+`sign-in unverified` is normal on a fresh machine: the first run of a provider
+CLI can take a while, and its answer is not always machine-readable. The
+provider stays selectable, because trying to send is a better test than a guess
+made during setup — and the failure it reports is far more specific.
+
+Binaries are looked for on `PATH` and in the places the official installers use
+(`~/.local/bin`, Homebrew, npm/bun/volta/asdf prefixes, and the `codex` bundled
+inside ChatGPT.app). Credentials are looked for in `~/.codex/auth.json`,
+`~/.grok/auth.json`, `~/.claude/.credentials.json`, the macOS Keychain item
+`Claude Code-credentials`, and the usual API-key environment variables.
+
+If your setup is unusual, these override the defaults:
+
+| Variable | Purpose |
+| --- | --- |
+| `REMOTE_AGENTS_BIN_DIRS` | colon-separated directories to search instead of the built-in list (`PATH` is still used) |
+| `REMOTE_AGENTS_CODEX_APP` | path to the `codex` binary inside a ChatGPT desktop app that is not in `/Applications` |
+| `REMOTE_AGENTS_AUTH_TIMEOUT_MS` | how long to wait for a provider's auth check (default 20000) |
+
+You can also pin a binary permanently in `~/.codex-phone/config.json` via
+`codexBinary`, `claudeBinary` or `grokBinary`; setup records the absolute paths
+it found there, so the background service resolves the same binaries your shell
+does even though launchd gives services a minimal `PATH`.
 
 ## Notifications
 

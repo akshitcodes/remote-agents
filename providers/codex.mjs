@@ -11,6 +11,7 @@ import { basename } from "node:path";
 
 import * as rollout from "../codex-rollout.mjs";
 import { readConfig } from "../config.mjs";
+import { augmentedPath, codexAppBinary, findBinary } from "../provider-detect.mjs";
 
 const PAGE_SIZE = 25;
 const DEFAULT_IDLE_RELEASE_MS = 60_000;
@@ -27,7 +28,6 @@ const APPROVAL_TIMEOUT_MS = 240_000;
 // Homebrew 0.145.0, with sessions recording the former.
 //
 // So prefer the binary that is actually writing the sessions we read.
-const APP_CODEX = "/Applications/ChatGPT.app/Contents/Resources/codex";
 let resolvedBinary = null;
 
 export function codexBinary() {
@@ -35,17 +35,15 @@ export function codexBinary() {
 
   const configured = readConfig().codexBinary;
 
-  if (configured) {
+  // A bare name is not enough: launchd starts services with a minimal PATH, so
+  // the binary an interactive shell finds must be resolved to an absolute path.
+  if (configured && existsSync(configured)) {
     resolvedBinary = configured;
-  } else if (existsSync(APP_CODEX)) {
-    resolvedBinary = APP_CODEX;
   } else {
-    resolvedBinary = "codex";
+    resolvedBinary = findBinary("codex", [codexAppBinary()]) ?? "codex";
   }
 
-  if (resolvedBinary !== "codex") {
-    console.error(`[codex] using ${resolvedBinary}`);
-  }
+  console.error(`[codex] using ${resolvedBinary}`);
 
   return resolvedBinary;
 }
@@ -318,7 +316,7 @@ export class CodexProvider extends BaseProvider {
   }
 
   startChild() {
-    this.child = spawn(codexBinary(), ["app-server"], { stdio: ["pipe", "pipe", "pipe"] });
+    this.child = spawn(codexBinary(), ["app-server"], { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, PATH: augmentedPath() } });
     this.feed = makeLineReader((line) => this.handleChildLine(line));
 
     // A missing/unlaunchable `codex` must not crash the bridge (Claude may still
@@ -409,7 +407,7 @@ export class CodexProvider extends BaseProvider {
   }
 
   startThreadClient(threadId = null) {
-    const child = spawn(codexBinary(), ["app-server"], { stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(codexBinary(), ["app-server"], { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, PATH: augmentedPath() } });
     const client = {
       child,
       threadId,

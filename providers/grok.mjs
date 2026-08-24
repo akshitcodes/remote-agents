@@ -13,6 +13,7 @@
 // is implemented.
 
 import { execFile, spawn } from "node:child_process";
+import { augmentedPath, providerBinary } from "../provider-detect.mjs";
 import { randomBytes } from "node:crypto";
 import { readdirSync, statSync, openSync, readSync, closeSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -894,7 +895,7 @@ export class GrokProvider extends BaseProvider {
     let child;
 
     try {
-      child = spawn("grok", args, { cwd, stdio: ["pipe", "pipe", "pipe"] });
+      child = spawn(providerBinary("grok"), args, { cwd, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, PATH: augmentedPath() } });
     } catch (e) {
       throw Object.assign(new Error("failed to spawn grok: " + (e.message ?? e)), { status: 500 });
     }

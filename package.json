@@ -1,6 +1,6 @@
 {
   "name": "@akshitcodes/remote-agents",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Self-hosted mobile web UI for your Codex, Claude Code, and Grok CLI sessions.",
   "type": "module",
   "bin": {
@@ -25,17 +25,18 @@
     "dispatch-settings.mjs",
     "codex-titles.mjs",
     "recent-threads.mjs",
+    "provider-detect.mjs",
     "config.mjs",
     "onboarding.mjs",
     "providers/",
     "public/",
-    "docs/",
     "README.md"
   ],
   "engines": {
     "node": ">=22.5.0"
   },
   "dependencies": {
+    "@inquirer/select": "^5.2.2",
     "@zed-industries/agent-client-protocol": "^0.4.5",
     "qrcode-terminal": "^0.12.0",
     "web-push": "^3.6.7",
