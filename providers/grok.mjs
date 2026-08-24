@@ -112,6 +112,39 @@ function readHead(path, bytes = HEAD_BYTES) {
   }
 }
 
+export function grokBillingUsage(payload) {
+  const config = payload?.config;
+  if (!config || typeof config !== "object") { return null; }
+
+  const monthlyLimit = Number(config.monthlyLimit?.val ?? 0);
+  const used = Number(config.used?.val ?? 0);
+  const percent = typeof config.creditUsagePercent === "number"
+    ? config.creditUsagePercent
+    : (monthlyLimit > 0 ? used / monthlyLimit * 100 : null);
+  if (percent == null) { return null; }
+
+  const period = config.currentPeriod ?? {};
+  const start = toEpochSec(period.start ?? config.billingPeriodStart);
+  const end = toEpochSec(period.end ?? config.billingPeriodEnd);
+  const duration = start && end
+    ? Math.max(1, Math.round((end - start) / 60))
+    : String(period.type ?? "").includes("WEEKLY") ? 10080 : 43200;
+
+  return {
+    account: { type: "grok", email: null, planType: payload.subscriptionTier ?? payload.subscription_tier ?? "Grok" },
+    rateLimits: {
+      rateLimits: { primary: { usedPercent: percent, windowDurationMins: duration, resetsAt: end }, secondary: null },
+      billing: {
+        prepaidBalanceUSD: Number(config.prepaidBalance?.val ?? 0) / 100,
+        onDemandCapUSD: Number(config.onDemandCap?.val ?? 0) / 100,
+        onDemandUsedUSD: Number(config.onDemandUsed?.val ?? 0) / 100,
+        isUnifiedBillingUser: config.isUnifiedBillingUser ?? null,
+      },
+    },
+    usage: null,
+  };
+}
+
 // Flatten a message.content value (string | block[]) into a block array.
 function toBlocks(content) {
   if (typeof content === "string") {
@@ -286,7 +319,7 @@ function toolUseToItem(block) {
 }
 
 export class GrokProvider extends BaseProvider {
-  constructor(emit) {
+  constructor(emit, { billingFetcher = null } = {}) {
     super(emit, "grok");
 
     // Persistent ACP sessions: threadId and (once known) native sessionId
@@ -297,11 +330,10 @@ export class GrokProvider extends BaseProvider {
     this.endpoint = null; // { host, port } — stored for future approval hooks
     this.spawnCount = 0; // test observability: process reuse across turns
 
-    // usage enrichment from result lines
-    this.sessionCost = 0;
-    this.lastUsage = null;
-    this.lastModelUsage = null;
     this.modelCache = null;
+    this.billingFetcher = billingFetcher ?? (() => this.fetchBillingNative());
+    this.billingCache = null;
+    this.billingInFlight = null;
 
     // Idle reaper: drop warm sessions idle > 10 minutes.
     this.reaper = setInterval(() => {
@@ -790,34 +822,56 @@ export class GrokProvider extends BaseProvider {
     return { data };
   }
 
-  async usage() {
-    let usage = null;
+  async fetchBillingNative() {
+    const child = spawn("grok", ["agent", "stdio"], { stdio: ["pipe", "pipe", "pipe"] });
+    child.stderr.resume();
+    const spawnError = new Promise((_, reject) => child.once("error", reject));
+    const spawned = new Promise((resolve) => child.once("spawn", resolve));
+    let timer;
 
-    if (this.lastUsage) {
-      const u = this.lastUsage;
-      const input = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
-      const models = this.lastModelUsage
-        ? Object.entries(this.lastModelUsage).map(([id, m]) => ({
-            model: id,
-            tokens: (m.inputTokens ?? 0) + (m.outputTokens ?? 0),
-            costUSD: m.costUSD ?? null,
-          }))
-        : [];
-      usage = {
-        sessionCostUSD: Math.round(this.sessionCost * 10000) / 10000,
-        lastInputTokens: input,
-        lastOutputTokens: u.output_tokens ?? 0,
-        models,
-      };
-    } else if (this.sessionCost > 0) {
-      usage = { sessionCostUSD: Math.round(this.sessionCost * 10000) / 10000, models: [] };
+    try {
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("Grok billing check timed out")), 20000);
+      });
+      await Promise.race([spawned, timeout, spawnError]);
+      const input = Writable.toWeb(child.stdin);
+      const output = Readable.toWeb(child.stdout);
+      const conn = new ClientSideConnection(() => ({
+        sessionUpdate: async () => {},
+        requestPermission: async () => ({ outcome: { outcome: "cancelled" } }),
+        readTextFile: async () => ({ content: "" }),
+        writeTextFile: async () => ({}),
+      }), ndJsonStream(input, output));
+      await Promise.race([conn.initialize({ protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false } }), timeout, spawnError]);
+      return await Promise.race([conn.extMethod("x.ai/billing", {}), timeout, spawnError]);
+    } finally {
+      clearTimeout(timer);
+      try { child.kill("SIGTERM"); } catch {}
+      const killTimer = setTimeout(() => {
+        if (child.exitCode == null && child.signalCode == null) {
+          try { child.kill("SIGKILL"); } catch {}
+        }
+      }, 2000);
+      killTimer.unref?.();
     }
+  }
 
-    return {
-      account: { planType: "grok" },
-      rateLimits: null,
-      usage,
-    };
+  async usage({ refresh } = {}) {
+    if (!refresh && this.billingCache && Date.now() - this.billingCache.at < 30000) { return this.billingCache.data; }
+    if (this.billingInFlight) { return this.billingInFlight; }
+
+    this.billingInFlight = Promise.resolve().then(this.billingFetcher).then((payload) => {
+      const data = grokBillingUsage(payload);
+      if (!data) { throw new Error("Grok returned no billing usage"); }
+      this.billingCache = { at: Date.now(), data };
+      return data;
+    }).catch((error) => {
+      if (this.billingCache?.data) { return this.billingCache.data; }
+      throw error;
+    })
+      .finally(() => { this.billingInFlight = null; });
+
+    return this.billingInFlight;
   }
 
   async newThread({ cwd } = {}) {

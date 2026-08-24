@@ -25,6 +25,8 @@
     "dispatch-settings.mjs",
     "codex-titles.mjs",
     "recent-threads.mjs",
+    "usage-state.mjs",
+    "notification-content.mjs",
     "providers/",
     "public/",
     "README.md"

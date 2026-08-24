@@ -221,6 +221,7 @@ export class CodexProvider extends BaseProvider {
     this.conflictedThreads = new Set(); // only an observed writer conflict puts a thread here
     this.threadClients = new Map(); // one app-server process per held writer lease
     this.activeTurns = new Map(); // thread id -> turn id owned by our holder process
+    this.queueRequests = new Map(); // native queue additions deduplicated within this bridge process
     this.startingTurns = new Set(); // closes the gap between turn/start and turn/started
     this.finishedStartingTurns = new Set(); // terminal notification beat turn/start RPC response
     this.releasingThreads = new Map(); // thread id -> release promise; sends await it
@@ -383,6 +384,7 @@ export class CodexProvider extends BaseProvider {
 
     this.initializePromise = this.rpc("initialize", {
       clientInfo: { name: "codex-phone", title: "Codex Phone", version: "0.2.0" },
+      capabilities: { experimentalApi: true },
     }).then((res) => {
       this.child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "initialized", params: {} }) + "\n");
       this.emit("bridge", { state: "ready" });
@@ -501,6 +503,7 @@ export class CodexProvider extends BaseProvider {
 
     client.ready = this.clientRpc(client, "initialize", {
       clientInfo: { name: "codex-phone-thread", title: "Codex Phone", version: "0.2.0" },
+      capabilities: { experimentalApi: true },
     }).then((result) => {
       child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "initialized", params: {} }) + "\n");
       return result;
@@ -776,16 +779,16 @@ export class CodexProvider extends BaseProvider {
     await this.ready();
 
     if (!this.cache.account || refresh) {
-      const [account, rateLimits, usage] = await Promise.allSettled([
+      const [account, rateLimits] = await Promise.allSettled([
         this.rpc("account/read", {}),
         this.rpc("account/rateLimits/read", {}),
-        this.rpc("account/usage/read", {}),
       ]);
 
+      const previous = this.cache.account ?? {};
       this.cache.account = {
-        account: account.status === "fulfilled" ? account.value.account : null,
-        rateLimits: rateLimits.status === "fulfilled" ? rateLimits.value : null,
-        usage: usage.status === "fulfilled" ? usage.value : null,
+        account: account.status === "fulfilled" ? account.value.account : previous.account ?? null,
+        rateLimits: rateLimits.status === "fulfilled" ? rateLimits.value : previous.rateLimits ?? null,
+        usage: null,
       };
     }
 
@@ -946,7 +949,12 @@ export class CodexProvider extends BaseProvider {
     return result;
   }
 
-  async steer({ threadId, text, attachments = [], expectedTurnId } = {}) {
+  activeTurnId(threadId) {
+    const turnId = this.activeTurns.get(threadId);
+    return turnId && turnId !== "__unknown__" ? turnId : null;
+  }
+
+  async steer({ threadId, text, attachments = [], expectedTurnId, requestId } = {}) {
     if (!String(text ?? "").trim() && !attachments.length) {
       throw Object.assign(new Error("message content required"), { status: 409, code: "empty_input" });
     }
@@ -959,14 +967,31 @@ export class CodexProvider extends BaseProvider {
       throw Object.assign(new Error(message), { status: 409, code });
     }
 
-    const expected = expectedTurnId ?? activeTurnId;
+    const knownTurnId = activeTurnId !== "__unknown__" ? activeTurnId : null;
+
+    // A reconnect may have no id, but a supplied id is an optimistic-concurrency
+    // guard: never inject guidance into a replacement turn the user did not see.
+    if (expectedTurnId && knownTurnId && expectedTurnId !== knownTurnId) {
+      throw Object.assign(new Error("the running turn changed before steering"), { status: 409, code: "turn_changed" });
+    }
+
+    const expected = knownTurnId ?? expectedTurnId;
+    if (!expected) {
+      throw Object.assign(new Error("the active turn id is not available yet"), { status: 409, code: "not_steerable" });
+    }
 
     try {
       const client = this.threadClients.get(threadId);
+
+      if (!client) {
+        throw Object.assign(new Error("the active turn is not owned by this bridge"), { status: 409, code: "not_our_turn" });
+      }
+
       return await this.clientRpc(client, "turn/steer", {
         threadId,
         input: codexUserInput(text, attachments),
         expectedTurnId: expected,
+        clientUserMessageId: requestId ?? null,
       });
     } catch (e) {
       throw mapSteerError(e);
@@ -980,7 +1005,111 @@ export class CodexProvider extends BaseProvider {
       throw Object.assign(new Error("the active turn is not owned by this bridge"), { status: 409, code: "not_our_turn" });
     }
 
-    return this.clientRpc(client, "turn/interrupt", { threadId, turnId });
+    const expected = turnId ?? this.activeTurnId(threadId);
+    if (!expected) {
+      throw Object.assign(new Error("the active turn id is not available yet"), { status: 409, code: "no_active_turn" });
+    }
+
+    return this.clientRpc(client, "turn/interrupt", { threadId, turnId: expected });
+  }
+
+  async queue({ threadId, text, attachments = [], requestId } = {}) {
+    if (!threadId || (!String(text ?? "").trim() && !attachments.length) || !requestId) {
+      throw Object.assign(new Error("threadId, message content, and requestId required"), { status: 400, code: "invalid_queue_request" });
+    }
+
+    const key = `${threadId}:${requestId}`;
+    const inFlight = this.queueRequests.get(key);
+
+    if (inFlight) { return inFlight; }
+
+    const operation = this.queueOnce({ threadId, text, attachments, requestId });
+    this.queueRequests.set(key, operation);
+
+    try {
+      return await operation;
+    } finally {
+      this.queueRequests.delete(key);
+    }
+  }
+
+  async queueOnce({ threadId, text, attachments, requestId }) {
+    await this.ready();
+    const input = codexUserInput(text, attachments);
+
+    // The provider-native client id is our durable idempotency key. Reconcile
+    // before adding so a bridge restart after acceptance cannot enqueue twice.
+    const existing = await this.findQueuedSubmission(threadId, requestId);
+    if (existing) { return { queuedSubmission: existing, reconciled: true }; }
+
+    try {
+      const result = await this.rpc("thread/queue/add", { threadId, input, clientUserMessageId: requestId });
+      if (!result?.queuedSubmission?.id) {
+        throw Object.assign(new Error("Codex queued the message without returning its id"), { status: 502, code: "invalid_provider_response" });
+      }
+      return result;
+    } catch (error) {
+      // A lost local RPC response is reconcilable by the provider-native client
+      // id. Never enqueue a duplicate merely because the reply was ambiguous.
+      try {
+        const queuedSubmission = await this.findQueuedSubmission(threadId, requestId);
+        if (queuedSubmission) { return { queuedSubmission, reconciled: true }; }
+      } catch {}
+      throw error;
+    }
+  }
+
+  async findQueuedSubmission(threadId, clientUserMessageId) {
+    let cursor = null;
+    const seen = new Set();
+
+    do {
+      const page = await this.queueList({ threadId, cursor, limit: 100 });
+      const found = page.data?.find((entry) => entry.clientUserMessageId === clientUserMessageId);
+
+      if (found) { return found; }
+
+      cursor = page.nextCursor ?? null;
+
+      if (cursor && seen.has(cursor)) {
+        throw Object.assign(new Error("Codex queue pagination repeated a cursor"), { status: 502, code: "invalid_provider_response" });
+      }
+
+      if (cursor) { seen.add(cursor); }
+    } while (cursor);
+
+    return null;
+  }
+
+  async queueList({ threadId, cursor = null, limit = 100 } = {}) {
+    if (!threadId) {
+      throw Object.assign(new Error("threadId required"), { status: 400, code: "invalid_queue_request" });
+    }
+
+    await this.ready();
+    return this.rpc("thread/queue/list", { threadId, cursor, limit: Math.min(100, Math.max(1, Number(limit) || 100)) });
+  }
+
+  async queueUpdate({ threadId, queuedSubmissionId, text, attachments = [] } = {}) {
+    if (!threadId || !queuedSubmissionId || (!String(text ?? "").trim() && !attachments.length)) {
+      throw Object.assign(new Error("threadId, queuedSubmissionId, and message content required"), { status: 400, code: "invalid_queue_request" });
+    }
+
+    await this.ready();
+    return this.rpc("thread/queue/update", {
+      threadId,
+      queuedSubmissionId,
+      input: codexUserInput(text, attachments),
+    });
+  }
+
+  async queueDelete({ threadId, queuedSubmissionId } = {}) {
+    if (!threadId || !queuedSubmissionId) {
+      throw Object.assign(new Error("threadId and queuedSubmissionId required"), { status: 400, code: "invalid_queue_request" });
+    }
+
+    await this.ready();
+    return this.rpc("thread/queue/delete", { threadId, queuedSubmissionId });
   }
 
   async rename({ threadId, name } = {}) {

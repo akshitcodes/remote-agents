@@ -332,9 +332,9 @@
   .stat { background: var(--bg3); border: 1px solid var(--border); border-radius: 10px; padding: 11px 12px; }
   .stat .v { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
   .stat .k { font-size: 11.5px; color: var(--fg-dim); margin-top: 2px; }
-  .spark { display: flex; align-items: flex-end; gap: 3px; height: 46px; margin-top: 10px; }
-  .spark > div { flex: 1; background: var(--accent2); border-radius: 2px 2px 0 0; min-height: 2px; opacity: .8; }
   .credit { display: flex; gap: 9px; align-items: center; background: #2ea04314; border: 1px solid var(--accent); border-radius: 10px; padding: 10px 12px; margin-top: 6px; font-size: 13px; }
+  .usage-seg { margin: 10px 0 14px; }
+  .usage-note { background: #1f6feb12; border: 1px solid #388bfd55; border-radius: 10px; padding: 10px 12px; margin: 8px 0 12px; color: var(--fg-dim); font-size: 12.5px; line-height: 1.4; }
 
   /* Laptop workspace: keep navigation in view and bound the reading measure.
      Mobile still uses the original full-screen list -> chat navigation below
@@ -554,12 +554,14 @@ const state = {
   settingsSave: Promise.resolve(),
   sendMode: "queue",         // queue | steer — what happens when you send mid-turn
   busy: false,               // is a turn currently running
+  turnOwnership: "idle",     // idle | checking | unknown | bridge | external
   pending: [],               // [{ text, chip }] messages waiting to send
   failedSends: [],           // [{ threadId, text, requestId }] sends that never landed
   running: new Set(),        // "provider:threadId" of threads with an active turn
   runConfidence: new Map(),  // same key -> bridge | provider | marker | heuristic | stale_timeout
   sseErrored: false,         // did the event stream drop (for reconnect catch-up)
   resyncing: false,          // guard against overlapping re-reads
+  nativeQueueReconciling: false,
   lastDiff: "",
   threadFiles: new Map(), // path -> { path, edited } for the open thread
   activityGroup: null,    // newest contiguous Codex activity run
@@ -620,10 +622,22 @@ function sendModesFor(provider) {
 
 function effectiveSendBehavior() {
   if (!state.busy) { return { name: "Now", desc: "Starts a new turn immediately." }; }
-  if (state.sendMode === "queue") { return SEND_MODES.queue; }
+  if (state.turnOwnership === "checking") {
+    return { name: "Checking…", desc: "Confirming which app owns this running turn before accepting a message." };
+  }
+  if (state.turnOwnership === "unknown") {
+    return { name: "Queue (syncing)", desc: "Ownership could not be confirmed. Your message stays local and unsent until sync recovers." };
+  }
   if (state.externalTurn) {
+    if (activeProvider() === "codex") {
+      return {
+        name: "Codex queue",
+        desc: "Codex Desktop owns this turn. This follow-up is saved in Codex's native queue and starts automatically after the turn finishes; interrupt the current turn in Codex Desktop.",
+      };
+    }
     return { name: "Queue (external)", desc: "This turn is owned elsewhere, so the message waits for confirmed completion." };
   }
+  if (state.sendMode === "queue") { return SEND_MODES.queue; }
   return sendModesFor(activeProvider()).steer;
 }
 
@@ -1106,6 +1120,12 @@ async function loadThreads(append) {
         markRunning(child.provider || threadProvider, child.id, !!child.running, { confidence: child.runConfidence, live: false });
       }
     }
+
+    // Provider events and this fetch can cross in flight. Rank from the live
+    // running set immediately before painting so an older response can never
+    // put a now-running task back in its previous position. This is an invariant
+    // in both Recent Work and the provider-specific Agents view.
+    state.threads = rankLiveThreads(state.threads, state.running);
 
     const previousListTop = $("listView").scrollTop;
     renderRows(listView === "provider" && append);
@@ -1665,7 +1685,11 @@ function renderItem(item, opts = {}) {
       const t = (item.content ?? []).map((c) => c.text ?? "").join("");
       const imageCount = (item.content ?? []).filter((c) => c.type === "image" || c.type === "localImage").length;
 
-      if (t.trim() || imageCount) { return [addUser(t, { imageCount })]; }
+      if (t.trim() || imageCount) {
+        const el = addUser(t, { imageCount });
+        if (item.clientId) { el.dataset.clientId = item.clientId; }
+        return [el];
+      }
 
       break;
     }
@@ -2048,7 +2072,7 @@ function onNotify(method, params, provider) {
   }
 
   if (!state.active || (tid !== state.active.id && tid !== state.active.draftId)) {
-    if (method === "account/rateLimits/updated") { updateUsageLive(params.rateLimits); }
+    if (method === "account/rateLimits/updated") { updateUsageLive(params.rateLimits, provider); }
 
     return;
   }
@@ -2230,7 +2254,7 @@ function onNotify(method, params, provider) {
     }
 
     case "account/rateLimits/updated":
-      updateUsageLive(params.rateLimits);
+      updateUsageLive(params.rateLimits, provider);
       break;
 
     case "turn/aborted":
@@ -2342,7 +2366,7 @@ async function openThread(t) {
   // If it's mid-turn, say so before the fetch lands: the cached copy on screen
   // is a snapshot, and without this a busy thread reads as a finished one.
   if (t.running || isRunning(t.provider, t.id)) {
-    setBusy(true, { external: true });
+    setBusy(true, { external: true, ownershipChecking: true });
     setLivePill(true, "Loading new messages…");
   }
 
@@ -2368,21 +2392,25 @@ async function openThread(t) {
       markRunning(t.provider, t.id, !!res.runtime.running, { confidence: res.runtime.confidence });
     }
     refreshApprovals();
+    refreshLockStatus();
     setOfflineNote(false);
     const tu = res.thread?.tokenUsage?.total?.totalTokens ?? res.thread?.turns?.at?.(-1)?.tokenUsage?.total?.totalTokens;
 
     if (tu) { $("tokCount").textContent = fmtTokens(tu) + " tok"; }
 
     idbSet(cacheKey, { thread: trimThreadForCache(res.thread), updatedAt: t.updatedAt, tokens: tu ?? cached?.tokens ?? null, cachedAt: Date.now() });
+    reconcileNativeCodexQueue(t);
 
-    // If a turn is already running on this thread (e.g. started on the Mac),
-    // reflect it: show the stop button and let the watcher stream it in.
-    // Opening a thread is never how one of our own turns starts, so anything
-    // running here is being driven elsewhere.
+    // A browser can reopen while a bridge-owned turn is still running. The
+    // server's runtime source is authoritative; file activity alone must not
+    // downgrade an owned turn into an uncontrollable external turn.
     if (isRunning(t.provider, t.id)) {
-      setBusy(true, { external: true });
+      const external = res.runtime?.source !== "bridge";
+      state.activeTurnId = external ? null : (res.runtime?.turnId ?? state.activeTurnId);
+      setBusy(true, { external });
       setLivePill(true, "Running — following live");
     } else {
+      state.activeTurnId = null;
       // Only auto-dispatch a restored queue after a successful canonical read
       // and an explicit provider marker prove the thread is idle.
       setBusy(false);
@@ -2406,6 +2434,10 @@ async function openThread(t) {
     state.fetching = false;
 
     if (state.active !== t) { return; }
+
+    if (state.turnOwnership === "checking") {
+      setBusy(state.busy, { external: true, ownershipUnknown: true });
+    }
 
     const msg = String(e.message || "");
 
@@ -2672,7 +2704,12 @@ function savePending() {
       retryRequired: !!e.retryRequired,
       retryWithNewId: !!e.retryWithNewId,
       retryAsSteer: !!e.retryAsSteer,
+      awaitingOwnership: !!e.awaitingOwnership,
+      intendedSendMode: e.intendedSendMode ?? null,
       mayHaveDispatched: !!e.mayHaveDispatched,
+      viaCodexQueue: !!e.viaCodexQueue,
+      nativeQueue: !!e.nativeQueue,
+      nativeQueueId: e.nativeQueueId ?? null,
     }));
 
   if (entries.length) { all[key] = entries; } else { delete all[key]; }
@@ -2680,16 +2717,34 @@ function savePending() {
   try { localStorage.setItem(PENDING_KEY, JSON.stringify(all)); } catch {}
 }
 
-function removePendingEntry(entry) {
-  const at = state.pending.indexOf(entry);
+async function removePendingEntry(entry, { flush = true } = {}) {
+  let at = state.pending.indexOf(entry);
 
   if (at < 0 || entry.dispatching || entry.mayHaveDispatched) { return false; }
 
-  state.pending.splice(at, 1);
+  if (entry.nativeQueue && entry.nativeQueueId) {
+    entry.dispatching = true;
+    syncPendingActions(entry);
+    try {
+      await api("/api/queue/delete", {
+        provider: entry.provider || activeProvider(),
+        threadId: entry.threadId || state.active?.id,
+        queuedSubmissionId: entry.nativeQueueId,
+      });
+    } catch (error) {
+      entry.dispatching = false;
+      syncPendingActions(entry);
+      chip("⚠️", "Could not cancel queued message: " + (error.message || error));
+      return false;
+    }
+  }
+
+  at = state.pending.indexOf(entry);
+  if (at >= 0) { state.pending.splice(at, 1); }
   entry.chip?.remove();
   entry.bubble?.remove();
   savePending();
-  if (!state.busy) { queueMicrotask(flushPending); }
+  if (flush && !state.busy) { queueMicrotask(flushPending); }
   return true;
 }
 
@@ -2721,11 +2776,31 @@ function openPendingEditSheet(entry) {
     <button class="primary-btn" id="saveQueuedEdit">Save message</button>`);
   $("queuedEditInput").value = entry.text || "";
   $("queuedEditInput").focus();
-  $("saveQueuedEdit").onclick = () => {
+  $("saveQueuedEdit").onclick = async () => {
     const text = $("queuedEditInput").value.trim();
 
     if (!text && !(entry.attachments ?? []).length) { return; }
     if (!state.pending.includes(entry) || entry.dispatching || entry.mayHaveDispatched) { closeSheet(); return; }
+
+    if (entry.nativeQueue && entry.nativeQueueId) {
+      entry.dispatching = true;
+      syncPendingActions(entry);
+      try {
+        await api("/api/queue/update", {
+          provider: entry.provider || activeProvider(),
+          threadId: entry.threadId || state.active?.id,
+          queuedSubmissionId: entry.nativeQueueId,
+          text,
+          attachmentIds: (entry.attachments ?? []).map((attachment) => attachment.id),
+        });
+      } catch (error) {
+        entry.dispatching = false;
+        syncPendingActions(entry);
+        chip("⚠️", "Could not edit queued message: " + (error.message || error));
+        return;
+      }
+      entry.dispatching = false;
+    }
 
     entry.text = text;
     entry.retryRequired = false;
@@ -2736,7 +2811,9 @@ function openPendingEditSheet(entry) {
     const label = entry.chip?.querySelector(":scope > span");
     const queueIndex = state.pending.indexOf(entry);
     if (label) {
-      label.textContent = state.busy
+      label.textContent = entry.nativeQueue
+        ? "Queued in Codex — sends automatically when the current turn finishes"
+        : state.busy
         ? "Queued — sends when the current turn finishes"
         : queueIndex > 0
           ? "Queued — sends after earlier messages"
@@ -2781,10 +2858,16 @@ function restorePending() {
     const text = typeof raw === "string" ? raw : raw?.text;
     const attachments = Array.isArray(raw?.attachments) ? raw.attachments : [];
     const requestId = raw?.requestId || newRequestId();
-    const retryRequired = !!raw?.retryRequired;
+    const savedRetryRequired = !!raw?.retryRequired;
     const retryWithNewId = !!raw?.retryWithNewId;
     const retryAsSteer = !!raw?.retryAsSteer;
-    const mayHaveDispatched = !!raw?.mayHaveDispatched || (retryRequired && retryWithNewId);
+    const awaitingOwnership = !!raw?.awaitingOwnership;
+    const intendedSendMode = raw?.intendedSendMode ?? null;
+    const viaCodexQueue = !!raw?.viaCodexQueue;
+    const nativeQueue = !!raw?.nativeQueue;
+    const nativeQueueId = raw?.nativeQueueId ?? null;
+    const mayHaveDispatched = !!raw?.mayHaveDispatched || (savedRetryRequired && retryWithNewId);
+    const retryRequired = savedRetryRequired || (mayHaveDispatched && !nativeQueue);
 
     if (!text && !attachments.length) { continue; }
 
@@ -2803,7 +2886,9 @@ function restorePending() {
         ? "Delivery uncertain — check the latest messages, then tap Retry only if needed"
         : retryRequired
           ? "Not sent — tap Retry"
-          : "Not sent yet — waiting for the current turn to end",
+          : nativeQueue
+            ? "Queued in Codex — sends automatically when the current turn finishes"
+            : "Not sent yet — waiting for the current turn to end",
     );
     c.classList.add("pending");
 
@@ -2815,9 +2900,16 @@ function restorePending() {
       existing.retryRequired = retryRequired;
       existing.retryWithNewId = retryWithNewId;
       existing.retryAsSteer = retryAsSteer;
+      existing.awaitingOwnership = awaitingOwnership;
+      existing.intendedSendMode = intendedSendMode;
+      existing.viaCodexQueue = viaCodexQueue;
       existing.mayHaveDispatched = mayHaveDispatched;
+      existing.nativeQueue = nativeQueue;
+      existing.nativeQueueId = nativeQueueId;
+      existing.provider = state.active.provider;
+      existing.threadId = tid;
     } else {
-      state.pending.push({ text, attachments, requestId, chip: c, bubble, retryRequired, retryWithNewId, retryAsSteer, mayHaveDispatched });
+      state.pending.push({ text, attachments, requestId, chip: c, bubble, retryRequired, retryWithNewId, retryAsSteer, awaitingOwnership, intendedSendMode, viaCodexQueue, mayHaveDispatched, nativeQueue, nativeQueueId, provider: state.active.provider, threadId: tid });
     }
 
     const entry = existing || state.pending.at(-1);
@@ -2833,8 +2925,89 @@ function restorePending() {
   savePending();
 }
 
+async function reconcileNativeCodexQueue(target = state.active) {
+  if (!target || target.provider !== "codex") { return; }
+  if (state.nativeQueueReconciling) { return; }
+  const candidates = state.pending
+    .filter((entry) => entry.nativeQueue || entry.mayHaveDispatched)
+    .map((entry) => ({ entry, queueId: entry.nativeQueueId ?? null }));
+  if (!candidates.length) { return; }
+  state.nativeQueueReconciling = true;
+
+  try {
+    const result = await api(`/api/queue?provider=codex&threadId=${encodeURIComponent(target.id)}&limit=100`);
+    if (state.active !== target) { return; }
+    const queued = result.data ?? [];
+    const queuedIds = new Set(queued.map((entry) => entry.id));
+    const byClientId = new Map(queued.map((entry) => [entry.clientUserMessageId, entry]));
+    let changed = false;
+
+    for (const candidate of candidates) {
+      const { entry, queueId } = candidate;
+      const providerEntry = byClientId.get(entry.requestId);
+      if (providerEntry) {
+        entry.nativeQueue = true;
+        entry.nativeQueueId = providerEntry.id;
+        entry.dispatching = false;
+        entry.mayHaveDispatched = false;
+        entry.retryRequired = false;
+        const providerText = providerEntry.input?.find?.((part) => part.type === "text")?.text;
+        if (typeof providerText === "string" && providerText !== entry.text) {
+          entry.text = providerText;
+          setQueuedBubbleText(entry, providerText);
+        }
+        const label = entry.chip?.querySelector(":scope > span");
+        if (label) { label.textContent = "Queued in Codex — sends automatically when the current turn finishes"; }
+        markSendFailed(entry.bubble, null);
+        syncPendingActions(entry);
+        changed = true;
+        continue;
+      }
+
+      // Only prune a queue id that existed before this list request. An add may
+      // finish while the list is in flight; its new id was not part of this
+      // snapshot and must survive until the next reconciliation.
+      if (result.nextCursor || !queueId || entry.nativeQueueId !== queueId || !entry.nativeQueue || queuedIds.has(queueId)) { continue; }
+      const at = state.pending.indexOf(entry);
+      if (at >= 0) { state.pending.splice(at, 1); }
+      entry.chip?.remove();
+      // The queue entry either became canonical history or was cancelled in
+      // another Codex client. In both cases the optimistic copy is no longer a
+      // truthful source; remove it and promptly refresh canonical history.
+      entry.bubble?.remove();
+      scheduleExternalRefresh();
+      changed = true;
+    }
+
+    if (changed) { savePending(); }
+  } catch {
+    // Queue reconciliation is advisory. Keep the local durable entry and its
+    // edit/cancel controls when Codex cannot currently answer.
+  } finally {
+    state.nativeQueueReconciling = false;
+  }
+}
+
 function retryPendingEntry(entry) {
   entry.retryRequired = false;
+
+  if (entry.nativeQueue) {
+    entry.retryWithNewId = false;
+    entry.mayHaveDispatched = false;
+    markSendFailed(entry.bubble, null);
+    savePending();
+    reconcileNativeCodexQueue();
+    return;
+  }
+
+  if (entry.viaCodexQueue) {
+    entry.retryWithNewId = false;
+    entry.mayHaveDispatched = false;
+    markSendFailed(entry.bubble, null);
+    savePending();
+    persistExternalCodexQueue(entry);
+    return;
+  }
 
   if (entry.retryWithNewId) { entry.requestId = newRequestId(); }
 
@@ -2852,10 +3025,29 @@ function retryPendingEntry(entry) {
 
 function enqueue(text, attachments = []) {
   const bubble = addUser(text, { own: true, attachments });
-  const steering = state.sendMode === "steer" && !state.externalTurn;
-  const c = chip("⏳", steering ? "Steering — lands at the next tool call…" : "Queued — sends when the current turn finishes");
+  const steering = state.sendMode === "steer" && state.turnOwnership === "bridge";
+  const nativeExternalCodex = state.turnOwnership === "external" && activeProvider() === "codex";
+  const ownershipUnknown = state.turnOwnership === "checking" || state.turnOwnership === "unknown";
+  const c = chip("⏳", steering
+    ? "Steering — lands at the next tool call…"
+    : nativeExternalCodex
+      ? "Saving to Codex’s queue…"
+      : ownershipUnknown
+        ? "Saved locally — waiting for ownership sync"
+      : "Queued — sends when the current turn finishes");
   c.classList.add("pending");
-  const entry = { text, attachments, requestId: newRequestId(), chip: c, bubble };
+  const entry = {
+    text,
+    attachments,
+    requestId: newRequestId(),
+    chip: c,
+    bubble,
+    viaCodexQueue: nativeExternalCodex,
+    awaitingOwnership: ownershipUnknown,
+    intendedSendMode: state.sendMode,
+    provider: activeProvider(),
+    threadId: state.active?.id,
+  };
   state.pending.push(entry);
   savePending();
   syncPendingActions(entry);
@@ -2863,6 +3055,55 @@ function enqueue(text, attachments = []) {
   // Queued messages wait for the turn to end. Steering does not: it goes into
   // the turn that is already running.
   if (steering) { trySteer(entry); }
+  else if (nativeExternalCodex) { persistExternalCodexQueue(entry); }
+}
+
+async function persistExternalCodexQueue(entry) {
+  if (!state.pending.includes(entry) || entry.nativeQueue || entry.dispatching || (entry.provider || activeProvider()) !== "codex") { return; }
+
+  const label = entry.chip?.querySelector(":scope > span");
+  entry.viaCodexQueue = true;
+  entry.dispatching = true;
+  entry.mayHaveDispatched = true;
+  syncPendingActions(entry);
+  savePending();
+
+  try {
+    const result = await api("/api/queue", {
+      provider: "codex",
+      threadId: entry.threadId || state.active?.id,
+      text: entry.text,
+      attachmentIds: (entry.attachments ?? []).map((attachment) => attachment.id),
+      requestId: entry.requestId,
+    });
+    entry.nativeQueue = true;
+    entry.nativeQueueId = result.queuedSubmission?.id;
+    entry.dispatching = false;
+    entry.mayHaveDispatched = false;
+    entry.retryRequired = false;
+    if (!state.pending.includes(entry)) { return; }
+    if (label) { label.textContent = "Queued in Codex — sends automatically when the current turn finishes"; }
+    savePending();
+    syncPendingActions(entry);
+  } catch (error) {
+    entry.dispatching = false;
+    const uncertain = error.code === "delivery_uncertain" || !!error.reach || !error.status || error.status >= 500;
+    entry.mayHaveDispatched = uncertain;
+    entry.retryRequired = uncertain;
+    if (label) {
+      label.textContent = uncertain
+        ? "Could not confirm Codex queue delivery — check before retrying"
+        : "Codex queue rejected this message — tap Retry";
+    }
+    savePending();
+    syncPendingActions(entry);
+    markSendFailed(entry.bubble, () => {
+      entry.retryRequired = false;
+      entry.mayHaveDispatched = false;
+      markSendFailed(entry.bubble, null);
+      persistExternalCodexQueue(entry);
+    }, { uncertain });
+  }
 }
 
 // Why steering was not possible, in the user's terms. Each maps to a code the
@@ -2875,6 +3116,8 @@ function steerFallbackReason(code) {
       return "This turn is running elsewhere — sending when it finishes";
     case "not_steerable":
       return "This turn can't be steered — sending when it finishes";
+    case "turn_changed":
+      return "The running turn changed — sending when the current turn finishes";
     default:
       return "Queued — sends when the current turn finishes";
   }
@@ -2933,6 +3176,41 @@ async function trySteer(entry) {
     syncPendingActions(entry);
     if (label) { label.textContent = steerFallbackReason(e.code); }
 
+    if (activeProvider() === "codex" && e.code === "not_our_turn") {
+      try {
+        let runtimeResult = await api(`/api/thread/runtime?provider=codex&threadId=${encodeURIComponent(t.id)}`);
+        let runtime = runtimeResult.runtime;
+
+        // A completed turn's trailing start marker can briefly outlive its
+        // writer. Settle once before deciding that another Codex process owns
+        // the thread and parking this message in its native queue.
+        if (runtime?.running && runtime.source !== "bridge") {
+          await new Promise((resolve) => setTimeout(resolve, 750));
+          runtimeResult = await api(`/api/thread/runtime?provider=codex&threadId=${encodeURIComponent(t.id)}`);
+          runtime = runtimeResult.runtime;
+        }
+
+        if (runtime?.running && runtime.source !== "bridge") {
+          setBusy(true, { external: true });
+          entry.viaCodexQueue = true;
+          savePending();
+          await persistExternalCodexQueue(entry);
+        } else if (runtime?.running) {
+          state.activeTurnId = runtime.turnId ?? null;
+          setBusy(true);
+        } else {
+          state.activeTurnId = null;
+          setBusy(false);
+          flushPending();
+        }
+      } catch (runtimeError) {
+        entry.retryRequired = true;
+        savePending();
+        if (label) { label.textContent = "Could not confirm who owns the turn — message remains unsent"; }
+        markSendFailed(entry.bubble, () => retryPendingEntry(entry));
+      }
+    }
+
     return; // still pending: flushPending sends it when the turn ends
   }
 
@@ -2973,6 +3251,17 @@ async function interruptForQueuedMessage(entry) {
 function flushPending() {
   if (state.busy || !state.pending.length || !state.active) { return; }
 
+  // Provider-native entries are already durable and are consumed by Codex.
+  // They must never be replayed through the bridge's ordinary send path, and
+  // later local entries must not jump ahead of them during the brief idle edge
+  // between the external turn and Codex starting its queue head.
+  const nativeEntry = state.pending.find((entry) => entry.nativeQueue);
+
+  if (nativeEntry) {
+    const label = nativeEntry.chip?.querySelector(":scope > span");
+    if (label) { label.textContent = "Waiting for Codex to consume the queued message"; }
+    return;
+  }
   const next = state.pending[0];
 
   // A known provider failure needs a deliberate tap. Reconnect/run-state
@@ -3319,7 +3608,7 @@ function markSendFailed(bubble, onRetry, { uncertain = false } = {}) {
   scrollDown();
 }
 
-function setBusy(busy, { external = false } = {}) {
+function setBusy(busy, { external = false, ownershipChecking = false, ownershipUnknown = false } = {}) {
   // A turn we streamed ourselves was rendered optimistically from live events.
   // The session file is the canonical record of it, and the watcher's trailing
   // read lands *after* the turn ends — at which point the guard that suppressed
@@ -3335,12 +3624,36 @@ function setBusy(busy, { external = false } = {}) {
     clearCarets();
   }
 
+  const previousOwnership = state.turnOwnership;
   state.busy = busy;
+  state.turnOwnership = !busy
+    ? "idle"
+    : (ownershipChecking ? "checking" : (ownershipUnknown ? "unknown" : (external ? "external" : "bridge")));
 
   // A turn driven elsewhere (a terminal, an IDE, another device) reaches us by
   // re-reading the session file, not by streaming — so resync must stay allowed
   // for it, unlike a turn we are streaming ourselves.
   state.externalTurn = busy && external;
+
+  // A message accepted while ownership was unknown stayed local. Route it only
+  // after a canonical refresh proves which control primitive is safe.
+  if (busy && ["checking", "unknown"].includes(previousOwnership) && ["bridge", "external"].includes(state.turnOwnership)) {
+    for (const entry of state.pending.filter((candidate) => candidate.awaitingOwnership)) {
+      entry.awaitingOwnership = false;
+
+      if (state.turnOwnership === "external" && activeProvider() === "codex") {
+        entry.viaCodexQueue = true;
+        queueMicrotask(() => persistExternalCodexQueue(entry));
+      } else if (state.turnOwnership === "bridge" && entry.intendedSendMode === "steer") {
+        queueMicrotask(() => trySteer(entry));
+      } else {
+        const label = entry.chip?.querySelector(":scope > span");
+        if (label) { label.textContent = "Queued — sends when the current turn finishes"; }
+      }
+    }
+
+    savePending();
+  }
 
   if (state.externalTurn && activeProvider() === "codex") {
     refreshActivityGroup(state.activityGroup, { live: true });
@@ -3387,12 +3700,20 @@ async function stopAgent() {
 
   if (!stopped) { return; }
 
-  for (const p of state.pending) {
-    if (p.chip) { p.chip.remove(); }
-    if (p.bubble) { p.bubble.remove(); }
+  const remaining = [];
+
+  for (const p of [...state.pending]) {
+    if (p.nativeQueue && p.nativeQueueId) {
+      const removed = await removePendingEntry(p, { flush: false });
+      if (!removed) { remaining.push(p); }
+      continue;
+    }
+
+    p.chip?.remove();
+    p.bubble?.remove();
   }
 
-  state.pending = [];
+  state.pending = remaining;
   savePending();
 }
 
@@ -3438,6 +3759,7 @@ function openSheet(html) {
   $("sheet").removeAttribute("inert");
   $("app").setAttribute("inert", "");
   $("sheet").classList.remove("new-session-host");
+  $("sheetBody").dataset.sheetKind = "";
   $("sheetBody").innerHTML = html;
   const heading = $("sheetBody").querySelector("h2");
   if (heading) { heading.id = "sheetTitle"; }
@@ -3729,6 +4051,7 @@ function dispatchReadiness() {
   const model = currentModel();
   const efforts = model?.supportedReasoningEfforts ?? [];
 
+  if (state.turnOwnership === "checking") { return { ready: false, reason: "Confirming who owns the running turn" }; }
   if (state.settingsTruth.state === "loading") { return { ready: false, reason: "Thread settings are still loading" }; }
   if (state.settingsTruth.state === "error") { return { ready: false, reason: state.settingsTruth.message || "Thread settings could not be verified" }; }
   if (!state.model || !model) { return { ready: false, reason: "No exact model is selected" }; }
@@ -3757,6 +4080,15 @@ function setLockStatus(lock) {
   syncLockControl();
 }
 
+function openLockContent(html) {
+  openSheet(html);
+  $("sheetBody").dataset.sheetKind = "lock";
+}
+
+function isLockSheetOpen() {
+  return $("sheet").classList.contains("show") && $("sheetBody").dataset.sheetKind === "lock";
+}
+
 function syncLockControl() {
   const codexThread = state.active && activeProvider() === "codex" && !state.active.draft;
   $("lockCtl").style.display = codexThread ? "flex" : "none";
@@ -3777,6 +4109,10 @@ async function refreshLockStatus() {
 
     return lock;
   } catch {
+    if (state.active?.id === threadId) {
+      setLockStatus({ state: "unknown", label: "Check failed" });
+    }
+
     return null;
   }
 }
@@ -3785,13 +4121,16 @@ function renderLockSheet() {
   const lock = state.lock;
 
   if (lock.state === "unknown") {
-    openSheet(`<h2>Write access</h2><div class="hint">The bridge could not check this thread's lock state.</div>`);
+    openLockContent(`<h2>Write access</h2>
+      <div class="hint">The bridge could not check this thread's lock state. You can safely try again.</div>
+      <button class="primary-btn" id="retryLockBtn">Check again</button>`);
+    $("retryLockBtn").onclick = openLockSheet;
     return;
   }
 
   if (lock.state === "held") {
     const busy = state.busy;
-    openSheet(`<h2>You have it</h2>
+    openLockContent(`<h2>You have it</h2>
       <div class="hint">This bridge has the thread loaded, so other Codex clients cannot write to it.</div>
       ${busy ? '<div class="hint">Release is unavailable while the agent is working. It will never interrupt a running turn.</div>' : ""}
       <button class="primary-btn" id="releaseLockBtn" ${busy ? "disabled" : ""}>Release</button>`);
@@ -3814,48 +4153,61 @@ function renderLockSheet() {
   }
 
   if (lock.state === "elsewhere") {
-    openSheet(`<h2>Open elsewhere</h2>
-      <div class="hint">This thread is open on your Mac. Close it there to continue here. The bridge cannot take another app's lock.</div>
-      <button class="primary-btn" id="escapeLockBtn">Start another session</button>`);
+    openLockContent(`<h2>Open elsewhere</h2>
+      <div class="hint">Another Codex client currently has write access. Close it there, then try again here. This app will only acquire the lock after Codex confirms it is free; it never forces a takeover.</div>
+      <button class="primary-btn" id="retryTakeLockBtn">Try again</button>
+      <button type="button" class="opt opt-button" id="escapeLockBtn" style="width:100%;margin-top:8px">Start another session</button>`);
+    $("retryTakeLockBtn").onclick = () => tryTakeLock($("retryTakeLockBtn"));
     $("escapeLockBtn").onclick = () => { closeSheet(); openNewSheet(); };
     return;
   }
 
-  openSheet(`<h2>Not held here</h2>
-    <div class="hint">The bridge is not holding this thread. Another Codex client may still own it; the next send or warm-up will verify safely and will never take the lock by force.</div>
-    <button class="primary-btn" id="warmLockBtn">Warm up</button>`);
-  $("warmLockBtn").onclick = async () => {
-    const btn = $("warmLockBtn");
-    const mode = currentMode();
-    btn.disabled = true;
-    btn.textContent = "Loading the session into Codex…";
+  openLockContent(`<h2>Not held here</h2>
+    <div class="hint">This app is not holding the thread. Codex will grant write access only if no other client owns it; this never forces a takeover.</div>
+    <button class="primary-btn" id="takeLockBtn">Try to get write access</button>`);
+  $("takeLockBtn").onclick = () => tryTakeLock($("takeLockBtn"));
+}
 
-    try {
-      const next = await api("/api/thread/lock/warm", {
-        provider: "codex",
-        threadId: state.active.id,
-        approvalPolicy: mode.approvalPolicy,
-        sandbox: mode.sandbox,
-      });
-      setLockStatus(next);
-      renderLockSheet();
-    } catch (e) {
-      if (e.code === "thread_locked_elsewhere") {
-        setLockStatus({ state: "elsewhere", label: "Open elsewhere" });
-        renderLockSheet();
-      } else {
-        btn.disabled = false;
-        btn.textContent = "Warm up failed — tap to retry";
-      }
+async function tryTakeLock(btn) {
+  const t = state.active;
+
+  if (!t || activeProvider() !== "codex" || t.draft) { return; }
+
+  const threadId = t.id;
+  const mode = currentMode();
+  btn.disabled = true;
+  btn.textContent = "Checking write access…";
+
+  try {
+    const next = await api("/api/thread/lock/warm", {
+      provider: "codex",
+      threadId,
+      approvalPolicy: mode.approvalPolicy,
+      sandbox: mode.sandbox,
+    });
+
+    if (state.active?.id !== threadId || activeProvider() !== "codex") { return; }
+
+    setLockStatus(next);
+    if (isLockSheetOpen()) { renderLockSheet(); }
+  } catch (e) {
+    if (state.active?.id !== threadId || activeProvider() !== "codex") { return; }
+
+    if (e.code === "thread_locked_elsewhere") {
+      setLockStatus({ state: "elsewhere", label: "Open elsewhere" });
+      if (isLockSheetOpen()) { renderLockSheet(); }
+    } else {
+      btn.disabled = false;
+      btn.textContent = "Try again";
     }
-  };
+  }
 }
 
 async function openLockSheet() {
-  openSheet(`<h2>Write access</h2><div class="hint">Checking this thread…</div>`);
+  openLockContent(`<h2>Write access</h2><div class="hint">Checking this thread…</div>`);
   await refreshLockStatus();
 
-  if (state.active && activeProvider() === "codex") { renderLockSheet(); }
+  if (state.active && activeProvider() === "codex" && isLockSheetOpen()) { renderLockSheet(); }
 }
 
 function openModelSheet() {
@@ -4205,23 +4557,26 @@ function openNewSession() {
 
 // ---------- usage ----------
 let lastUsageBar = null;
+let lastUsageProvider = null;
 
-function updateUsageLive(rl) {
-  if (lastUsageBar && rl?.primary && typeof rl.primary.usedPercent === "number") {
+function updateUsageLive(rl, provider = activeProvider()) {
+  if (lastUsageBar && provider === lastUsageProvider && rl?.primary && typeof rl.primary.usedPercent === "number") {
     const pct = rl.primary.usedPercent;
     lastUsageBar.style.width = pct + "%";
     lastUsageBar.parentElement.classList.toggle("hot", pct >= 80);
   }
 }
 
-function gaugeHtml(name, p) {
-  const win = p.windowDurationMins >= 10080 ? "weekly" : p.windowDurationMins >= 1440 ? "daily" : `${p.windowDurationMins}m`;
-  const hasPct = typeof p.usedPercent === "number";
-  const label = name === "primary" ? `Rate limit · ${win}` : "Secondary limit";
+function gaugeHtml(p) {
+  const mins = Number(p.windowDurationMins ?? 0);
+  const win = mins >= 1440 ? `${Math.round(mins / 1440)}d` : mins >= 60 ? `${Math.round(mins / 60)}h` : `${mins}m`;
+  const hasPct = typeof p.usedPercent === "number" && Number.isFinite(p.usedPercent);
+  const pct = hasPct ? Math.max(0, Math.min(100, p.usedPercent)) : null;
+  const label = `${win} usage limit`;
   let html = `<div class="gauge"><div class="top"><span class="name">${label}</span>`;
 
   if (hasPct) {
-    html += `<span class="pct">${p.usedPercent}%</span></div><div class="bar ${p.usedPercent >= 80 ? "hot" : ""}"><span style="width:${p.usedPercent}%"></span></div>`;
+    html += `<span class="pct">${Math.round(pct * 10) / 10}%</span></div><div class="bar ${pct >= 80 ? "hot" : ""}"><span style="width:${pct}%"></span></div>`;
   } else {
     html += `<span class="pct" style="font-size:14px">${esc(p.status || "active")}</span></div>`;
   }
@@ -4475,78 +4830,110 @@ async function openLinkedThread() {
   openThread(found || { id, provider: prov || state.provider, cwd: null, name: null, preview: "Session" });
 }
 
-async function openUsageSheet() {
-  openSheet(`<h2>Usage & limits</h2><div class="hint">Loading…</div>`);
+let usageSheetRequestSeq = 0;
 
-  let d;
-  const usageProvider = activeProvider();
+function usageTabsHtml(provider) {
+  return `<div class="seg usage-seg" aria-label="Usage provider">${Object.entries(PROVIDER_LABELS).map(([id, label]) =>
+    `<button data-usage-provider="${id}" class="${id === provider ? "on" : ""}" aria-pressed="${id === provider}">${label}</button>`
+  ).join("")}</div>`;
+}
 
-  try { d = await api("/api/usage?provider=" + encodeURIComponent(usageProvider)); } catch (e) { $("sheetBody").innerHTML = `<h2>Usage</h2><div class="hint">Failed: ${esc(e.message)}</div>`; return; }
+function wireUsageSheet(provider) {
+  $("sheetBody").querySelectorAll("[data-usage-provider]").forEach((button) => {
+    button.onclick = () => loadUsageSheet(button.dataset.usageProvider);
+  });
+  $("sheetBody").querySelector("[data-usage-retry]")?.addEventListener("click", () => loadUsageSheet(provider));
+}
+
+function usageUnavailableText(provider) {
+  if (provider === "grok") { return "Grok’s native billing endpoint did not return a current account usage window. Retry, or run /usage in Grok to verify the account."; }
+  if (provider === "claude") { return "Claude account limits are unavailable. This app reads the same active-account status as cswap status; verify that cswap is installed and the account is managed."; }
+  return "Codex did not return account-limit data. Tap Retry; the last successful snapshot is kept instead of being erased by a transient failure.";
+}
+
+function renderUsageSheet(provider, d, error = null) {
+  const body = $("sheetBody");
+
+  if (error) {
+    body.innerHTML = `<h2>Usage & limits</h2>${usageTabsHtml(provider)}<div class="usage-note">Could not refresh ${esc(PROVIDER_LABELS[provider])}: ${esc(error.message)}</div><button class="primary" data-usage-retry>Retry</button>`;
+    wireUsageSheet(provider);
+    return;
+  }
 
   const acc = d.account || {};
-  const rl = d.rateLimits?.rateLimits;
-  const usage = d.usage;
-  const credits = d.rateLimits?.rateLimitResetCredits;
+  const limitsEnvelope = d.rateLimits?.rateLimits ? d.rateLimits : (d.rateLimits ? { rateLimits: d.rateLimits } : null);
+  const now = Date.now() / 1000;
+  let rl = limitsEnvelope?.rateLimits;
+  const credits = limitsEnvelope?.rateLimitResetCredits ?? limitsEnvelope?.credits;
+  const billing = limitsEnvelope?.billing;
+  const rateSource = d._meta?.sources?.rateLimits;
+  if (rl) {
+    rl = {
+      primary: !rl.primary?.resetsAt || rl.primary.resetsAt > now ? rl.primary : null,
+      secondary: !rl.secondary?.resetsAt || rl.secondary.resetsAt > now ? rl.secondary : null,
+    };
+  }
 
   const planText = acc.planType ? esc(acc.planType.toUpperCase()) + " plan" : "";
-  let html = `<h2>Usage & limits</h2><div class="hint">${esc(acc.email || PROVIDER_LABELS[usageProvider] || "Agent")}${planText ? " · " + planText : ""}</div>`;
+  let html = `<h2>Usage & limits</h2>${usageTabsHtml(provider)}<div class="hint">${esc(acc.accountLabel || acc.email || PROVIDER_LABELS[provider] || "Agent")}${acc.accountLabel && acc.email ? " · " + esc(acc.email) : ""}${planText ? " · " + planText : ""}</div>`;
 
-  if (rl?.primary) { html += gaugeHtml("primary", rl.primary); }
+  if (rateSource === "last-known" && rl) {
+    const observed = d._meta?.observedAt?.rateLimits;
+    html += `<div class="usage-note">Showing the last successful quota check${observed ? ` from ${relTime(Math.floor(observed / 1000))}` : ""}; the latest refresh ${d._meta?.refreshError ? "failed" : "did not return this field"}.</div>`;
+  }
 
-  if (rl?.secondary) { html += gaugeHtml("secondary", rl.secondary); }
+  if (limitsEnvelope?.fetchedAt && rateSource !== "last-known") {
+    html += `<div class="hint" style="margin:6px 0 10px">Updated ${relTime(limitsEnvelope.fetchedAt)}</div>`;
+  }
+
+  if (rl?.primary) { html += gaugeHtml(rl.primary); }
+
+  if (rl?.secondary) { html += gaugeHtml(rl.secondary); }
 
   if (!rl?.primary && !rl?.secondary) {
-    html += `<div class="hint">No rate-limit data yet. Send a message to populate it.</div>`;
+    html += `<div class="usage-note">${esc(usageUnavailableText(provider))}</div>`;
   }
 
-  if (credits?.availableCount > 0) {
-    html += `<div class="credit">🎟️ <span>${credits.availableCount} rate-limit reset credit available</span></div>`;
+  if (credits?.availableCount > 0 || (credits?.hasCredits && Number(credits?.balance) > 0)) {
+    html += `<div class="credit">🎟️ <span>${esc(String(credits.availableCount ?? credits.balance))} credit${Number(credits.availableCount ?? credits.balance) === 1 ? "" : "s"} available</span></div>`;
   }
 
-  if (usage?.summary) {
-    const s = usage.summary;
-    html += `<div class="seclabel">All time</div><div class="stat-grid">
-      <div class="stat"><div class="v">${fmtTokens(s.lifetimeTokens)}</div><div class="k">lifetime tokens</div></div>
-      <div class="stat"><div class="v">${fmtTokens(s.peakDailyTokens)}</div><div class="k">peak day</div></div>
-      <div class="stat"><div class="v">${s.currentStreakDays}d</div><div class="k">current streak</div></div>
-      <div class="stat"><div class="v">${Math.round((s.longestRunningTurnSec||0)/60)}m</div><div class="k">longest turn</div></div>
+  if (billing && (billing.prepaidBalanceUSD > 0 || billing.onDemandCapUSD > 0 || billing.onDemandUsedUSD > 0)) {
+    html += `<div class="seclabel">Credits</div><div class="stat-grid">
+      <div class="stat"><div class="v">$${Number(billing.prepaidBalanceUSD || 0).toFixed(2)}</div><div class="k">prepaid balance</div></div>
+      <div class="stat"><div class="v">$${Number(billing.onDemandUsedUSD || 0).toFixed(2)}</div><div class="k">on-demand used</div></div>
     </div>`;
   }
 
-  const buckets = usage?.dailyUsageBuckets ?? [];
-
-  if (buckets.length) {
-    const recent = buckets.slice(-30);
-    const max = Math.max(...recent.map((b) => b.tokens), 1);
-    html += `<div class="seclabel">Daily tokens (recent)</div><div class="spark">` +
-      recent.map((b) => `<div style="height:${Math.max(4, (b.tokens / max) * 100)}%" title="${b.startDate}: ${fmtTokens(b.tokens)}"></div>`).join("") + `</div>`;
-  }
-
-  // Claude-style usage: session cost + last-turn tokens + per-model breakdown.
-  if (usage && usage.sessionCostUSD != null) {
-    html += `<div class="seclabel">This session</div><div class="stat-grid">
-      <div class="stat"><div class="v">$${usage.sessionCostUSD.toFixed(2)}</div><div class="k">spend this session</div></div>`;
-
-    if (usage.lastInputTokens != null) {
-      html += `<div class="stat"><div class="v">${fmtTokens(usage.lastInputTokens)}</div><div class="k">last input tokens</div></div>`;
-    }
-
-    if (usage.lastOutputTokens != null) {
-      html += `<div class="stat"><div class="v">${fmtTokens(usage.lastOutputTokens)}</div><div class="k">last output tokens</div></div>`;
-    }
-
-    html += `</div>`;
-
-    if (usage.models?.length) {
-      html += `<div class="seclabel">Models used (last turn)</div>` +
-        usage.models.map((m) => `<div class="credit" style="background:var(--bg3);border-color:var(--border)"><span>${esc(m.model)} · ${fmtTokens(m.tokens)} tok${m.costUSD != null ? " · $" + m.costUSD.toFixed(3) : ""}</span></div>`).join("");
-    }
-  }
-
   html += notificationsSectionHtml();
-  openSheet(html);
-  lastUsageBar = $("sheetBody").querySelector(".bar > span");
+  body.innerHTML = html;
+  body.querySelector("h2").id = "sheetTitle";
+  lastUsageBar = body.querySelector(".bar > span");
+  lastUsageProvider = provider;
+  wireUsageSheet(provider);
   wireNotifications();
+}
+
+async function loadUsageSheet(provider) {
+  if (!PROVIDER_LABELS[provider]) { return; }
+  const requestSeq = ++usageSheetRequestSeq;
+  $("sheetBody").dataset.sheetKind = "usage";
+  $("sheetBody").innerHTML = `<h2>Usage & limits</h2>${usageTabsHtml(provider)}<div class="hint">Refreshing ${esc(PROVIDER_LABELS[provider])}…</div>`;
+  wireUsageSheet(provider);
+
+  try {
+    const data = await api("/api/usage?refresh=1&provider=" + encodeURIComponent(provider));
+    if (requestSeq === usageSheetRequestSeq && $("sheet").classList.contains("show") && $("sheetBody").dataset.sheetKind === "usage") { renderUsageSheet(provider, data); }
+  } catch (error) {
+    if (requestSeq === usageSheetRequestSeq && $("sheet").classList.contains("show") && $("sheetBody").dataset.sheetKind === "usage") { renderUsageSheet(provider, null, error); }
+  }
+}
+
+function openUsageSheet() {
+  const provider = activeProvider();
+  openSheet(`<h2>Usage & limits</h2>${usageTabsHtml(provider)}<div class="hint">Refreshing ${esc(PROVIDER_LABELS[provider])}…</div>`);
+  wireUsageSheet(provider);
+  loadUsageSheet(provider);
 }
 
 // ---------- running-thread tracking ----------
@@ -4617,7 +5004,7 @@ function scheduleListReconcile() {
   listReconcileTimer = setTimeout(() => {
     listReconcileTimer = null;
 
-    if (state.listView === "recent") { loadThreads(false).catch(() => {}); }
+    loadThreads(false).catch(() => {});
   }, LIST_RECONCILE_MS);
 }
 
@@ -4646,13 +5033,15 @@ function touchLiveThread(provider, tid) {
   return affected;
 }
 
-function rerankRecentRows() {
-  if (state.listView !== "recent" || !state.threads.length) { return; }
+function rerankVisibleRows({ revealRunning = false } = {}) {
+  if (!state.threads.length) { return; }
 
   const scrollTop = $("listView").scrollTop;
   state.threads = rankLiveThreads(state.threads, state.running);
   renderRows(false);
-  $("listView").scrollTop = scrollTop;
+  // Starting work is the highest-signal list transition: reveal its promoted
+  // row immediately. Completion keeps the reader's position stable.
+  $("listView").scrollTop = revealRunning ? 0 : scrollTop;
 }
 
 function markRunning(provider, tid, on, { confidence = "unknown", live = true } = {}) {
@@ -4665,19 +5054,9 @@ function markRunning(provider, tid, on, { confidence = "unknown", live = true } 
   if (on) { state.running.add(k); } else { state.running.delete(k); }
 
   if (had !== on && live) {
-    const affected = touchLiveThread(provider, tid);
+    touchLiveThread(provider, tid);
 
-    if (state.listView === "recent") {
-      rerankRecentRows();
-    } else {
-      updateRowRunning(tid, on);
-
-      for (const parentId of affected) {
-        const parent = state.threads.find((thread) => thread.id === parentId);
-
-        if (parent) { updateRowRunning(parent.id, isThreadRunning(parent)); }
-      }
-    }
+    rerankVisibleRows({ revealRunning: on });
 
     scheduleListReconcile();
   }
@@ -4763,6 +5142,7 @@ async function resyncOpenThread({ force = false } = {}) {
     renderHistory(res.thread, res.itemWindow);
     state.fetching = false;
     setCursor(res);
+    reconcileNativeCodexQueue(t);
     if (res.runtime) {
       markRunning(t.provider, t.id, !!res.runtime.running, { confidence: res.runtime.confidence });
     }
@@ -4770,9 +5150,11 @@ async function resyncOpenThread({ force = false } = {}) {
     if (wasAtBottom) { scrollDown({ force: true }); } else { b.scrollTop = prevTop; syncStick(); }
 
     if (isRunning(t.provider, t.id)) {
+      state.activeTurnId = res.runtime?.source === "bridge" ? (res.runtime?.turnId ?? state.activeTurnId) : null;
       setBusy(true, { external: res.runtime?.source !== "bridge" });
       setLivePill(true, "Running — following live");
     } else if (res.runtime && ["provider", "bridge", "marker"].includes(res.runtime.confidence)) {
+      state.activeTurnId = null;
       setBusy(false);
       flushPending();
     }
@@ -4837,6 +5219,7 @@ function connectEvents() {
     }
 
     refreshApprovals();
+    refreshLockStatus();
   };
   es.onerror = () => {
     $("connDot").classList.remove("on");

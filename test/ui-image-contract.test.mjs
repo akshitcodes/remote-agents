@@ -22,21 +22,37 @@ test("Grok image UI is disabled and cancel-before-send requires owned active wor
 });
 
 test("stop, draft adoption, and reconnect preserve queue truth", () => {
-  assert.match(html, /const stopped = await interruptApi\(\);[\s\S]*?if \(!stopped\) \{ return; \}[\s\S]*?state\.pending = \[\];\s*savePending\(\)/);
+  assert.match(html, /const stopped = await interruptApi\(\);[\s\S]*?if \(!stopped\) \{ return; \}[\s\S]*?await removePendingEntry\(p, \{ flush: false \}\)/);
   assert.match(html, /migrateThreadLocalState\(activeProvider\(\), state\.active\.id, params\.sessionId\)/);
   assert.match(html, /await api\("\/api\/message"[\s\S]*?finishSendProgress\(\);\s*dropFailedSend\(id\)/);
   assert.match(html, /Completion could not be confirmed — check the thread, then tap Retry to try now/);
   assert.match(html, /Delivery uncertain — check the latest messages, then tap Retry only if needed/);
-  assert.match(html, /if \(p\.bubble\) \{ p\.bubble\.remove\(\); \}/);
+  assert.match(html, /p\.bubble\?\.remove\(\)/);
   assert.match(html, /function openPendingEditSheet\(entry\)/);
-  assert.match(html, /function removePendingEntry\(entry\)/);
+  assert.match(html, /function removePendingEntry\(entry, \{ flush = true \} = \{\}\)/);
   assert.match(html, /entry\.dispatching = true;\s*entry\.mayHaveDispatched = true;\s*syncPendingActions\(entry\);\s*savePending\(\)/);
   assert.match(html, /edit\.textContent = "Edit"/);
   assert.match(html, /cancel\.textContent = "Cancel"/);
   assert.match(html, /mayHaveDispatched: !!e\.mayHaveDispatched/);
+  assert.match(html, /viaCodexQueue: !!e\.viaCodexQueue/);
+  assert.match(html, /awaitingOwnership: !!e\.awaitingOwnership/);
   assert.match(html, /entry\.dispatching \|\| entry\.mayHaveDispatched/);
   assert.match(html, /state\.pending\.includes\(entry\) \|\| entry\.dispatching \|\| entry\.mayHaveDispatched/);
   assert.match(html, /e\.code === "delivery_uncertain" \|\| !!e\.reach \|\| !e\.status \|\| e\.status >= 500/);
+  assert.match(html, /const external = res\.runtime\?\.source !== "bridge"/);
+  assert.match(html, /state\.activeTurnId = external \? null : \(res\.runtime\?\.turnId \?\? state\.activeTurnId\)/);
+  assert.match(html, /Queued in Codex — sends automatically when the current turn finishes/);
+  assert.match(html, /persistExternalCodexQueue\(entry\)/);
+  assert.match(html, /\/api\/queue\/update/);
+  assert.match(html, /\/api\/queue\/delete/);
+  assert.match(html, /state\.pending\.find\(\(entry\) => entry\.nativeQueue\)/);
+  assert.match(html, /\/api\/thread\/runtime\?provider=codex/);
+  assert.match(html, /Saved locally — waiting for ownership sync/);
+  assert.match(server, /turnId: owned \? \(provider\.activeTurnId\?\.\(threadId\) \?\? null\) : null/);
+  assert.match(server, /"POST \/api\/queue"/);
+  assert.match(server, /"GET \/api\/thread\/runtime"/);
+  assert.match(html, /setLockStatus\(\{ state: "unknown", label: "Check failed" \}\)/);
+  assert.match(html, /refreshApprovals\(\);\s*refreshLockStatus\(\);/);
 });
 
 test("task rows expose grouped subagents and device-scoped notification modes", () => {
@@ -81,16 +97,32 @@ test("task list has compact provider-agnostic and provider-specific views", () =
 test("live run-state transitions re-rank Recent Work and reconcile canonical state", () => {
   assert.match(html, /function rankLiveThreads\(threads, runningKeys\)/);
   assert.match(html, /const runningNow = isThreadRunning\(t\)/);
-  assert.match(html, /if \(had !== on && live\)[\s\S]*?touchLiveThread\(provider, tid\)[\s\S]*?rerankRecentRows\(\)[\s\S]*?scheduleListReconcile\(\)/);
-  assert.match(html, /function rerankRecentRows\(\)[\s\S]*?state\.threads = rankLiveThreads\(state\.threads, state\.running\)[\s\S]*?scrollTop/);
+  assert.match(html, /if \(had !== on && live\)[\s\S]*?touchLiveThread\(provider, tid\)[\s\S]*?rerankVisibleRows\(\{ revealRunning: on \}\)[\s\S]*?scheduleListReconcile\(\)/);
+  assert.match(html, /function rerankVisibleRows\(\{ revealRunning = false \} = \{\}\)[\s\S]*?state\.threads = rankLiveThreads\(state\.threads, state\.running\)[\s\S]*?revealRunning \? 0 : scrollTop/);
+  assert.match(html, /state\.threads = rankLiveThreads\(state\.threads, state\.running\);[\s\S]*?renderRows\(listView === "provider" && append\)/);
   assert.match(html, /const LIST_RECONCILE_MS = 600/);
-  assert.match(html, /if \(state\.listView === "recent"\) \{ loadThreads\(false\)\.catch/);
+  assert.match(html, /listReconcileTimer = setTimeout\([\s\S]*?loadThreads\(false\)\.catch/);
   assert.match(html, /markRunning\(threadProvider, t\.id, !!t\.running, \{ confidence: t\.runConfidence, live: false \}\)/);
 
   const notifyStart = html.indexOf("function onNotify(method, params, provider)");
   const notifyEnd = html.indexOf("// Once real turn output arrives", notifyStart);
   const notify = html.slice(notifyStart, notifyEnd);
   assert.ok(notify.indexOf('method === "turn/started"') < notify.indexOf("provider !== activeProvider()"), "cross-provider run state is recorded before transcript filtering");
+});
+
+test("usage sheet shows account limits for all providers and never thread usage", () => {
+  assert.match(html, /data-usage-provider/);
+  assert.match(html, /loadUsageSheet\(button\.dataset\.usageProvider\)/);
+  assert.match(html, /\/api\/usage\?refresh=1&provider=/);
+  assert.match(html, /const limitsEnvelope = d\.rateLimits\?\.rateLimits/);
+  assert.match(html, /Showing the last successful quota check/);
+  assert.match(html, /Grok’s native billing endpoint/);
+  assert.match(html, /esc\(String\(credits\.availableCount \?\? credits\.balance\)\)/);
+  assert.match(html, /provider === lastUsageProvider/);
+  assert.match(html, /dataset\.sheetKind === "usage"/);
+  assert.doesNotMatch(html, /Latest local turn/);
+  assert.doesNotMatch(html, /last input tokens/);
+  assert.doesNotMatch(html, /Models used \(last turn\)/);
 });
 
 test("desktop workspace keeps session navigation visible and constrains the chat", () => {
@@ -114,6 +146,19 @@ test("desktop workspace keeps session navigation visible and constrains the chat
   assert.match(html, /document\.body\.classList\.remove\("thread-open"\)/);
   assert.match(html, /event\.metaKey \|\| event\.ctrlKey/);
   assert.match(html, /event\.key === "Escape"/);
+  assert.match(server, /return res\.end\(readFileSync\(indexHtmlPath\)\)/);
+});
+
+test("Codex write access stays provider-specific and retryable after a conflict", () => {
+  assert.match(html, /const codexThread = state\.active && activeProvider\(\) === "codex" && !state\.active\.draft/);
+  assert.match(html, /id="takeLockBtn">Try to get write access/);
+  assert.match(html, /id="retryTakeLockBtn">Try again/);
+  assert.match(html, /retryTakeLockBtn[\s\S]*?tryTakeLock/);
+  assert.match(html, /function tryTakeLock\(btn\)[\s\S]*?\/api\/thread\/lock\/warm/);
+  assert.match(html, /thread_locked_elsewhere[\s\S]*?renderLockSheet\(\)/);
+  assert.match(html, /function isLockSheetOpen\(\)[\s\S]*?dataset\.sheetKind === "lock"/);
+  assert.match(html, /setLockStatus\(next\);[\s\S]*?if \(isLockSheetOpen\(\)\) \{ renderLockSheet\(\); \}/);
+  assert.doesNotMatch(html, />Warm up</);
 });
 
 test("composer settings fail closed and distinguish confirmed values from next-turn overrides", () => {
@@ -125,8 +170,8 @@ test("composer settings fail closed and distinguish confirmed values from next-t
   assert.match(html, /const accepted = await api\("\/api\/message"/);
   assert.match(html, /const dispatch = \{[\s\S]*?model: state\.model,[\s\S]*?approvalPolicy: m\.approvalPolicy/);
   assert.match(html, /Current turn accepted · next override saved/);
-  assert.match(html, /state\.sendMode === "steer" && !state\.externalTurn/);
-  assert.match(html, /Queue \(external\)/);
+  assert.match(html, /state\.sendMode === "steer" && state\.turnOwnership === "bridge"/);
+  assert.match(html, /Codex queue/);
   assert.match(html, /state\.uploadingAttachments > 0 \|\| !readiness\.ready/);
   assert.match(html, /Nothing was queued or sent/);
   assert.match(html, /providerExact/);
@@ -137,7 +182,7 @@ test("composer settings fail closed and distinguish confirmed values from next-t
   assert.match(html, /class="opt opt-button/);
   assert.match(html, /threadProvider !== state\.modelsProvider/);
   assert.match(html, /if \(!state\.active\) \{ await initModels\(name\); \}/);
-  assert.match(html, /const usageProvider = activeProvider\(\)/);
+  assert.match(html, /function openUsageSheet\(\)[\s\S]*?const provider = activeProvider\(\)/);
   assert.match(server, /validateDispatchSettings\(provider\.name, body, listed, recorded\)/);
   assert.match(server, /validateNewThreadModel\(p\.name, body\.model, listed\)/);
 });
