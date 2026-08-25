@@ -737,8 +737,9 @@ async function api(path, body) {
 
   try {
     res = await fetch(path, body && { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-  } catch {
+  } catch (cause) {
     // The request never left the phone.
+    console.warn("Bridge request failed before a response", path, cause);
     throw unreachable(navigator.onLine ? "host" : "phone");
   }
 
@@ -754,7 +755,18 @@ async function api(path, body) {
     throw Object.assign(new Error(b.error || res.statusText), { code: b.code, status: res.status });
   }
 
-  return res.json();
+  try {
+    return await res.json();
+  } catch {
+    // For a delivery endpoint, losing/truncating a successful JSON response is
+    // ambiguous even though HTTP itself completed. Callers combine this fact
+    // with their exact dispatch stage before deciding whether retry is safe.
+    throw Object.assign(new Error("the bridge response was incomplete"), {
+      code: "invalid_bridge_response",
+      status: res.status,
+      responseInvalid: true,
+    });
+  }
 }
 
 // ---------- offline cache (IndexedDB) ----------
@@ -2743,10 +2755,10 @@ function savePending() {
   try { localStorage.setItem(PENDING_KEY, JSON.stringify(all)); } catch {}
 }
 
-async function removePendingEntry(entry, { flush = true } = {}) {
+async function removePendingEntry(entry, { flush = true, allowUncertain = false } = {}) {
   let at = state.pending.indexOf(entry);
 
-  if (at < 0 || entry.dispatching || entry.mayHaveDispatched) { return false; }
+  if (at < 0 || entry.dispatching || (entry.mayHaveDispatched && !allowUncertain)) { return false; }
 
   if (entry.nativeQueue && entry.nativeQueueId) {
     entry.dispatching = true;
@@ -2855,10 +2867,35 @@ function openPendingEditSheet(entry) {
 function syncPendingActions(entry) {
   entry.chip?.querySelector(".pending-actions")?.remove();
 
-  if (!entry.chip?.isConnected || entry.dispatching || entry.mayHaveDispatched) { return; }
+  if (!entry.chip?.isConnected || entry.dispatching) { return; }
 
   const actions = document.createElement("span");
   actions.className = "pending-actions";
+
+  if (entry.mayHaveDispatched) {
+    const check = document.createElement("button");
+    check.type = "button";
+    check.className = "pending-action edit";
+    check.textContent = "Check status";
+    check.onclick = async (event) => {
+      event.stopPropagation();
+      check.disabled = true;
+      try { await checkPendingDelivery(entry); } finally { if (check.isConnected) { check.disabled = false; } }
+    };
+    const dismiss = document.createElement("button");
+    dismiss.type = "button";
+    dismiss.className = "pending-action cancel";
+    dismiss.textContent = "Dismiss";
+    dismiss.title = "Stop retrying and remove this local copy; this cannot recall a message that already reached the agent";
+    dismiss.onclick = (event) => {
+      event.stopPropagation();
+      removePendingEntry(entry, { allowUncertain: true });
+    };
+    actions.append(check, dismiss);
+    entry.chip.appendChild(actions);
+    return;
+  }
+
   const edit = document.createElement("button");
   edit.type = "button";
   edit.className = "pending-action edit";
@@ -3014,16 +3051,16 @@ async function reconcileNativeCodexQueue(target = state.active) {
   }
 }
 
-function retryPendingEntry(entry) {
+async function retryPendingEntry(entry) {
   entry.retryRequired = false;
+  entry.dispatching = false;
 
   if (entry.nativeQueue) {
     entry.retryWithNewId = false;
     entry.mayHaveDispatched = false;
     markSendFailed(entry.bubble, null);
     savePending();
-    reconcileNativeCodexQueue();
-    return;
+    return reconcileNativeCodexQueue();
   }
 
   if (entry.viaCodexQueue) {
@@ -3031,8 +3068,7 @@ function retryPendingEntry(entry) {
     entry.mayHaveDispatched = false;
     markSendFailed(entry.bubble, null);
     savePending();
-    persistExternalCodexQueue(entry);
-    return;
+    return persistExternalCodexQueue(entry);
   }
 
   if (entry.retryWithNewId) { entry.requestId = newRequestId(); }
@@ -3043,9 +3079,67 @@ function retryPendingEntry(entry) {
   savePending();
 
   if (entry.retryAsSteer && state.busy) {
-    trySteer(entry);
+    return trySteer(entry);
   } else {
-    doSend(entry.text, { attachments: entry.attachments ?? [], bubble: entry.bubble, requestId: entry.requestId, pendingEntry: entry });
+    return doSend(entry.text, { attachments: entry.attachments ?? [], bubble: entry.bubble, requestId: entry.requestId, pendingEntry: entry });
+  }
+}
+
+async function checkPendingDelivery(entry) {
+  if (!state.pending.includes(entry)) { return; }
+
+  const label = entry.chip?.querySelector(":scope > span");
+  if (label) { label.textContent = "Checking whether the bridge received this message…"; }
+
+  try {
+    const query = new URLSearchParams({
+      provider: entry.provider || activeProvider(),
+      method: entry.retryAsSteer ? "steer" : "send",
+      requestId: entry.requestId,
+      threadId: entry.threadId || state.active?.id || "",
+    });
+    const result = await api(`/api/send/status?${query}`);
+
+    if (result.state === "accepted") {
+      const at = state.pending.indexOf(entry);
+      if (at >= 0) { state.pending.splice(at, 1); }
+      entry.chip?.remove();
+      markSendFailed(entry.bubble, null);
+      savePending();
+      scheduleExternalRefresh();
+      return;
+    }
+
+    // The status request itself is finished. Keep Check status available even
+    // while the original provider operation is still in flight.
+    entry.dispatching = false;
+    entry.mayHaveDispatched = result.state === "uncertain" || result.state === "dispatching";
+    entry.retryRequired = result.state !== "dispatching";
+    entry.retryWithNewId = result.state === "uncertain";
+
+    if (result.state === "not_found" || result.state === "failed") {
+      entry.dispatching = false;
+      entry.mayHaveDispatched = false;
+      entry.retryRequired = true;
+      entry.retryWithNewId = false;
+      if (label) { label.textContent = "Not sent — Retry, Edit, or Cancel"; }
+      markSendFailed(entry.bubble, () => retryPendingEntry(entry));
+    } else if (result.state === "dispatching") {
+      if (label) { label.textContent = "The bridge is still delivering this message"; }
+      markSendFailed(entry.bubble, null);
+    } else {
+      if (label) { label.textContent = "Delivery remains uncertain — retry only if it is absent from the thread"; }
+      markSendFailed(entry.bubble, () => retryPendingEntry(entry), { uncertain: true });
+    }
+
+    savePending();
+    syncPendingActions(entry);
+  } catch (error) {
+    if (label) { label.textContent = "Could not check yet — the message remains saved locally"; }
+    entry.dispatching = false;
+    savePending();
+    syncPendingActions(entry);
+    throw error;
   }
 }
 
@@ -3183,9 +3277,10 @@ async function trySteer(entry) {
 
     const label = entry.chip?.querySelector("span");
 
-    const uncertain = e.code === "delivery_uncertain" || !!e.reach || !e.status || e.status >= 500;
+    const uncertain = e.code === "delivery_uncertain" || !!e.reach || !!e.responseInvalid || !e.status;
 
     if (uncertain) {
+      entry.dispatching = false;
       entry.retryRequired = true;
       entry.retryWithNewId = e.code === "delivery_uncertain";
       entry.retryAsSteer = true;
@@ -3193,6 +3288,7 @@ async function trySteer(entry) {
       savePending();
       if (label) { label.textContent = "Steer delivery could not be confirmed — check the latest messages, then tap Retry if needed"; }
       markSendFailed(entry.bubble, () => retryPendingEntry(entry), { uncertain: true });
+      syncPendingActions(entry);
       return;
     }
 
@@ -3473,6 +3569,7 @@ async function doSend(text, { attachments = [], bubble, requestId, pendingEntry 
   }
   setBusy(true);
   markSendFailed(bubble, null);
+  let messageAttempted = false;
 
   try {
     if (m.unknown) {
@@ -3492,6 +3589,7 @@ async function doSend(text, { attachments = [], bubble, requestId, pendingEntry 
     const settingsJob = state.settingsSave.catch(() => {}).then(() => api("/api/thread/settings", settingsPayload));
     state.settingsSave = settingsJob;
     await settingsJob;
+    messageAttempted = true;
     const accepted = await api("/api/message", {
       provider: dispatch.provider,
       threadId: dispatch.threadId, text,
@@ -3590,16 +3688,17 @@ async function doSend(text, { attachments = [], bubble, requestId, pendingEntry 
       } else {
         pendingEntry.dispatching = false;
         pendingEntry.retryRequired = true;
-        pendingEntry.retryWithNewId = e.code === "delivery_uncertain";
-        pendingEntry.mayHaveDispatched = e.code === "delivery_uncertain" || !!e.reach || !e.status || e.status >= 500;
+        pendingEntry.retryWithNewId = messageAttempted && e.code === "delivery_uncertain";
+        pendingEntry.mayHaveDispatched = messageAttempted && (e.code === "delivery_uncertain" || !!e.reach || !!e.responseInvalid || !e.status);
         savePending();
         if (label) { label.textContent = pendingEntry.mayHaveDispatched ? "Delivery could not be confirmed — check the thread, then retry if needed" : "Not sent — tap Retry"; }
         markSendFailed(bubble, retry, { uncertain: pendingEntry.mayHaveDispatched });
         syncPendingActions(pendingEntry);
       }
     } else if (e.code !== "thread_locked_elsewhere") {
-      recordFailedSend(threadId, text, id, activeProvider(), attachments, e.code === "delivery_uncertain");
-      markSendFailed(bubble, retry, { uncertain: e.code === "delivery_uncertain" });
+      const uncertain = messageAttempted && (e.code === "delivery_uncertain" || !!e.reach || !!e.responseInvalid || !e.status);
+      recordFailedSend(threadId, text, id, activeProvider(), attachments, uncertain);
+      markSendFailed(bubble, retry, { uncertain });
     }
 
     if (!bubble) { chip("⚠️", "send failed: " + e.message); }
@@ -3625,10 +3724,20 @@ function markSendFailed(bubble, onRetry, { uncertain = false } = {}) {
   btn.className = "retry";
   btn.title = uncertain ? "Delivery uncertain — check the latest messages before retrying" : "Not sent — tap to retry";
   btn.textContent = uncertain ? "⚠ Check, then retry" : "⟳ Retry";
-  btn.onclick = () => {
+  const originalText = btn.textContent;
+  btn.onclick = async () => {
     btn.disabled = true;
     btn.textContent = "⟳ Sending…";
-    onRetry();
+    try {
+      await onRetry();
+    } finally {
+      // A successful/reclassified attempt removes or replaces this control. If
+      // it did neither, do not strand a permanently disabled Retry button.
+      if (btn.isConnected && btn.disabled) {
+        btn.disabled = false;
+        btn.textContent = originalText;
+      }
+    }
   };
   bubble.appendChild(btn);
   scrollDown();

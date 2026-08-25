@@ -16,6 +16,16 @@ test("image references survive queue, steer, send, retry, and reload paths", () 
   assert.match(html, /retryWithNewId/);
 });
 
+test("failed delivery recovery distinguishes pre-dispatch failures and remains actionable", () => {
+  assert.match(html, /messageAttempted = false/);
+  assert.match(html, /messageAttempted && \(e\.code === "delivery_uncertain"/);
+  assert.match(html, /responseInvalid/);
+  assert.match(html, /\/api\/send\/status/);
+  assert.match(html, /Not sent — Retry, Edit, or Cancel/);
+  assert.match(html, /removePendingEntry\(entry, \{ allowUncertain: true \}\)/);
+  assert.match(html, /if \(btn\.isConnected && btn\.disabled\)/);
+});
+
 test("Grok image UI is disabled and cancel-before-send requires owned active work", () => {
   assert.match(html, /activeProvider\(\) === "grok"/);
   assert.match(html, /requireActive: true/);
@@ -30,16 +40,16 @@ test("stop, draft adoption, and reconnect preserve queue truth", () => {
   assert.match(html, /Delivery uncertain — check the latest messages, then tap Retry only if needed/);
   assert.match(html, /p\.bubble\?\.remove\(\)/);
   assert.match(html, /function openPendingEditSheet\(entry\)/);
-  assert.match(html, /function removePendingEntry\(entry, \{ flush = true \} = \{\}\)/);
+  assert.match(html, /function removePendingEntry\(entry, \{ flush = true, allowUncertain = false \} = \{\}\)/);
   assert.match(html, /entry\.dispatching = true;\s*entry\.mayHaveDispatched = true;\s*syncPendingActions\(entry\);\s*savePending\(\)/);
   assert.match(html, /edit\.textContent = "Edit"/);
   assert.match(html, /cancel\.textContent = "Cancel"/);
   assert.match(html, /mayHaveDispatched: !!e\.mayHaveDispatched/);
   assert.match(html, /viaCodexQueue: !!e\.viaCodexQueue/);
   assert.match(html, /awaitingOwnership: !!e\.awaitingOwnership/);
-  assert.match(html, /entry\.dispatching \|\| entry\.mayHaveDispatched/);
+  assert.match(html, /if \(entry\.mayHaveDispatched\) \{/);
   assert.match(html, /state\.pending\.includes\(entry\) \|\| entry\.dispatching \|\| entry\.mayHaveDispatched/);
-  assert.match(html, /e\.code === "delivery_uncertain" \|\| !!e\.reach \|\| !e\.status \|\| e\.status >= 500/);
+  assert.match(html, /e\.code === "delivery_uncertain" \|\| !!e\.reach \|\| !!e\.responseInvalid \|\| !e\.status/);
   assert.match(html, /const external = res\.runtime\?\.source !== "bridge"/);
   assert.match(html, /state\.activeTurnId = external \? null : \(res\.runtime\?\.turnId \?\? state\.activeTurnId\)/);
   assert.match(html, /Queued in Codex — sends automatically when the current turn finishes/);

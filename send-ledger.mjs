@@ -45,6 +45,32 @@ export class SendLedger {
     return `${provider || "codex"}:${method}:${requestId}`;
   }
 
+  status({ provider, method, requestId, threadId } = {}) {
+    if (typeof requestId !== "string" || !requestId || requestId.length > 200) {
+      throw Object.assign(new Error("invalid requestId"), { status: 400, code: "invalid_request_id" });
+    }
+
+    const key = this.key(provider, method, requestId);
+    const entry = this.entries.get(key);
+
+    if (!entry || (threadId && entry.threadId !== threadId)) {
+      return { state: "not_found" };
+    }
+
+    // A durable dispatching record without its in-memory operation means the
+    // bridge restarted between journal and outcome. It is the same ambiguity as
+    // an explicitly uncertain provider acknowledgement.
+    const state = entry.state === "dispatching" && !this.inFlight.has(key)
+      ? "uncertain"
+      : entry.state;
+
+    return {
+      state,
+      error: entry.error ?? null,
+      result: state === "accepted" ? entry.result : undefined,
+    };
+  }
+
   prune() {
     const cutoff = this.now() - this.ttlMs;
 

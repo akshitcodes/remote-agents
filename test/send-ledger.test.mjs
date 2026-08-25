@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -100,4 +100,32 @@ test("a provider delivery timeout stays uncertain across restarts and is never r
     (error) => error.status === 409 && error.code === "delivery_uncertain",
   );
   assert.equal(called, false);
+});
+
+test("delivery status distinguishes absent, accepted, failed, and restart-uncertain requests", async (t) => {
+  const file = fixture(t);
+  const ledger = new SendLedger({ file });
+  const base = { provider: "codex", method: "steer", threadId: "thread-status" };
+
+  assert.deepEqual(ledger.status({ ...base, requestId: "missing" }), { state: "not_found" });
+
+  await ledger.run({ ...base, requestId: "accepted" }, async () => ({ turnId: "turn-1" }));
+  assert.deepEqual(ledger.status({ ...base, requestId: "accepted" }), {
+    state: "accepted",
+    error: null,
+    result: { turnId: "turn-1" },
+  });
+
+  await assert.rejects(
+    ledger.run({ ...base, requestId: "failed" }, async () => {
+      throw Object.assign(new Error("known refusal"), { status: 409, code: "known_refusal" });
+    }),
+  );
+  assert.equal(ledger.status({ ...base, requestId: "failed" }).state, "failed");
+
+  const saved = JSON.parse(readFileSync(file, "utf8"));
+  saved.push({ key: "codex:steer:interrupted", ...base, requestId: "interrupted", state: "dispatching", at: Date.now() });
+  writeFileSync(file, JSON.stringify(saved));
+  const restarted = new SendLedger({ file });
+  assert.equal(restarted.status({ ...base, requestId: "interrupted" }).state, "uncertain");
 });

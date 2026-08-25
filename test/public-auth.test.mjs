@@ -81,6 +81,16 @@ test("the loopback setup challenge proves token knowledge without returning the 
   assert.equal(malformed.statusCode, 404);
 });
 
+test("an authenticated client can reconcile an unrecorded send without retrying it", async () => {
+  fixture();
+  const response = await request("/api/send/status?provider=codex&method=steer&threadId=test-thread&requestId=definitely-missing", {
+    headers: { authorization: `Bearer ${TOKEN}` },
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(JSON.parse(response.body), { state: "not_found" });
+});
+
 test("bad token attempts receive exponential rate limiting and block even a later correct token", async () => {
   fixture();
   const headers = { authorization: "Bearer definitely-wrong", "x-forwarded-for": "203.0.113.41" };

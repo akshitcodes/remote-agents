@@ -1253,6 +1253,24 @@ const routes = {
     json(res, 200, { runtime: threadRuntime(p, threadId) });
   },
 
+  "GET /api/send/status": async (_req, res, url) => {
+    const p = providerFromQuery(res, url);
+
+    if (!p) { return; }
+
+    const method = url.searchParams.get("method");
+    if (method !== "send" && method !== "steer") {
+      return json(res, 400, { error: "method must be send or steer", code: "invalid_send_status_request" });
+    }
+
+    json(res, 200, sendLedger.status({
+      provider: p.name,
+      method,
+      requestId: url.searchParams.get("requestId"),
+      threadId: url.searchParams.get("threadId") || null,
+    }));
+  },
+
   "GET /api/models": async (req, res, url) => {
     const p = providerFromQuery(res, url);
 
