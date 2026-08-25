@@ -57,7 +57,7 @@ This foreground command uses the same Tailscale-first flow and persistent
 config, but the local bridge stops when the terminal closes:
 
 ```bash
-npx github:akshitcodes/remote-agents
+npx @akshitcodes/remote-agents
 ```
 
 ## Who can reach the Mac?

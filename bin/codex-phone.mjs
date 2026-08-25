@@ -483,6 +483,7 @@ export async function downloadAndOpenTailscaleInstaller({
     "--fail", "--location", "--progress-bar", "--output", pkg, TAILSCALE_MAC_DOWNLOAD,
   ]);
   if (downloaded.status !== 0) {
+    rmSync(dir, { recursive: true, force: true });
     return {
       ok: false,
       state: "installer_download_failed",
@@ -580,6 +581,7 @@ export async function ensureTailscaleReady({
       notice: "Waiting for you to finish the Tailscale installation; setup will continue automatically…",
     });
     if (!current.installed) {
+      installer?.cleanup?.();
       return {
         ...current,
         state: "installation_timeout",
@@ -1188,7 +1190,7 @@ function agent() {
 function warnIfEphemeral() {
   if (/[/\\](_npx|npm-cache|\.npm)[/\\]/.test(CLI_PATH)) {
     console.log("\n  ⚠  You're running via a temporary npx download, so autostart would point at a path that disappears.");
-    console.log("     Install it persistently first:  npm install -g github:<you>/remote-agents");
+    console.log("     Install it persistently first:  npm install -g @akshitcodes/remote-agents");
     console.log("     Then run:  remote-agents setup\n");
     return true;
   }
@@ -1205,6 +1207,10 @@ async function waitForPort(port, attempts = 240) {
   }
 
   return false;
+}
+
+export function serviceStateIsRunning(state) {
+  return /^running\b|^active$/i.test(String(state ?? "").trim());
 }
 
 async function diagnostics(a, cfg, { verifyOrigin = true } = {}) {
@@ -1267,11 +1273,11 @@ async function setup(a, args) {
 
   const serviceState = a.status();
 
-  if (await portReachable(cfg.port) && !serviceState.startsWith("running")) {
+  if (await portReachable(cfg.port) && !serviceStateIsRunning(serviceState)) {
     throw new Error(`port ${cfg.port} is already in use by another process; choose a different --port`);
   }
 
-  const bridgeAlreadyRunning = serviceState.startsWith("running") && await portReachable(cfg.port);
+  const bridgeAlreadyRunning = serviceStateIsRunning(serviceState) && await portReachable(cfg.port);
   if (bridgeAlreadyRunning) {
     console.log("\n  The background bridge is already running. Keeping it alive so active agent turns are not interrupted.");
   } else {

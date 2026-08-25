@@ -12,6 +12,7 @@ import {
   rememberTransport,
   resolveConfig,
   runTailscaleSetupCommand,
+  serviceStateIsRunning,
   tailscalePreflight,
   configureTailscale,
   verifyCloudflareEntry,
@@ -346,6 +347,14 @@ test("the supervised service starts only the local bridge and cannot race setup 
   assert.match(source, /<string>serve<\/string><string>--service<\/string>/);
   assert.match(source, /ExecStart=\$\{stableNodePath\(\)\} \$\{CLI_PATH\} serve --service/);
   assert.match(source, /bridgeAlreadyRunning[\s\S]*Keeping it alive so active agent turns are not interrupted/);
+});
+
+test("repeat setup preserves running macOS and Linux services but not merely loaded ones", () => {
+  assert.equal(serviceStateIsRunning("running (pid 123)"), true);
+  assert.equal(serviceStateIsRunning("active"), true);
+  assert.equal(serviceStateIsRunning("loaded (not running)"), false);
+  assert.equal(serviceStateIsRunning("inactive"), false);
+  assert.equal(serviceStateIsRunning("not installed"), false);
 });
 
 test("the published package allowlist includes current and portable runtime modules", () => {

@@ -69,6 +69,14 @@ test("task rows expose grouped subagents and device-scoped notification modes", 
   assert.ok(rowTemplate.indexOf("subagent-action") < rowTemplate.indexOf("notify-action"), "subagent disclosure stays left of the right-anchored notification action");
 });
 
+test("installed-app notification onboarding uses the real idempotent subscription path", () => {
+  const start = html.indexOf("function wireNotificationOnboarding()");
+  const end = html.indexOf("function clientId()", start);
+  const flow = html.slice(start, end);
+  assert.match(flow, /await ensurePushSubscription\(\)/);
+  assert.doesNotMatch(flow, /enablePushSubscription/);
+});
+
 test("task list has compact provider-agnostic and provider-specific views", () => {
   assert.match(html, /data-view="recent"/);
   assert.match(html, /data-view="provider"/);
