@@ -14,7 +14,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { connect, createServer as createNetServer } from "node:net";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync, rmSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync, rmSync, realpathSync, renameSync } from "node:fs";
 import { homedir, platform, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -22,6 +22,7 @@ import select, { Separator } from "@inquirer/select";
 import { fileURLToPath } from "node:url";
 
 import { dataPath, readConfig, writeConfig } from "../config.mjs";
+import { localBridgeProofMatches } from "../local-proof.mjs";
 import { augmentedPath, detectProviders, resolvedBinaries, setupBlocker } from "../provider-detect.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -31,6 +32,9 @@ const TRANSPORTS = new Set(["funnel", "serve", "cloudflare"]);
 const APP_TAILSCALE = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
 const TAILSCALE_MAC_DOWNLOAD = "https://pkgs.tailscale.com/stable/Tailscale-latest-macos.pkg";
 const TAILSCALE_MAC_DOWNLOAD_PAGE = "https://tailscale.com/download/mac";
+const TAILSCALE_INSTALLER_IDENTITY = /Developer ID Installer:\s*Tailscale Inc\.\s*\(W5364U7YZB\)/i;
+const TAILSCALE_INSTALLER_TRUST = /Status:\s*signed by a developer certificate issued by Apple for distribution/i;
+const TAILSCALE_INSTALLER_NOTARIZED = /Notarization:\s*trusted by the Apple notary service/i;
 function normalizeTransport(value) {
   // The portability prototype used `tailscale` to mean private Serve. Preserve
   // that saved choice on upgrade; new installs default to public Funnel.
@@ -296,6 +300,24 @@ function portReachable(port) {
   });
 }
 
+export async function verifyLocalBridge(cfg, { fetchImpl = fetch, timeoutMs = 4000 } = {}) {
+  const nonce = randomBytes(32).toString("hex");
+  try {
+    const response = await fetchImpl(`http://127.0.0.1:${cfg.port}/internal/local-proof?nonce=${nonce}`, {
+      redirect: "manual",
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const body = response.status === 200 ? await response.json() : {};
+    const verified = response.status === 200 && localBridgeProofMatches(cfg.token, nonce, body.proof);
+    return {
+      verified,
+      message: verified ? "cryptographically verified Remote Agents bridge" : `listener returned ${response.status} without a valid local proof`,
+    };
+  } catch (error) {
+    return { verified: false, message: error.message };
+  }
+}
+
 // ---------- secure phone transport ----------
 
 function printTransportRanking(selected = "funnel") {
@@ -478,14 +500,16 @@ export async function downloadAndOpenTailscaleInstaller({
   const dir = makeTempDir();
   const pkg = join(dir, "Tailscale.pkg");
 
-  console.log("\n  Downloading the current official Tailscale installer (about 40 MB)…");
+  console.log("\n  Downloading the current official Tailscale installer…");
   const downloaded = await commandRunner("curl", [
-    "--fail", "--location", "--progress-bar", "--output", pkg, TAILSCALE_MAC_DOWNLOAD,
+    "--fail", "--location", "--proto", "=https", "--proto-redir", "=https",
+    "--progress-bar", "--output", pkg, TAILSCALE_MAC_DOWNLOAD,
   ]);
   if (downloaded.status !== 0) {
     rmSync(dir, { recursive: true, force: true });
     return {
       ok: false,
+      connected: false,
       state: "installer_download_failed",
       detail: downloaded.error?.message || "The official Tailscale installer could not be downloaded.",
       remediation: `Open ${TAILSCALE_MAC_DOWNLOAD_PAGE}, install Tailscale, then run remote-agents setup again.`,
@@ -494,10 +518,14 @@ export async function downloadAndOpenTailscaleInstaller({
 
   const signature = signatureRunner("pkgutil", ["--check-signature", pkg], { encoding: "utf8", timeout: 15000 });
   const signatureText = commandOutput(signature);
-  if (signature.status !== 0 || !/Developer ID Installer:\s*Tailscale Inc\b/i.test(signatureText)) {
+  if (signature.status !== 0
+    || !TAILSCALE_INSTALLER_IDENTITY.test(signatureText)
+    || !TAILSCALE_INSTALLER_TRUST.test(signatureText)
+    || !TAILSCALE_INSTALLER_NOTARIZED.test(signatureText)) {
     rmSync(dir, { recursive: true, force: true });
     return {
       ok: false,
+      connected: false,
       state: "installer_signature_invalid",
       detail: "The downloaded package did not verify as a Tailscale Inc. Developer ID installer, so it was not opened.",
       remediation: `Install directly from ${TAILSCALE_MAC_DOWNLOAD_PAGE}.`,
@@ -509,6 +537,7 @@ export async function downloadAndOpenTailscaleInstaller({
   if (opened.status !== 0) {
     return {
       ok: false,
+      connected: false,
       state: "installer_open_failed",
       detail: opened.error?.message || `The verified installer is saved at ${pkg}, but macOS Installer did not open.`,
       remediation: `Open ${pkg} manually, finish installation, then run remote-agents setup again.`,
@@ -553,8 +582,12 @@ export async function ensureTailscaleReady({
   sleepImpl = sleep,
   now = Date.now,
 } = {}) {
+  let deadline;
+  const startDeadline = () => { deadline ??= now() + timeoutMs; };
+  const remaining = () => { startDeadline(); return Math.max(0, deadline - now()); };
   let current = preflight();
   let installer;
+  let loginFailure = "";
 
   if (current.connected) { return current; }
   if (platformName !== "darwin" || !isInteractive) { return current; }
@@ -566,6 +599,7 @@ export async function ensureTailscaleReady({
     if (choice === "cancel") {
       return { ...current, state: "installation_deferred", detail: "Tailscale installation was left for later." };
     }
+    startDeadline();
 
     if (choice === "download-page") {
       if (!openTarget("", TAILSCALE_MAC_DOWNLOAD_PAGE)) {
@@ -577,44 +611,54 @@ export async function ensureTailscaleReady({
     }
 
     current = await pollTailscale((state) => state.installed, {
-      timeoutMs, pollMs, preflight, sleepImpl, now,
+      timeoutMs: remaining(), pollMs, preflight, sleepImpl, now,
       notice: "Waiting for you to finish the Tailscale installation; setup will continue automatically…",
     });
     if (!current.installed) {
-      installer?.cleanup?.();
       return {
         ...current,
         state: "installation_timeout",
         detail: "Tailscale was not installed before the setup wait ended.",
-        remediation: "Finish the open installer, then run remote-agents setup again; your saved setup will be reused.",
+        remediation: installer?.path
+          ? `The verified installer is still at ${installer.path}. Finish it, then run remote-agents setup again; your saved setup will be reused.`
+          : "Finish the open installer, then run remote-agents setup again; your saved setup will be reused.",
       };
     }
   }
 
+  startDeadline();
   openTarget("Tailscale");
-  current = preflight();
+  current = await pollTailscale((state) => state.connected || state.state !== "not_connected", {
+    timeoutMs: Math.min(30000, remaining()), pollMs, preflight, sleepImpl, now,
+    notice: "Waiting for the newly opened Tailscale app to become ready…",
+  });
   if (!current.connected && current.bin) {
     const loginArgs = current.state === "signed_out" ? ["login"] : ["up"];
     console.log(current.state === "signed_out"
       ? "\n  Tailscale is installed. Complete sign-in in the browser window that opens."
       : "\n  Tailscale is installed. Turning it on; approve or sign in if macOS asks.");
-    await commandRunner(current.bin, loginArgs, {
-      timeoutMs,
+    const login = await commandRunner(current.bin, loginArgs, {
+      timeoutMs: Math.min(5 * 60 * 1000, remaining()),
       waitNoticeMs: 15000,
       waitMessage: "  Still waiting for Tailscale login. Finish the open browser/app step; setup is still active…\n",
     });
+    current = preflight();
+    if (login.status !== 0 && !login.timedOut && !current.connected) {
+      loginFailure = login.output || login.error?.message || "Tailscale could not start its login/connect flow.";
+      console.log("  The CLI could not complete login yet. Keeping setup open while you finish in the Tailscale app…");
+    }
   }
 
   current = await pollTailscale((state) => state.connected, {
-    timeoutMs, pollMs, preflight, sleepImpl, now,
+    timeoutMs: remaining(), pollMs, preflight, sleepImpl, now,
     notice: "Waiting for Tailscale to finish connecting; setup will continue automatically…",
   });
   installer?.cleanup?.();
   if (!current.connected) {
     return {
       ...current,
-      state: "connection_timeout",
-      detail: "Tailscale did not connect before the setup wait ended.",
+      state: loginFailure ? "login_failed" : "connection_timeout",
+      detail: loginFailure || "Tailscale did not connect before the setup wait ended.",
       remediation: "Leave Tailscale on and signed in, then run remote-agents setup again; your saved setup will be reused.",
     };
   }
@@ -1076,11 +1120,10 @@ function macAgent() {
   const node = stableNodePath();
   const configHome = process.env.REMOTE_AGENTS_HOME;
 
-  return {
-    install() {
-      mkdirSync(dirname(plist), { recursive: true });
-      mkdirSync(logDir, { recursive: true });
-      const plistXml = `<?xml version="1.0" encoding="UTF-8"?>
+  function writeDefinition() {
+    mkdirSync(dirname(plist), { recursive: true });
+    mkdirSync(logDir, { recursive: true });
+    const plistXml = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>${LABEL}</string>
@@ -1097,19 +1140,31 @@ function macAgent() {
   <key>StandardOutPath</key><string>${xmlEscape(join(logDir, "out.log"))}</string>
   <key>StandardErrorPath</key><string>${xmlEscape(join(logDir, "err.log"))}</string>
 </dict></plist>`;
-      writeFileSync(plist, plistXml, { mode: 0o600 });
-      spawnSync("launchctl", ["bootout", `${domain}/${LABEL}`], { stdio: "ignore" });
-      const loaded = spawnSync("launchctl", ["bootstrap", domain, plist], { stdio: "inherit" });
+    const temp = `${plist}.${process.pid}.tmp`;
+    writeFileSync(temp, plistXml, { mode: 0o600 });
+    renameSync(temp, plist);
+  }
 
-      if (loaded.status !== 0) {
-        throw new Error(`launchctl bootstrap failed (${loaded.status ?? "unknown status"})`);
-      }
+  function reload() {
+    spawnSync("launchctl", ["bootout", `${domain}/${LABEL}`], { stdio: "ignore" });
+    const loaded = spawnSync("launchctl", ["bootstrap", domain, plist], { stdio: "inherit" });
 
-      const started = spawnSync("launchctl", ["kickstart", `${domain}/${LABEL}`], { stdio: "inherit" });
+    if (loaded.status !== 0) {
+      throw new Error(`launchctl bootstrap failed (${loaded.status ?? "unknown status"})`);
+    }
 
-      if (started.status !== 0) {
-        throw new Error(`launchctl kickstart failed (${started.status ?? "unknown status"})`);
-      }
+    const started = spawnSync("launchctl", ["kickstart", `${domain}/${LABEL}`], { stdio: "inherit" });
+
+    if (started.status !== 0) {
+      throw new Error(`launchctl kickstart failed (${started.status ?? "unknown status"})`);
+    }
+  }
+
+  return {
+    writeDefinition,
+    install() {
+      writeDefinition();
+      reload();
     },
     uninstall() {
       spawnSync("launchctl", ["bootout", `${domain}/${LABEL}`], { stdio: "ignore" });
@@ -1142,10 +1197,10 @@ function linuxAgent() {
 
   function sc(...a) { return spawnSync("systemctl", ["--user", ...a], { stdio: "inherit" }); }
 
-  return {
-    install() {
-      mkdirSync(unitDir, { recursive: true });
-      writeFileSync(unit, `[Unit]
+  function writeDefinition() {
+    mkdirSync(unitDir, { recursive: true });
+    const temp = `${unit}.${process.pid}.tmp`;
+    writeFileSync(temp, `[Unit]
 Description=remote-agents
 After=network.target
 
@@ -1157,7 +1212,14 @@ RestartSec=2
 [Install]
 WantedBy=default.target
 `);
-      sc("daemon-reload");
+    renameSync(temp, unit);
+    sc("daemon-reload");
+  }
+
+  return {
+    writeDefinition,
+    install() {
+      writeDefinition();
       sc("enable", "--now", "remote-agents.service");
       console.log("\n  Tip: run `loginctl enable-linger $USER` so it also runs before you log in.");
     },
@@ -1213,6 +1275,22 @@ export function serviceStateIsRunning(state) {
   return /^running\b|^active$/i.test(String(state ?? "").trim());
 }
 
+export function planServiceSetup({ serviceState, portListening, bridgeVerified }) {
+  const serviceRunning = serviceStateIsRunning(serviceState);
+  if (serviceRunning && bridgeVerified) { return "preserve"; }
+  if (bridgeVerified) { return "refuse-unsupervised-bridge"; }
+  if (serviceRunning) { return "refuse-unverified-service"; }
+  if (portListening) { return "refuse-foreign-listener"; }
+  return "install";
+}
+
+export function runningServiceBindingChange(cfg, args) {
+  if (args.port && Number(args.port) !== Number(cfg.port)) { return "port"; }
+  if (args.token && args.token !== cfg.token) { return "pairing token"; }
+  if (args.host && args.host !== (cfg.host || "0.0.0.0")) { return "bind address"; }
+  return null;
+}
+
 async function diagnostics(a, cfg, { verifyOrigin = true } = {}) {
   const service = a?.status?.() ?? "unsupported";
   const local = validPort(cfg.port) ? await portReachable(cfg.port) : false;
@@ -1257,6 +1335,12 @@ async function setup(a, args) {
   if (warnIfEphemeral()) { process.exit(1); }
 
   augmentPath();
+  const previousCfg = readConfig();
+  const serviceState = a.status();
+  const bindingChange = serviceStateIsRunning(serviceState) ? runningServiceBindingChange(previousCfg, args) : null;
+  if (bindingChange) {
+    throw new Error(`cannot change the ${bindingChange} while the background bridge is running; active turns were left untouched. Stop it when idle, then run setup again`);
+  }
   const cfg = await resolveConfig(args);
   const transport = await chooseTransport(cfg, args);
   requireUsableProvider(cfg);
@@ -1271,15 +1355,25 @@ async function setup(a, args) {
     console.log(`\n  Tailscale: ${preflight.detail}`);
   }
 
-  const serviceState = a.status();
-
-  if (await portReachable(cfg.port) && !serviceStateIsRunning(serviceState)) {
-    throw new Error(`port ${cfg.port} is already in use by another process; choose a different --port`);
+  const portListening = await portReachable(cfg.port);
+  const localProof = portListening ? await verifyLocalBridge(cfg) : { verified: false, message: "nothing is listening" };
+  const servicePlan = planServiceSetup({ serviceState, portListening, bridgeVerified: localProof.verified });
+  if (servicePlan === "refuse-foreign-listener") {
+    throw new Error(`port ${cfg.port} is already in use by a process that is not this authenticated Remote Agents bridge; choose a different --port`);
+  }
+  if (servicePlan === "refuse-unsupervised-bridge") {
+    throw new Error(`an authenticated Remote Agents bridge is already running in the foreground on port ${cfg.port}, but it is not the background service. It was left untouched; stop that foreground command when its turns are idle, then run setup again`);
+  }
+  if (servicePlan === "refuse-unverified-service") {
+    throw new Error(`the service manager reports a running bridge, but it could not be authenticated on port ${cfg.port} (${localProof.message}). It was left untouched; inspect remote-agents status and restart only when its active turns are finished`);
   }
 
-  const bridgeAlreadyRunning = serviceStateIsRunning(serviceState) && await portReachable(cfg.port);
+  const bridgeAlreadyRunning = servicePlan === "preserve";
   if (bridgeAlreadyRunning) {
+    a.writeDefinition();
     console.log("\n  The background bridge is already running. Keeping it alive so active agent turns are not interrupted.");
+    console.log("  The saved service definition now points at this package, but the running process is unchanged.");
+    console.log("  When all turns are idle, run `remote-agents stop` and then `remote-agents start` to load package or provider changes.");
   } else {
     a.install();
   }
@@ -1289,7 +1383,7 @@ async function setup(a, args) {
   }
 
   console.log(bridgeAlreadyRunning
-    ? "\n  Background service preserved. It will continue to start at login and restart after a crash."
+    ? "\n  Background service preserved; no active provider process was stopped."
     : "\n  Installed. remote-agents will start at login and restart after a crash.");
 
   if (transport === "cloudflare") {

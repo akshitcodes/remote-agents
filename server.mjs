@@ -27,6 +27,7 @@ import { ThreadSubscriptions } from "./thread-subscriptions.mjs";
 import { pruneAttachments, readAttachment, resolveAttachmentIds, storeAttachment } from "./attachments.mjs";
 import { UsageStateStore } from "./usage-state.mjs";
 import { captureReplyStart, notificationBody, notificationTitle } from "./notification-content.mjs";
+import { localBridgeProof, validLocalProofNonce } from "./local-proof.mjs";
 import {
   readClaudeTranscriptThreadSettings,
   readCodexDbThreadSettings,
@@ -1545,6 +1546,18 @@ function isLoopback(req) {
 export async function handleRequest(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   securityHeaders(req, res);
+
+  // A setup process uses this challenge to prove the saved local port belongs
+  // to the bridge without sending its long-lived pairing token to an unknown
+  // listener. The nonce is single-use client randomness; the HMAC never reveals
+  // the token. Keep the endpoint loopback-only and deliberately unbranded.
+  if (url.pathname === "/internal/local-proof" && req.method === "GET") {
+    const nonce = url.searchParams.get("nonce");
+    if (!isLoopback(req) || !validLocalProofNonce(nonce)) {
+      return json(res, 404, { error: "not found" });
+    }
+    return json(res, 200, { proof: localBridgeProof(TOKEN, nonce) });
+  }
 
   // Internal endpoint for the Claude PreToolUse hook (loopback only, secret-auth
   // inside the provider). No session cookie — the hook has no browser context.

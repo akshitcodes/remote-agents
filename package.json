@@ -1,6 +1,6 @@
 {
   "name": "@akshitcodes/remote-agents",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Self-hosted mobile web UI for your Codex, Claude Code, and Grok CLI sessions.",
   "type": "module",
   "bin": {
@@ -30,6 +30,7 @@
     "onboarding.mjs",
     "usage-state.mjs",
     "notification-content.mjs",
+    "local-proof.mjs",
     "providers/",
     "public/",
     "README.md"

@@ -38,6 +38,13 @@ it is not. After approval, the first HTTPS request can take about 28 seconds
 while Tailscale issues the certificate, so the verifier waits up to 75 seconds.
 Only then does it print the phone pairing QR.
 
+Running `setup` again while the supervised bridge is already healthy does not
+restart it. Active agent turns keep running, and setup safely updates the saved
+service definition to the current package path. When the turns are idle, run
+`remote-agents stop` and then `remote-agents start` to load updated package code
+or newly installed providers; setup prints this reminder rather than claiming
+that the live process changed.
+
 If Tailscale is missing, setup offers to download and signature-check the
 official installer (or open the official download page), then stays active while
 you install and sign in. If Tailscale or its HTTPS URL still cannot be verified,

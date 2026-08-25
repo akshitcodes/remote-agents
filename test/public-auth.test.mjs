@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { configureServer, handleRequest, resetAuthRateLimits } from "../server.mjs";
+import { localBridgeProof } from "../local-proof.mjs";
 
 const TOKEN = "portable-test-token-with-at-least-32-characters";
 
@@ -55,6 +56,21 @@ test("unauthenticated responses reveal no app, version, thread, or path data", a
 
   const manifest = await request("/manifest.webmanifest");
   assert.equal(manifest.statusCode, 401, "PWA assets are private until the pairing cookie exists");
+});
+
+test("the loopback setup challenge proves token knowledge without returning the token", async () => {
+  fixture();
+  const nonce = "a".repeat(64);
+  const response = await request(`/internal/local-proof?nonce=${nonce}`);
+  const body = JSON.parse(response.body);
+  assert.equal(response.statusCode, 200);
+  assert.equal(body.proof, localBridgeProof(TOKEN, nonce));
+  assert.doesNotMatch(response.body, new RegExp(TOKEN));
+
+  const remote = await request(`/internal/local-proof?nonce=${nonce}`, { remoteAddress: "203.0.113.12" });
+  assert.equal(remote.statusCode, 404);
+  const malformed = await request("/internal/local-proof?nonce=short");
+  assert.equal(malformed.statusCode, 404);
 });
 
 test("bad token attempts receive exponential rate limiting and block even a later correct token", async () => {

@@ -3,20 +3,24 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { localBridgeProof } from "../local-proof.mjs";
 
 import {
   downloadAndOpenTailscaleInstaller,
   ensureTailscaleReady,
   originChangeMessage,
+  planServiceSetup,
   providerPreflight,
   rememberTransport,
   resolveConfig,
   runTailscaleSetupCommand,
+  runningServiceBindingChange,
   serviceStateIsRunning,
   tailscalePreflight,
   configureTailscale,
   verifyCloudflareEntry,
   verifyHttpsApp,
+  verifyLocalBridge,
 } from "../bin/codex-phone.mjs";
 
 function tempDir(t, prefix) {
@@ -219,6 +223,76 @@ test("deferring Tailscale exits before download or service setup", async () => {
   assert.equal(installed, false);
 });
 
+test("a concrete Tailscale login failure gets a bounded GUI grace period", async () => {
+  let probes = 0;
+  let now = 0;
+  let sleeps = 0;
+  const result = await ensureTailscaleReady({
+    platformName: "darwin",
+    isInteractive: true,
+    preflight: () => {
+      probes += 1;
+      return { installed: true, connected: false, state: "signed_out", bin: "/Applications/Tailscale" };
+    },
+    openTarget: () => true,
+    commandRunner: async () => ({ status: 1, output: "login policy denied" }),
+    timeoutMs: 3000,
+    pollMs: 1000,
+    now: () => now,
+    sleepImpl: async (ms) => { sleeps += 1; now += ms; },
+  });
+
+  assert.equal(result.state, "login_failed");
+  assert.match(result.detail, /login policy denied/);
+  assert.equal(sleeps, 3);
+  assert.ok(probes < 10);
+});
+
+test("a newly launched Tailscale backend can warm up before login", async () => {
+  let state = { installed: true, connected: false, state: "not_connected", bin: "/Applications/Tailscale" };
+  let sleeps = 0;
+  let loginArgs;
+  const result = await ensureTailscaleReady({
+    platformName: "darwin",
+    isInteractive: true,
+    preflight: () => ({ ...state }),
+    openTarget: () => true,
+    commandRunner: async (_bin, args) => {
+      loginArgs = args;
+      state = { ...state, connected: true, state: "connected", dnsName: "mac.example.ts.net" };
+      return { status: 0 };
+    },
+    sleepImpl: async () => {
+      sleeps += 1;
+      if (sleeps === 2) { state = { ...state, state: "signed_out" }; }
+    },
+  });
+
+  assert.equal(result.connected, true);
+  assert.ok(sleeps >= 2);
+  assert.deepEqual(loginArgs, ["login"]);
+});
+
+test("an installation timeout retains the verified package it tells the user to finish", async () => {
+  let now = 0;
+  let cleaned = false;
+  const result = await ensureTailscaleReady({
+    platformName: "darwin",
+    isInteractive: true,
+    preflight: () => ({ installed: false, connected: false, state: "not_installed" }),
+    chooseInstall: async () => "installer",
+    install: async () => ({ ok: true, path: "/private/tmp/Tailscale.pkg", cleanup: () => { cleaned = true; } }),
+    timeoutMs: 2000,
+    pollMs: 1000,
+    now: () => now,
+    sleepImpl: async (ms) => { now += ms; },
+  });
+
+  assert.equal(result.state, "installation_timeout");
+  assert.match(result.remediation, /\/private\/tmp\/Tailscale\.pkg/);
+  assert.equal(cleaned, false);
+});
+
 test("the official installer is signature-checked before macOS opens it", async (t) => {
   const dir = tempDir(t, "remote-agents-installer-");
   const calls = [];
@@ -227,13 +301,14 @@ test("the official installer is signature-checked before macOS opens it", async 
     commandRunner: async (bin, args) => { calls.push([bin, args]); return { status: 0 }; },
     signatureRunner: () => ({
       status: 0,
-      stdout: "1. Developer ID Installer: Tailscale Inc. (W5364U7YZB)",
+      stdout: "Status: signed by a developer certificate issued by Apple for distribution\nNotarization: trusted by the Apple notary service\n1. Developer ID Installer: Tailscale Inc. (W5364U7YZB)",
       stderr: "",
     }),
   });
 
   assert.equal(result.ok, true);
   assert.equal(calls[0][0], "curl");
+  assert.deepEqual(calls[0][1].slice(2, 6), ["--proto", "=https", "--proto-redir", "=https"]);
   assert.match(calls[0][1].at(-1), /pkgs\.tailscale\.com\/stable\/Tailscale-latest-macos\.pkg/);
   assert.deepEqual(calls[1], ["open", [join(dir, "Tailscale.pkg")]]);
 });
@@ -337,6 +412,21 @@ test("a Cloudflare Access login never substitutes for authenticated app verifica
   assert.match(result.message, /authenticated Remote Agents app behind it was not verified/);
 });
 
+test("a local listener proves token knowledge without receiving the pairing token", async () => {
+  const cfg = { port: 9440, token: "x".repeat(43) };
+  const verified = await verifyLocalBridge(cfg, {
+    fetchImpl: async (url, options) => {
+      assert.equal(options.headers, undefined, "the pairing token must not be sent to an unknown listener");
+      const nonce = new URL(url).searchParams.get("nonce");
+      return Response.json({ proof: localBridgeProof(cfg.token, nonce) });
+    },
+  });
+  assert.equal(verified.verified, true);
+
+  const foreign = await verifyLocalBridge(cfg, { fetchImpl: async () => Response.json({ proof: "forged" }) });
+  assert.equal(foreign.verified, false);
+});
+
 test("the supervised service starts only the local bridge and cannot race setup transport", () => {
   const source = readFileSync(new URL("../bin/codex-phone.mjs", import.meta.url), "utf8");
   const serveStart = source.indexOf("async function serve(args)");
@@ -355,6 +445,19 @@ test("repeat setup preserves running macOS and Linux services but not merely loa
   assert.equal(serviceStateIsRunning("loaded (not running)"), false);
   assert.equal(serviceStateIsRunning("inactive"), false);
   assert.equal(serviceStateIsRunning("not installed"), false);
+  assert.equal(planServiceSetup({ serviceState: "running (pid 123)", portListening: true, bridgeVerified: true }), "preserve");
+  assert.equal(planServiceSetup({ serviceState: "not installed", portListening: true, bridgeVerified: true }), "refuse-unsupervised-bridge");
+  assert.equal(planServiceSetup({ serviceState: "active", portListening: true, bridgeVerified: false }), "refuse-unverified-service");
+  assert.equal(planServiceSetup({ serviceState: "not installed", portListening: true, bridgeVerified: false }), "refuse-foreign-listener");
+  assert.equal(planServiceSetup({ serviceState: "not installed", portListening: false, bridgeVerified: false }), "install");
+});
+
+test("repeat setup refuses binding changes before mutating a running service config", () => {
+  const cfg = { port: 9440, token: "saved-token", host: "127.0.0.1" };
+  assert.equal(runningServiceBindingChange(cfg, { port: "9550" }), "port");
+  assert.equal(runningServiceBindingChange(cfg, { token: "new-token" }), "pairing token");
+  assert.equal(runningServiceBindingChange(cfg, { host: "0.0.0.0" }), "bind address");
+  assert.equal(runningServiceBindingChange(cfg, { port: "9440", token: "saved-token", host: "127.0.0.1" }), null);
 });
 
 test("the published package allowlist includes current and portable runtime modules", () => {
@@ -362,6 +465,7 @@ test("the published package allowlist includes current and portable runtime modu
   const required = [
     "usage-state.mjs",
     "notification-content.mjs",
+    "local-proof.mjs",
     "provider-detect.mjs",
     "config.mjs",
     "onboarding.mjs",
