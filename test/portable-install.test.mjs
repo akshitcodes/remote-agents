@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import {
+  downloadAndOpenTailscaleInstaller,
+  ensureTailscaleReady,
   originChangeMessage,
   providerPreflight,
   rememberTransport,
@@ -159,6 +161,96 @@ test("Tailscale stopped is distinct from not installed and has exact recovery", 
   assert.match(result.remediation, /Open the Tailscale app/);
 });
 
+test("the guided macOS journey installs, opens login, and resumes without a rerun", async () => {
+  let state = {
+    installed: false,
+    connected: false,
+    state: "not_installed",
+    detail: "Tailscale is not installed.",
+  };
+  const opened = [];
+  const commands = [];
+  let cleaned = false;
+
+  const result = await ensureTailscaleReady({
+    platformName: "darwin",
+    isInteractive: true,
+    preflight: () => ({ ...state }),
+    chooseInstall: async () => "installer",
+    install: async () => {
+      state = { installed: true, connected: false, state: "signed_out", bin: "/Applications/Tailscale" };
+      return { ok: true, cleanup: () => { cleaned = true; } };
+    },
+    openTarget: (name, target) => { opened.push([name, target]); return true; },
+    commandRunner: async (bin, args, options) => {
+      commands.push([bin, args, options.waitMessage]);
+      state = {
+        installed: true,
+        connected: true,
+        state: "connected",
+        dnsName: "remote-agents-mac.example.ts.net",
+        magicDnsEnabled: true,
+        bin,
+      };
+      return { status: 0 };
+    },
+    sleepImpl: async () => {},
+  });
+
+  assert.equal(result.connected, true);
+  assert.deepEqual(opened, [["Tailscale", undefined]]);
+  assert.deepEqual(commands[0].slice(0, 2), ["/Applications/Tailscale", ["login"]]);
+  assert.match(commands[0][2], /setup is still active/);
+  assert.equal(cleaned, true);
+});
+
+test("deferring Tailscale exits before download or service setup", async () => {
+  let installed = false;
+  const result = await ensureTailscaleReady({
+    platformName: "darwin",
+    isInteractive: true,
+    preflight: () => ({ installed: false, connected: false, state: "not_installed" }),
+    chooseInstall: async () => "cancel",
+    install: async () => { installed = true; return { ok: true }; },
+  });
+
+  assert.equal(result.state, "installation_deferred");
+  assert.equal(installed, false);
+});
+
+test("the official installer is signature-checked before macOS opens it", async (t) => {
+  const dir = tempDir(t, "remote-agents-installer-");
+  const calls = [];
+  const result = await downloadAndOpenTailscaleInstaller({
+    makeTempDir: () => dir,
+    commandRunner: async (bin, args) => { calls.push([bin, args]); return { status: 0 }; },
+    signatureRunner: () => ({
+      status: 0,
+      stdout: "1. Developer ID Installer: Tailscale Inc. (W5364U7YZB)",
+      stderr: "",
+    }),
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(calls[0][0], "curl");
+  assert.match(calls[0][1].at(-1), /pkgs\.tailscale\.com\/stable\/Tailscale-latest-macos\.pkg/);
+  assert.deepEqual(calls[1], ["open", [join(dir, "Tailscale.pkg")]]);
+});
+
+test("an untrusted installer is deleted and never opened", async (t) => {
+  const dir = tempDir(t, "remote-agents-untrusted-installer-");
+  const calls = [];
+  const result = await downloadAndOpenTailscaleInstaller({
+    makeTempDir: () => dir,
+    commandRunner: async (bin, args) => { calls.push([bin, args]); return { status: 0 }; },
+    signatureRunner: () => ({ status: 0, stdout: "Developer ID Installer: Someone Else", stderr: "" }),
+  });
+
+  assert.equal(result.state, "installer_signature_invalid");
+  assert.deepEqual(calls.map(([bin]) => bin), ["curl"]);
+  assert.equal(existsSync(dir), false);
+});
+
 // Confine provider discovery to a fake machine: the detector also looks in real
 // system directories, so without this these cases pass or fail depending on what
 // the developer running them happens to have installed.
@@ -253,6 +345,7 @@ test("the supervised service starts only the local bridge and cannot race setup 
   assert.ok(serviceBranch > serveStart && serviceBranch < transportChoice);
   assert.match(source, /<string>serve<\/string><string>--service<\/string>/);
   assert.match(source, /ExecStart=\$\{stableNodePath\(\)\} \$\{CLI_PATH\} serve --service/);
+  assert.match(source, /bridgeAlreadyRunning[\s\S]*Keeping it alive so active agent turns are not interrupted/);
 });
 
 test("the published package allowlist includes current and portable runtime modules", () => {

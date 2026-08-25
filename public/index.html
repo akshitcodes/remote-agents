@@ -4892,7 +4892,7 @@ function wireNotificationOnboarding() {
       hint.textContent = "Requesting permission…";
 
       try {
-        await enablePushSubscription();
+        await ensurePushSubscription();
         panel.hidden = true;
       } catch (e) {
         hint.textContent = "Couldn't enable notifications: " + (e.message || e);

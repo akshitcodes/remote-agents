@@ -14,8 +14,8 @@
 import { spawn, spawnSync } from "node:child_process";
 import { connect, createServer as createNetServer } from "node:net";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, writeFileSync, rmSync, realpathSync } from "node:fs";
-import { homedir, platform } from "node:os";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync, rmSync, realpathSync } from "node:fs";
+import { homedir, platform, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
 import select, { Separator } from "@inquirer/select";
@@ -29,6 +29,8 @@ const CLI_PATH = fileURLToPath(import.meta.url);
 const LABEL = "com.remoteagents.bridge";
 const TRANSPORTS = new Set(["funnel", "serve", "cloudflare"]);
 const APP_TAILSCALE = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
+const TAILSCALE_MAC_DOWNLOAD = "https://pkgs.tailscale.com/stable/Tailscale-latest-macos.pkg";
+const TAILSCALE_MAC_DOWNLOAD_PAGE = "https://tailscale.com/download/mac";
 function normalizeTransport(value) {
   // The portability prototype used `tailscale` to mean private Serve. Preserve
   // that saved choice on upgrade; new installs default to public Funnel.
@@ -175,7 +177,11 @@ function commandOutput(result) {
 }
 
 function runProbe(bin, args, timeout = 8000) {
-  return spawnSync(bin, args, { encoding: "utf8", timeout, env: process.env });
+  return spawnSync(bin, args, {
+    encoding: "utf8",
+    timeout,
+    env: { ...process.env, TAILSCALE_BE_CLI: "1" },
+  });
 }
 
 export function tailscalePreflight() {
@@ -420,6 +426,201 @@ function printTailscaleRecovery(preflight, transport = "funnel") {
   console.error("  A LAN http:// address is intentionally not offered: PWA install and push would not work.\n");
 }
 
+export const TAILSCALE_INSTALL_CHOICES = [
+  {
+    name: "Download and open the official Tailscale installer",
+    value: "installer",
+    description: "Recommended. Remote Agents verifies Tailscale's signed package, then macOS asks you to approve installation.",
+  },
+  {
+    name: "Open Tailscale's download page",
+    value: "download-page",
+    description: "Choose the installer yourself; this setup stays open and continues when Tailscale appears.",
+  },
+  {
+    name: "Install it later",
+    value: "cancel",
+    description: "Stop before changing the background service. Re-run setup whenever you are ready.",
+  },
+];
+
+export async function askTailscaleInstall() {
+  try {
+    return await select({
+      message: "Tailscale is needed for a stable, secure phone connection. Continue how?",
+      default: "installer",
+      choices: TAILSCALE_INSTALL_CHOICES,
+      theme: { prefix: " ", helpMode: "always" },
+    });
+  } catch (error) {
+    if (error?.name === "ExitPromptError") { return "cancel"; }
+    throw error;
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export function runVisibleCommand(bin, args, { spawnImpl = spawn, env = process.env } = {}) {
+  return new Promise((resolve) => {
+    const child = spawnImpl(bin, args, { stdio: "inherit", env });
+    child.on("error", (error) => resolve({ status: null, error }));
+    child.on("close", (status, signal) => resolve({ status, signal }));
+  });
+}
+
+export async function downloadAndOpenTailscaleInstaller({
+  commandRunner = runVisibleCommand,
+  signatureRunner = spawnSync,
+  makeTempDir = () => mkdtempSync(join(tmpdir(), "remote-agents-tailscale-")),
+} = {}) {
+  const dir = makeTempDir();
+  const pkg = join(dir, "Tailscale.pkg");
+
+  console.log("\n  Downloading the current official Tailscale installer (about 40 MB)…");
+  const downloaded = await commandRunner("curl", [
+    "--fail", "--location", "--progress-bar", "--output", pkg, TAILSCALE_MAC_DOWNLOAD,
+  ]);
+  if (downloaded.status !== 0) {
+    return {
+      ok: false,
+      state: "installer_download_failed",
+      detail: downloaded.error?.message || "The official Tailscale installer could not be downloaded.",
+      remediation: `Open ${TAILSCALE_MAC_DOWNLOAD_PAGE}, install Tailscale, then run remote-agents setup again.`,
+    };
+  }
+
+  const signature = signatureRunner("pkgutil", ["--check-signature", pkg], { encoding: "utf8", timeout: 15000 });
+  const signatureText = commandOutput(signature);
+  if (signature.status !== 0 || !/Developer ID Installer:\s*Tailscale Inc\b/i.test(signatureText)) {
+    rmSync(dir, { recursive: true, force: true });
+    return {
+      ok: false,
+      state: "installer_signature_invalid",
+      detail: "The downloaded package did not verify as a Tailscale Inc. Developer ID installer, so it was not opened.",
+      remediation: `Install directly from ${TAILSCALE_MAC_DOWNLOAD_PAGE}.`,
+    };
+  }
+
+  console.log("  Verified: signed by Tailscale Inc. Opening macOS Installer…");
+  const opened = await commandRunner("open", [pkg]);
+  if (opened.status !== 0) {
+    return {
+      ok: false,
+      state: "installer_open_failed",
+      detail: opened.error?.message || `The verified installer is saved at ${pkg}, but macOS Installer did not open.`,
+      remediation: `Open ${pkg} manually, finish installation, then run remote-agents setup again.`,
+    };
+  }
+
+  return { ok: true, path: pkg, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+function openMacApp(name, target, runner = spawnSync) {
+  const args = target ? [target] : ["-a", name];
+  return runner("open", args, { stdio: "ignore" }).status === 0;
+}
+
+async function pollTailscale(predicate, { timeoutMs, pollMs, preflight, sleepImpl, now, notice }) {
+  const deadline = now() + timeoutMs;
+  let lastNotice = 0;
+  let current = preflight();
+
+  while (!predicate(current) && now() < deadline) {
+    if (now() - lastNotice >= 15000) {
+      console.log(`  ${notice}`);
+      lastNotice = now();
+    }
+    await sleepImpl(Math.min(pollMs, Math.max(1, deadline - now())));
+    current = preflight();
+  }
+
+  return current;
+}
+
+export async function ensureTailscaleReady({
+  preflight = tailscalePreflight,
+  platformName = platform(),
+  isInteractive = interactive(),
+  chooseInstall = askTailscaleInstall,
+  install = downloadAndOpenTailscaleInstaller,
+  openTarget = (name, target) => openMacApp(name, target),
+  commandRunner = runTailscaleSetupCommand,
+  timeoutMs = 15 * 60 * 1000,
+  pollMs = 2000,
+  sleepImpl = sleep,
+  now = Date.now,
+} = {}) {
+  let current = preflight();
+  let installer;
+
+  if (current.connected) { return current; }
+  if (platformName !== "darwin" || !isInteractive) { return current; }
+
+  if (!current.installed) {
+    console.log("\n  Tailscale runs the secure HTTPS connection from this Mac to your phone.");
+    console.log("  Your phone does not need Tailscale. This window will stay open while you install it.");
+    const choice = await chooseInstall();
+    if (choice === "cancel") {
+      return { ...current, state: "installation_deferred", detail: "Tailscale installation was left for later." };
+    }
+
+    if (choice === "download-page") {
+      if (!openTarget("", TAILSCALE_MAC_DOWNLOAD_PAGE)) {
+        return { ...current, detail: "The Tailscale download page could not be opened." };
+      }
+    } else {
+      installer = await install();
+      if (!installer.ok) { return installer; }
+    }
+
+    current = await pollTailscale((state) => state.installed, {
+      timeoutMs, pollMs, preflight, sleepImpl, now,
+      notice: "Waiting for you to finish the Tailscale installation; setup will continue automatically…",
+    });
+    if (!current.installed) {
+      return {
+        ...current,
+        state: "installation_timeout",
+        detail: "Tailscale was not installed before the setup wait ended.",
+        remediation: "Finish the open installer, then run remote-agents setup again; your saved setup will be reused.",
+      };
+    }
+  }
+
+  openTarget("Tailscale");
+  current = preflight();
+  if (!current.connected && current.bin) {
+    const loginArgs = current.state === "signed_out" ? ["login"] : ["up"];
+    console.log(current.state === "signed_out"
+      ? "\n  Tailscale is installed. Complete sign-in in the browser window that opens."
+      : "\n  Tailscale is installed. Turning it on; approve or sign in if macOS asks.");
+    await commandRunner(current.bin, loginArgs, {
+      timeoutMs,
+      waitNoticeMs: 15000,
+      waitMessage: "  Still waiting for Tailscale login. Finish the open browser/app step; setup is still active…\n",
+    });
+  }
+
+  current = await pollTailscale((state) => state.connected, {
+    timeoutMs, pollMs, preflight, sleepImpl, now,
+    notice: "Waiting for Tailscale to finish connecting; setup will continue automatically…",
+  });
+  installer?.cleanup?.();
+  if (!current.connected) {
+    return {
+      ...current,
+      state: "connection_timeout",
+      detail: "Tailscale did not connect before the setup wait ended.",
+      remediation: "Leave Tailscale on and signed in, then run remote-agents setup again; your saved setup will be reused.",
+    };
+  }
+
+  console.log(`\n  Tailscale connected: ${current.dnsName}`);
+  return current;
+}
+
 export async function verifyHttpsApp(base, cfg, {
   timeoutMs = 75000,
   requestTimeoutMs = 45000,
@@ -503,6 +704,7 @@ export async function verifyCloudflareEntry(base, cfg, { fetchImpl = fetch } = {
 export function runTailscaleSetupCommand(bin, args, {
   timeoutMs = 120000,
   waitNoticeMs = 15000,
+  waitMessage = "  Still waiting for Tailscale to finish. If Funnel opened an approval tab, approve it there…\n",
   spawnImpl = spawn,
   writeStdout = (chunk) => process.stdout.write(chunk),
   writeStderr = (chunk) => process.stderr.write(chunk),
@@ -512,7 +714,10 @@ export function runTailscaleSetupCommand(bin, args, {
     let timedOut = false;
     let settled = false;
     let forceTimer;
-    const child = spawnImpl(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawnImpl(bin, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, TAILSCALE_BE_CLI: "1" },
+    });
 
     const finish = (result) => {
       if (settled) { return; }
@@ -533,7 +738,7 @@ export function runTailscaleSetupCommand(bin, args, {
       forceTimer = setTimeout(() => child.kill("SIGKILL"), 2000);
     }, timeoutMs);
     const waitTimer = setInterval(() => {
-      writeStdout("  Still waiting for Tailscale to finish. If Funnel opened an approval tab, approve it there…\n");
+      writeStdout(waitMessage);
     }, waitNoticeMs);
 
     child.stdout?.on("data", remember(writeStdout));
@@ -611,7 +816,7 @@ async function serve(args) {
   const providerResult = requireUsableProvider(cfg);
 
   if (transport !== "cloudflare") {
-    const preflight = tailscalePreflight();
+    const preflight = await ensureTailscaleReady();
     if (!preflight.connected) {
       printTailscaleRecovery(preflight, transport);
       process.exitCode = 1;
@@ -824,6 +1029,12 @@ async function tailscale(args) {
   }
 
   const transport = normalizeTransport(args.transport || cfg.transport) || "funnel";
+  const ready = await ensureTailscaleReady();
+  if (!ready.connected) {
+    printTailscaleRecovery(ready, transport);
+    process.exitCode = 1;
+    return;
+  }
   const result = await configureTailscale(cfg, { transport, allowOriginChange: args.replaceOrigin });
 
   if (!result.ok) {
@@ -987,7 +1198,7 @@ function warnIfEphemeral() {
 
 // ---------- dispatch ----------
 
-async function waitForPort(port, attempts = 20) {
+async function waitForPort(port, attempts = 240) {
   for (let i = 0; i < attempts; i++) {
     if (await portReachable(port)) { return true; }
     await new Promise((resolve) => setTimeout(resolve, 250));
@@ -1045,7 +1256,7 @@ async function setup(a, args) {
   requireUsableProvider(cfg);
 
   if (transport !== "cloudflare") {
-    const preflight = tailscalePreflight();
+    const preflight = await ensureTailscaleReady();
     if (!preflight.connected) {
       printTailscaleRecovery(preflight, transport);
       process.exitCode = 1;
@@ -1060,13 +1271,20 @@ async function setup(a, args) {
     throw new Error(`port ${cfg.port} is already in use by another process; choose a different --port`);
   }
 
-  a.install();
+  const bridgeAlreadyRunning = serviceState.startsWith("running") && await portReachable(cfg.port);
+  if (bridgeAlreadyRunning) {
+    console.log("\n  The background bridge is already running. Keeping it alive so active agent turns are not interrupted.");
+  } else {
+    a.install();
+  }
 
   if (!(await waitForPort(cfg.port))) {
     throw new Error(`the service was installed but did not begin listening on port ${cfg.port}; check ${dataPath("logs/err.log")}`);
   }
 
-  console.log("\n  Installed. remote-agents will start at login and restart after a crash.");
+  console.log(bridgeAlreadyRunning
+    ? "\n  Background service preserved. It will continue to start at login and restart after a crash."
+    : "\n  Installed. remote-agents will start at login and restart after a crash.");
 
   if (transport === "cloudflare") {
     writeConfig({ ...readConfig(), transport: "cloudflare" });

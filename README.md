@@ -11,14 +11,16 @@ does not provide a hosted relay or a shared account.
 ## macOS setup
 
 You need Node.js 22.5 or newer (the bridge uses Node's built-in SQLite module)
-and at least one supported CLI installed and logged in. Install Tailscale on the
-Mac, open it, and sign in. The recommended Funnel connection works from anywhere
-without installing Tailscale—or anything else—on the phone.
+and at least one supported CLI installed and logged in. You do not need to
+prepare Tailscale first: setup can download its current official signed macOS
+installer, open it, and wait while you approve installation and sign in. The
+recommended Funnel connection works from anywhere without installing
+Tailscale—or anything else—on the phone.
 
 Install the package, then run one setup command:
 
 ```bash
-npm install -g github:akshitcodes/remote-agents
+npm install -g @akshitcodes/remote-agents
 remote-agents setup
 ```
 
@@ -36,9 +38,11 @@ it is not. After approval, the first HTTPS request can take about 28 seconds
 while Tailscale issues the certificate, so the verifier waits up to 75 seconds.
 Only then does it print the phone pairing QR.
 
-If Tailscale is missing, signed out, or its HTTPS URL cannot be verified, setup
-prints the exact recovery steps and no phone QR. It never substitutes a LAN HTTP
-link that looks successful but cannot install the PWA or receive push.
+If Tailscale is missing, setup offers to download and signature-check the
+official installer (or open the official download page), then stays active while
+you install and sign in. If Tailscale or its HTTPS URL still cannot be verified,
+setup prints the exact recovery steps and no phone QR. It never substitutes a
+LAN HTTP link that looks successful but cannot install the PWA or receive push.
 
 - iPhone/iPad: open in Safari, then **Share -> Add to Home Screen**.
 - Android Chrome: tap **Install app** to use Chrome's native install prompt.
