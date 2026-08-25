@@ -1695,8 +1695,12 @@ const server = createServer(handleRequest);
 // Start the bridge. Resolves once listening. Caller owns host/port/token
 // resolution and any user-facing output (pairing URL, QR).
 export function configureServer({ host = "0.0.0.0", port = 0, token, usableProviders } = {}) {
-  if (typeof token !== "string" || token.length < 16) {
-    throw new Error("A pairing token of at least 16 characters is required");
+  // Older codex-phone installs generated 12-character pairing identities.
+  // Continue accepting those saved identities so an upgrade does not strand an
+  // already-installed phone. New generated and explicit CLI tokens remain at
+  // least 32 characters (enforced by resolveConfig in the CLI).
+  if (typeof token !== "string" || token.length < 12) {
+    throw new Error("A pairing token of at least 12 characters is required");
   }
 
   HOST = host;

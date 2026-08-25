@@ -42,6 +42,14 @@ function fixture() {
   configureServer({ host: "127.0.0.1", port: 0, token: TOKEN });
 }
 
+test("saved legacy pairing identities remain valid after upgrade", () => {
+  assert.doesNotThrow(() => configureServer({ host: "127.0.0.1", port: 0, token: "legacy-token" }));
+  assert.throws(
+    () => configureServer({ host: "127.0.0.1", port: 0, token: "too-short" }),
+    /at least 12 characters/,
+  );
+});
+
 test("unauthenticated responses reveal no app, version, thread, or path data", async () => {
   fixture();
   const response = await request("/");
