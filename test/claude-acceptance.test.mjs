@@ -97,6 +97,41 @@ test("Claude releases its process after a terminal result", () => {
   assert.equal(provider.sessions.has(session.emitThreadId), false);
 });
 
+test("Claude cannot silently report success without any assistant output", () => {
+  const events = [];
+  const provider = new ClaudeProvider((event, data) => events.push({ event, data }));
+  const session = fakeSession(provider, () => {});
+  session.child.kill = () => {};
+  session.busy = true;
+  session.ctx.turnId = "message-empty";
+  provider.sessions.set(session.emitThreadId, session);
+
+  provider.handleStreamLine(JSON.stringify({ type: "result", subtype: "success", result: "" }), session);
+
+  const terminal = events.find(({ data }) => data?.method === "turn/failed");
+  assert.deepEqual(terminal?.data?.params?.error, {
+    message: "Claude ended without returning a response",
+    code: "empty_provider_result",
+  });
+  assert.equal(session.dead, true);
+});
+
+test("a streamed Claude response remains a successful terminal result", () => {
+  const events = [];
+  const provider = new ClaudeProvider((event, data) => events.push({ event, data }));
+  const session = fakeSession(provider, () => {});
+  session.child.kill = () => {};
+  session.busy = true;
+  session.ctx.turnId = "message-text";
+  provider.sessions.set(session.emitThreadId, session);
+
+  provider.handleAnthropicEvent({ type: "content_block_start", index: 0, content_block: { type: "text" } }, session.ctx, session);
+  provider.handleStreamLine(JSON.stringify({ type: "result", subtype: "success", result: "" }), session);
+
+  assert.ok(events.some(({ data }) => data?.method === "turn/completed"));
+  assert.ok(!events.some(({ data }) => data?.method === "turn/failed"));
+});
+
 test("Claude acknowledgement timeout is uncertain without killing the live turn", async () => {
   const provider = new ClaudeProvider(() => {}, { acceptTimeoutMs: 10 });
   let killed = false;

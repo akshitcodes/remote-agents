@@ -1144,6 +1144,7 @@ export class ClaudeProvider extends BaseProvider {
       // again when the result arrives and the completed item is rebuilt.
       toolDescriptions: new Map(),
       sawResult: false,
+      sawAssistantOutput: false,
     };
   }
 
@@ -1156,6 +1157,7 @@ export class ClaudeProvider extends BaseProvider {
     ctx.toolCommands = new Map();
     ctx.toolDescriptions = new Map();
     ctx.sawResult = false;
+    ctx.sawAssistantOutput = false;
   }
 
   async ensureSession(emitThreadId, { cwd, model, effort, modeKey, isDraft }) {
@@ -1502,10 +1504,20 @@ export class ClaudeProvider extends BaseProvider {
 
       // Enrich usage(): accumulate spend and remember the last token/model breakdown.
       const providerSettingError = claudeTurnError(session.stderr);
+      const resultText = typeof obj.result === "string" ? obj.result.trim() : "";
+      const emptySuccess = (!obj.subtype || obj.subtype === "success")
+        && !ctx.sawAssistantOutput
+        && !resultText;
       const failed = (obj.subtype && obj.subtype !== "success")
-        || providerSettingError.code === "provider_settings_unconfirmed";
+        || providerSettingError.code === "provider_settings_unconfirmed"
+        || emptySuccess;
       const error = failed
-        ? (providerSettingError.code === "provider_settings_unconfirmed"
+        ? (emptySuccess
+            ? {
+                message: "Claude ended without returning a response",
+                code: "empty_provider_result",
+              }
+            : providerSettingError.code === "provider_settings_unconfirmed"
             ? providerSettingError
             : claudeTurnError(obj.result ?? obj.subtype))
         : undefined;
@@ -1576,6 +1588,7 @@ export class ClaudeProvider extends BaseProvider {
       case "content_block_start": {
         const kind = event.content_block?.type;
         ctx.blockKinds.set(event.index, kind);
+        if (["text", "thinking", "tool_use"].includes(kind)) { ctx.sawAssistantOutput = true; }
         break;
       }
 
@@ -1603,6 +1616,10 @@ export class ClaudeProvider extends BaseProvider {
   handleAssistantMessage(message, ctx) {
     const tid = ctx.emitThreadId;
     const content = Array.isArray(message.content) ? message.content : [];
+
+    if (content.some((block) => ["text", "thinking", "tool_use"].includes(block?.type))) {
+      ctx.sawAssistantOutput = true;
+    }
 
     content.forEach((block, i) => {
       const itemId = `${message.id}:${i}`;
