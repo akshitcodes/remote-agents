@@ -24,6 +24,10 @@ test("failed delivery recovery distinguishes pre-dispatch failures and remains a
   assert.match(html, /Not sent — Retry, Edit, or Cancel/);
   assert.match(html, /removePendingEntry\(entry, \{ allowUncertain: true \}\)/);
   assert.match(html, /if \(btn\.isConnected && btn\.disabled\)/);
+  assert.match(html, /function markSendFailed\(bubble, onRetry, \{ uncertain = false, onDismiss = null \} = \{\}\)/);
+  assert.match(html, /dismiss\.textContent = uncertain \? "Dismiss" : "Cancel"/);
+  assert.match(html, /dropFailedSend\(f\.requestId\);\s*bubble\.remove\(\)/);
+  assert.match(html, /dropFailedSend\(id\);\s*bubble\.remove\(\)/);
 });
 
 test("image UI follows provider metadata and Grok cancel-before-send requires owned active work", () => {

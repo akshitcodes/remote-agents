@@ -102,7 +102,9 @@
   /* A message that didn't send stays visible and carries its own retry, so the
      failure is attached to the thing that failed. */
   .msg.user.failed { border: 1px solid var(--danger); opacity: .85; }
-  .msg.user .retry { display: block; margin: 7px 0 0 auto; background: transparent; border: 1px solid var(--danger); color: var(--danger); font-size: 11px; font-weight: 600; padding: 3px 10px; border-radius: 20px; cursor: pointer; }
+  .msg.user .failed-actions { display: flex; justify-content: flex-end; align-items: center; gap: 6px; margin-top: 7px; }
+  .msg.user .retry, .msg.user .dismiss-failed { background: transparent; border: 1px solid var(--danger); color: var(--danger); font-size: 11px; font-weight: 600; padding: 3px 10px; border-radius: 20px; cursor: pointer; }
+  .msg.user .dismiss-failed { border-color: var(--border); color: var(--fg-dim); }
   .msg.user .retry:disabled { opacity: .6; cursor: default; }
   .loadearlier { display: block; margin: 4px auto 14px; background: var(--bg3); border: 1px solid var(--border); color: var(--accent2); padding: 7px 16px; border-radius: 10px; font-size: 13px; cursor: pointer; }
   .loadearlier:disabled { color: var(--fg-dim); cursor: default; }
@@ -2519,7 +2521,9 @@ async function openThread(t) {
 
           if (label) { label.textContent = "Completion could not be confirmed — check the thread, then tap Retry to try now"; }
           entry.retryRequired = true;
-          markSendFailed(entry.bubble, () => retryPendingEntry(entry));
+          markSendFailed(entry.bubble, () => retryPendingEntry(entry), {
+            onDismiss: () => removePendingEntry(entry, { allowUncertain: true }),
+          });
         }
 
         savePending();
@@ -3036,7 +3040,10 @@ function restorePending() {
     syncPendingActions(entry);
 
     if (retryRequired) {
-      markSendFailed(bubble, () => retryPendingEntry(entry), { uncertain });
+      markSendFailed(bubble, () => retryPendingEntry(entry), {
+        uncertain,
+        onDismiss: () => removePendingEntry(entry, { allowUncertain: true }),
+      });
     }
   }
 
@@ -3180,13 +3187,18 @@ async function checkPendingDelivery(entry) {
       entry.retryRequired = true;
       entry.retryWithNewId = false;
       if (label) { label.textContent = "Not sent — Retry, Edit, or Cancel"; }
-      markSendFailed(entry.bubble, () => retryPendingEntry(entry));
+      markSendFailed(entry.bubble, () => retryPendingEntry(entry), {
+        onDismiss: () => removePendingEntry(entry, { allowUncertain: true }),
+      });
     } else if (result.state === "dispatching") {
       if (label) { label.textContent = "The bridge is still delivering this message"; }
       markSendFailed(entry.bubble, null);
     } else {
       if (label) { label.textContent = "Delivery remains uncertain — retry only if it is absent from the thread"; }
-      markSendFailed(entry.bubble, () => retryPendingEntry(entry), { uncertain: true });
+      markSendFailed(entry.bubble, () => retryPendingEntry(entry), {
+        uncertain: true,
+        onDismiss: () => removePendingEntry(entry, { allowUncertain: true }),
+      });
     }
 
     savePending();
@@ -3279,7 +3291,10 @@ async function persistExternalCodexQueue(entry) {
       entry.mayHaveDispatched = false;
       markSendFailed(entry.bubble, null);
       persistExternalCodexQueue(entry);
-    }, { uncertain });
+    }, {
+      uncertain,
+      onDismiss: () => removePendingEntry(entry, { allowUncertain: true }),
+    });
   }
 }
 
@@ -3344,7 +3359,10 @@ async function trySteer(entry) {
       entry.mayHaveDispatched = true;
       savePending();
       if (label) { label.textContent = "Steer delivery could not be confirmed — check the latest messages, then tap Retry if needed"; }
-      markSendFailed(entry.bubble, () => retryPendingEntry(entry), { uncertain: true });
+      markSendFailed(entry.bubble, () => retryPendingEntry(entry), {
+        uncertain: true,
+        onDismiss: () => removePendingEntry(entry, { allowUncertain: true }),
+      });
       syncPendingActions(entry);
       return;
     }
@@ -3386,7 +3404,9 @@ async function trySteer(entry) {
         entry.retryRequired = true;
         savePending();
         if (label) { label.textContent = "Could not confirm who owns the turn — message remains unsent"; }
-        markSendFailed(entry.bubble, () => retryPendingEntry(entry));
+        markSendFailed(entry.bubble, () => retryPendingEntry(entry), {
+          onDismiss: () => removePendingEntry(entry, { allowUncertain: true }),
+        });
       }
     }
 
@@ -3515,7 +3535,13 @@ function restoreFailedSends() {
       if (f.retryWithNewId) { dropFailedSend(f.requestId); }
 
       doSend(f.text, { attachments, bubble, requestId });
-    }, { uncertain: !!f.retryWithNewId });
+    }, {
+      uncertain: !!f.retryWithNewId,
+      onDismiss: () => {
+        dropFailedSend(f.requestId);
+        bubble.remove();
+      },
+    });
   }
 }
 
@@ -3725,7 +3751,9 @@ async function doSend(text, { attachments = [], bubble, requestId, pendingEntry 
       savePending();
       syncPendingActions(queued);
       if (elsewhere) {
-        markSendFailed(bubble, () => doSend(text, { attachments, bubble, requestId: id, pendingEntry: queued }));
+        markSendFailed(bubble, () => doSend(text, { attachments, bubble, requestId: id, pendingEntry: queued }), {
+          onDismiss: () => removePendingEntry(queued),
+        });
         setLockStatus({ state: "elsewhere", label: "Open elsewhere" });
       } else {
         markSendFailed(bubble, null);
@@ -3749,13 +3777,22 @@ async function doSend(text, { attachments = [], bubble, requestId, pendingEntry 
         pendingEntry.mayHaveDispatched = messageAttempted && (e.code === "delivery_uncertain" || !!e.reach || !!e.responseInvalid || !e.status);
         savePending();
         if (label) { label.textContent = pendingEntry.mayHaveDispatched ? "Delivery could not be confirmed — check the thread, then retry if needed" : "Not sent — tap Retry"; }
-        markSendFailed(bubble, retry, { uncertain: pendingEntry.mayHaveDispatched });
+        markSendFailed(bubble, retry, {
+          uncertain: pendingEntry.mayHaveDispatched,
+          onDismiss: () => removePendingEntry(pendingEntry, { allowUncertain: true }),
+        });
         syncPendingActions(pendingEntry);
       }
     } else if (e.code !== "thread_locked_elsewhere") {
       const uncertain = messageAttempted && (e.code === "delivery_uncertain" || !!e.reach || !!e.responseInvalid || !e.status);
       recordFailedSend(threadId, text, id, activeProvider(), attachments, uncertain);
-      markSendFailed(bubble, retry, { uncertain });
+      markSendFailed(bubble, retry, {
+        uncertain,
+        onDismiss: () => {
+          dropFailedSend(id);
+          bubble.remove();
+        },
+      });
     }
 
     if (!bubble) { chip("⚠️", "send failed: " + e.message); }
@@ -3769,10 +3806,11 @@ function newRequestId() {
 
 // Mark the message that failed, rather than dropping a warning further down the
 // transcript — the thing that didn't send is the thing you tap to retry.
-function markSendFailed(bubble, onRetry, { uncertain = false } = {}) {
+function markSendFailed(bubble, onRetry, { uncertain = false, onDismiss = null } = {}) {
   if (!bubble) { return; }
 
-  bubble.querySelector(".retry")?.remove();
+  bubble.querySelector(".failed-actions")?.remove();
+  bubble.querySelector(".retry")?.remove(); // remove controls from pre-0.4.4 DOM
   bubble.classList.toggle("failed", !!onRetry);
 
   if (!onRetry) { return; }
@@ -3796,7 +3834,28 @@ function markSendFailed(bubble, onRetry, { uncertain = false } = {}) {
       }
     }
   };
-  bubble.appendChild(btn);
+  const actions = document.createElement("div");
+  actions.className = "failed-actions";
+  actions.appendChild(btn);
+  if (onDismiss) {
+    const dismiss = document.createElement("button");
+    dismiss.type = "button";
+    dismiss.className = "dismiss-failed";
+    dismiss.textContent = uncertain ? "Dismiss" : "Cancel";
+    dismiss.title = uncertain
+      ? "Remove this recovery copy; this cannot recall a message that may already have reached the agent"
+      : "Cancel this unsent message";
+    dismiss.onclick = async () => {
+      dismiss.disabled = true;
+      try {
+        await onDismiss();
+      } finally {
+        if (dismiss.isConnected) { dismiss.disabled = false; }
+      }
+    };
+    actions.appendChild(dismiss);
+  }
+  bubble.appendChild(actions);
   scrollDown();
 }
 
@@ -5373,7 +5432,9 @@ function markRunning(provider, tid, on, { confidence = "unknown", live = true } 
 
       if (label) { label.textContent = "Completion could not be confirmed — check the thread, then tap Retry to try now"; }
       entry.retryRequired = true;
-      markSendFailed(entry.bubble, () => retryPendingEntry(entry));
+      markSendFailed(entry.bubble, () => retryPendingEntry(entry), {
+        onDismiss: () => removePendingEntry(entry, { allowUncertain: true }),
+      });
     }
 
     savePending();
