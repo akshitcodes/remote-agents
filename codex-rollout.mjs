@@ -221,6 +221,20 @@ export function feedLines(st, lines) {
           turns.push(st.current);
           break;
 
+        case "task_complete":
+          if (p.error) {
+            const message = typeof p.error === "string" ? p.error : String(p.error.message ?? p.error.error ?? "Turn failed");
+            push({
+              id: `turn-error:${p.turn_id ?? ++st.n}`,
+              type: "turnError",
+              terminalId: p.turn_id ? `codex:${p.turn_id}` : null,
+              code: typeof p.error === "object" ? (p.error.codex_error_info ?? p.error.code ?? null) : null,
+              message,
+            });
+          }
+
+          break;
+
         case "user_message":
           {
             const content = [];

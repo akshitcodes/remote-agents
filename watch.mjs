@@ -198,7 +198,7 @@ function parseFromEnd(lines, decide) {
   return null;
 }
 
-// Codex logs an explicit task_started / task_complete pair per turn.
+// Codex logs task_started and then either task_complete or turn_aborted.
 function recordId(prefix, record, line) {
   const native = record?.id ?? record?.uuid ?? record?.message?.id ?? record?.payload?.turn_id;
   return native ? `${prefix}:${native}` : `${prefix}:${createHash("sha1").update(line).digest("hex").slice(0, 16)}`;
@@ -210,17 +210,43 @@ function contentText(content) {
   return content.map((part) => part?.text ?? "").filter(Boolean).join("\n");
 }
 
+function terminalError(error, fallback = "") {
+  if (!error && !fallback) { return null; }
+
+  const message = typeof error === "string"
+    ? error
+    : String(error?.message ?? error?.error ?? fallback ?? "");
+
+  if (!message.trim()) { return null; }
+
+  return {
+    message: message.trim().slice(0, 4000),
+    code: typeof error === "object" ? (error?.codex_error_info ?? error?.code ?? null) : null,
+  };
+}
+
 function codexObservation(lines) {
   return parseFromEnd(lines, (r) => {
     const type = r?.payload?.type;
 
     if (type === "task_started") { return { running: true }; }
-    if (type === "task_complete") {
+    if (type === "turn_aborted") {
       return {
         running: false,
         terminalId: recordId("codex", r, JSON.stringify(r)),
-        terminalOutcome: r.payload?.error ? "failed" : "completed",
+        terminalOutcome: "aborted",
+        terminalText: "",
+        terminalError: null,
+      };
+    }
+    if (type === "task_complete") {
+      const error = terminalError(r.payload?.error);
+      return {
+        running: false,
+        terminalId: recordId("codex", r, JSON.stringify(r)),
+        terminalOutcome: error ? "failed" : "completed",
         terminalText: String(r.payload?.last_agent_message ?? ""),
+        terminalError: error,
       };
     }
 
@@ -237,11 +263,14 @@ function claudeObservation(lines) {
       const reason = r?.message?.stop_reason;
 
       if (reason && reason !== "tool_use") {
+        const text = contentText(r.message?.content);
+        const error = reason === "end_turn" ? null : terminalError(null, text || `Claude stopped: ${reason}`);
         return {
           running: false,
           terminalId: recordId("claude", r, line),
-          terminalOutcome: reason === "end_turn" ? "completed" : "failed",
-          terminalText: contentText(r.message?.content),
+          terminalOutcome: error ? "failed" : "completed",
+          terminalText: text,
+          terminalError: error,
         };
       }
 
@@ -338,6 +367,7 @@ function runningDetailFromFile(provider, path, stat) {
     state.terminalId = observation.terminalId;
     state.terminalOutcome = observation.terminalOutcome ?? "completed";
     state.terminalText = observation.terminalText ?? "";
+    state.terminalError = observation.terminalError ?? null;
   }
 
   return state;
@@ -368,7 +398,7 @@ function runningFromFile(provider, path, stat) {
 // rewrite, so this pins the inode and fingerprints the head of the file. The
 // schema tag is bumped whenever a parser changes what items a record produces,
 // since that also invalidates every position a client is holding.
-const PARSER_SCHEMA = "1";
+const PARSER_SCHEMA = "2";
 const FINGERPRINT_BYTES = 8192;
 
 export function generationOf(provider, id) {
@@ -471,7 +501,7 @@ function poll() {
     const prev = seen.get(k);
     const moved = !prev || prev.mtimeMs !== stat.mtimeMs || prev.size !== stat.size;
     const detail = runningDetailFromFile(provider, path, stat);
-    const { running, confidence, terminalId, terminalOutcome, terminalText } = detail;
+    const { running, confidence, terminalId, terminalOutcome, terminalText, terminalError } = detail;
 
     // A thread that stops mid-turn (the CLI was killed) never writes its end
     // marker, so re-evaluate quietly once it has been silent for a while.
@@ -484,7 +514,7 @@ function poll() {
     // Skip the very first observation: it only tells us the state at open, and
     // the client already fetched the thread itself. Running state still goes
     // out, since that is exactly what the client cannot know on its own.
-    onUpdate({ provider, threadId: id, running, runConfidence: confidence, terminalId, terminalOutcome, terminalText, changed: !!prev && moved });
+    onUpdate({ provider, threadId: id, running, runConfidence: confidence, terminalId, terminalOutcome, terminalText, terminalError, changed: !!prev && moved });
   }
 }
 

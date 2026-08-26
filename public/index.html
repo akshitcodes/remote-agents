@@ -206,6 +206,8 @@
   .item-chip.link { cursor: pointer; }
   .item-chip.link:active { background: var(--bg3); }
   .item-chip.pending { color: var(--warn); border-color: #9e6a03; border-style: dashed; margin-left: auto; }
+  .item-chip.turn-error { width: min(100%, 760px); align-items: flex-start; color: #ffb4ad; background: #f8514912; border-color: #f8514966; }
+  .item-chip.turn-error span { white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; }
   .pending-actions { display: inline-flex; align-items: center; gap: 3px; margin-left: 2px; }
   .item-chip .pending-actions { min-width: auto; overflow: visible; white-space: normal; flex-shrink: 0; }
   .pending-action { min-height: 34px; border: 0; border-radius: 7px; padding: 4px 8px; background: var(--bg3); color: var(--fg-dim); font: inherit; font-size: 11px; font-weight: 650; cursor: pointer; }
@@ -274,6 +276,10 @@
      any app JavaScript runs (and testable with a spoofed mobile User-Agent). */
   .onboard { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; padding: 20px; background: #070a0eee; }
   .onboard[hidden] { display: none; }
+  /* The server helper may remain in memory during a UI-only upgrade. Keep the
+     install overlay unpaintable until the fresh client shell confirms it is
+     running in an ordinary browser tab that actually needs onboarding. */
+  #installOnboarding:not(.install-ready) { display: none; }
   .onboard-card { width: min(100%, 430px); padding: 24px; border: 1px solid var(--border); border-radius: 18px; background: var(--bg2); box-shadow: 0 18px 70px #000a; }
   .onboard-kicker { margin-bottom: 5px; color: var(--accent); font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
   .onboard h1 { margin-bottom: 10px; font-size: 23px; line-height: 1.2; }
@@ -1776,6 +1782,13 @@ function renderItem(item, opts = {}) {
       el.querySelector(".body").innerHTML = `<pre>${esc(item.text || JSON.stringify(item, null, 1))}</pre>`;
       return [el];
     }
+    case "turnError": {
+      const detail = item.message || "The provider ended this turn with an error.";
+      const el = chip("⚠️", detail);
+      el.classList.add("turn-error");
+      if (item.terminalId) { el.dataset.terminalId = item.terminalId; }
+      return [el];
+    }
     default: break;
   }
 
@@ -1969,6 +1982,10 @@ function renderItemAt(item, index, opts = {}) {
 function applyExternalFrame(frame) {
   const { result, ops, generation, revision } = frame;
 
+  if (frame.terminalOutcome === "failed") {
+    showTurnFailure(frame.terminalError, frame.terminalId);
+  }
+
   if (result !== "ops" && result !== "reset" && result !== "error") { return; }
 
   if (result === "error") {
@@ -1995,6 +2012,16 @@ function applyExternalFrame(frame) {
 
   applyExternalOps(ops ?? []);
   state.revision = revision ?? state.revision;
+}
+
+function showTurnFailure(error, terminalId = null) {
+  if (terminalId && box().querySelector(`[data-terminal-id="${CSS.escape(String(terminalId))}"]`)) { return; }
+
+  const message = typeof error === "string" ? error : (error?.message || "The provider ended this turn with an error.");
+  const el = chip("⚠️", message);
+  el.classList.add("turn-error");
+  if (terminalId) { el.dataset.terminalId = terminalId; }
+  return el;
 }
 
 // Changes to a thread someone else is driving, as operations rather than "here
@@ -2098,6 +2125,20 @@ function onNotify(method, params, provider) {
 
   if (provider && provider !== activeProvider()) { return; }
 
+  if (method === "account/rateLimits/updated") {
+    updateUsageLive(params.rateLimits, provider);
+
+    // A rate-limit frame is account-scoped and normally has no threadId. Only
+    // attach an explicit exhaustion signal to the chat while a turn is active;
+    // opening the Usage sheet must never manufacture a thread failure.
+    if (state.active && state.busy && params.rateLimits?.rateLimitReachedType) {
+      const reached = String(params.rateLimits.rateLimitReachedType);
+      showTurnFailure(`Usage exhausted — the provider reported its ${reached} limit was reached.`, `${provider}:usage:${reached}:${params.rateLimits.primary?.resetsAt ?? "unknown"}`);
+    }
+
+    return;
+  }
+
   if (method === "thread/adopted") {
     if (state.active && state.active.id === params.threadId) {
       migrateThreadLocalState(activeProvider(), state.active.id, params.sessionId);
@@ -2109,11 +2150,7 @@ function onNotify(method, params, provider) {
     return;
   }
 
-  if (!state.active || (tid !== state.active.id && tid !== state.active.draftId)) {
-    if (method === "account/rateLimits/updated") { updateUsageLive(params.rateLimits, provider); }
-
-    return;
-  }
+  if (!state.active || (tid !== state.active.id && tid !== state.active.draftId)) { return; }
 
   // Once real turn output arrives, the existing streaming UI is the status.
   // Remove the pre-stream progress chip instead of building a second surface.
@@ -2291,10 +2328,6 @@ function onNotify(method, params, provider) {
       break;
     }
 
-    case "account/rateLimits/updated":
-      updateUsageLive(params.rateLimits, provider);
-      break;
-
     case "turn/aborted":
     case "turn/completed":
     case "turn/failed": {
@@ -2310,13 +2343,21 @@ function onNotify(method, params, provider) {
       state.activeTurnId = null;
       clearCarets();
 
-      if (method === "turn/failed" && error?.code !== "thread_locked_elsewhere") {
-        chip("⚠️", "Turn failed" + (error?.message ? ": " + error.message : ""));
+      if ((method === "turn/failed" || error) && error?.code !== "thread_locked_elsewhere") {
+        showTurnFailure(error || "Turn failed", params.turn?.id ? `${provider}:${params.turn.id}` : null);
       }
 
       flushPending();
       break;
     }
+  }
+
+  if (!method.startsWith("turn/") && (params?.error || params?.failureReason)) {
+    const source = method === "mcpServer/startupStatus/updated" && params.name ? `${params.name}: ` : "";
+    const error = params.error ?? params.failureReason;
+    const message = typeof error === "string" ? error : (error?.message || JSON.stringify(error));
+    const noticeId = `${provider}:${method}:${params.requestId ?? params.name ?? state.activeTurnId ?? "thread"}`;
+    showTurnFailure(source + message, noticeId);
   }
 }
 
@@ -4933,7 +4974,10 @@ function wireInstallOnboarding() {
 
   if (!panel) { return; }
 
-  const hide = () => { panel.hidden = true; };
+  const hide = () => {
+    panel.classList.remove("install-ready");
+    panel.hidden = true;
+  };
 
   if (isStandalone() || localStorage.getItem("remote_agents_install_dismissed") === "1") {
     hide();
@@ -4976,6 +5020,10 @@ function wireInstallOnboarding() {
   }
 
   window.addEventListener("appinstalled", hide);
+  // The server keeps this hidden to prevent a first-paint flash in an already
+  // installed PWA. Reveal it only after standalone detection has completed.
+  panel.hidden = false;
+  panel.classList.add("install-ready");
 }
 
 function wireNotificationOnboarding() {

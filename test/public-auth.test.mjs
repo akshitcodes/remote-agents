@@ -126,6 +126,7 @@ test("authenticated iOS and Android requests get their exact install guidance", 
   const androidBody = android.body;
   assert.equal(android.statusCode, 200);
   assert.match(androidBody, /data-platform="android"/);
+  assert.match(androidBody, /id="installOnboarding"[^>]*hidden/);
   assert.match(androidBody, /Install app/);
   assert.match(androidBody, /beforeinstallprompt/);
 });

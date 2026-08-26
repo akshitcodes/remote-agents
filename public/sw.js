@@ -1,9 +1,9 @@
 // remote-agents service worker — app-shell caching for instant + offline launch.
 //
 // Strategy:
-//  - App shell (the HTML at "/"): network-first with a fast timeout, falling back
-//    to cache. Online you always get the latest UI (no stale-update lag); on a
-//    slow or dead connection the cached shell boots instantly.
+//  - App shell (the HTML at "/"): cache-first with background revalidation. An
+//    installed app paints immediately, while the next launch gets the refreshed
+//    UI. First-ever visits still wait for the network because no shell exists.
 //  - Vendored assets (/vendor, /icons, manifest): cache-first (they're static /
 //    versioned), refreshed in the background.
 //  - /api/* is NEVER cached here — it's dynamic, authenticated, and streamed.
@@ -11,8 +11,7 @@
 //
 // Bump CACHE_VERSION to force a refresh of the precached shell.
 
-const CACHE_VERSION = "remote-agents-v12";
-const NAV_TIMEOUT_MS = 2500;
+const CACHE_VERSION = "remote-agents-v13";
 
 // A reverse proxy in front of us (Cloudflare, a tunnel, nginx) answers with a
 // real HTTP response when the machine behind it is down — 502, or Cloudflare's
@@ -141,17 +140,17 @@ self.addEventListener("fetch", (event) => {
     url.pathname === "/manifest.webmanifest";
 
   if (req.mode === "navigate") {
-    event.respondWith(navigationNetworkFirst(req));
+    event.respondWith(navigationCacheFirst(req, event));
   } else if (isShellAsset) {
     event.respondWith(cacheFirst(req));
   }
 });
 
-// Fresh-when-online shell. Race the network against a short timeout; whichever
-// wins renders, and a successful network response refreshes the cached shell
-// (keyed to "/" so a "?t=token" launch and an offline launch both match).
-async function navigationNetworkFirst(req) {
+// Instant installed-app shell. Refresh in the background and key to "/" so a
+// "?t=token" launch, ordinary launch, and offline launch all share one shell.
+async function navigationCacheFirst(req, event) {
   const cache = await caches.open(CACHE_VERSION);
+  const cached = await cache.match("/");
 
   const network = fetch(req)
     .then((res) => {
@@ -163,28 +162,16 @@ async function navigationNetworkFirst(req) {
     })
     .catch(() => null);
 
-  // Only a reachable host counts as a winner: an error page from the proxy is
-  // worth less than the shell we already have.
-  const usable = network.then((res) => (hostUnreachable(res) ? null : res));
-  const timeout = new Promise((resolve) => setTimeout(() => resolve(null), NAV_TIMEOUT_MS));
-  const winner = await Promise.race([usable, timeout]);
-
-  if (winner) {
-    return winner;
-  }
-
-  // Too slow, phone offline, or the Mac is down — boot from the cached shell so
-  // the app can explain itself and serve saved threads. The fetch finishes in
-  // the background and refreshes the cache for next time.
-  const cached = await cache.match("/");
-
   if (cached) {
+    event.waitUntil(network.then(() => {}));
     return cached;
   }
 
-  // Nothing cached (first ever launch): the proxy's own error page at least says
-  // something, so pass it through rather than showing a blank failure.
-  return (await network) || Response.error();
+  // Nothing cached means this really is the first visit. Preserve genuine 4xx
+  // responses (for example a rejected pairing token), but never prefer a
+  // tunnel/proxy 5xx over an app shell because there is no shell to use yet.
+  const response = await network;
+  return hostUnreachable(response) ? Response.error() : response;
 }
 
 // Static, versioned assets: serve cache, fill + refresh from network.

@@ -302,12 +302,13 @@ const reading = new Set();
 const lastRead = new Map();
 const trailing = new Map();
 
-async function emitExternal({ provider, threadId, running, runConfidence, terminalId, terminalOutcome, terminalText, changed }) {
+async function emitExternal({ provider, threadId, running, runConfidence, terminalId, terminalOutcome, terminalText, terminalError, changed }) {
   const key = metaKey(provider, threadId);
+  const terminal = { terminalId, terminalOutcome, terminalError };
 
   if (!changed) {
-    trackExternalCompletion({ provider, threadId, terminalId, terminalOutcome, reply: terminalText }).catch(() => {});
-    broadcast("external", { provider, threadId, running, runConfidence });
+    trackExternalCompletion({ provider, threadId, terminalId, terminalOutcome, terminalError, reply: terminalText }).catch(() => {});
+    broadcast("external", { provider, threadId, running, runConfidence, ...terminal });
     return;
   }
 
@@ -315,8 +316,8 @@ async function emitExternal({ provider, threadId, running, runConfidence, termin
   // full transcript diff. Large Codex rollouts can exceed 1 GB and parsing one
   // synchronously would stall every HTTP/SSE/provider operation on the bridge.
   if (!hasRecentPresence(provider, [threadId])) {
-    trackExternalCompletion({ provider, threadId, terminalId, terminalOutcome, reply: terminalText }).catch(() => {});
-    broadcast("external", { provider, threadId, running, runConfidence });
+    trackExternalCompletion({ provider, threadId, terminalId, terminalOutcome, terminalError, reply: terminalText }).catch(() => {});
+    broadcast("external", { provider, threadId, running, runConfidence, ...terminal });
     return;
   }
 
@@ -325,12 +326,12 @@ async function emitExternal({ provider, threadId, running, runConfidence, termin
   if (reading.has(key) || since < MIN_READ_MS) {
     // Coalesce: report liveness now (without `changed`, so the app doesn't fall
     // back to re-reading the whole thread) and pick the content up shortly.
-    broadcast("external", { provider, threadId, running, runConfidence });
+    broadcast("external", { provider, threadId, running, runConfidence, ...terminal });
 
     if (!trailing.has(key)) {
       trailing.set(key, setTimeout(() => {
         trailing.delete(key);
-        emitExternal({ provider, threadId, running, runConfidence, terminalId, terminalOutcome, terminalText, changed: true });
+        emitExternal({ provider, threadId, running, runConfidence, terminalId, terminalOutcome, terminalText, terminalError, changed: true });
       }, Math.max(0, MIN_READ_MS - since) + 100));
     }
 
@@ -338,7 +339,7 @@ async function emitExternal({ provider, threadId, running, runConfidence, termin
   }
 
   reading.add(key);
-  let payload = { provider, threadId, running, runConfidence, result: "unchanged" };
+  let payload = { provider, threadId, running, runConfidence, ...terminal, result: "unchanged" };
   let reply = "";
 
   try {
@@ -381,7 +382,7 @@ async function emitExternal({ provider, threadId, running, runConfidence, termin
     lastRead.set(key, Date.now());
   }
 
-  trackExternalCompletion({ provider, threadId, terminalId, terminalOutcome, reply: reply || terminalText }).catch(() => {});
+  trackExternalCompletion({ provider, threadId, terminalId, terminalOutcome, terminalError, reply: reply || terminalText }).catch(() => {});
   broadcast("external", payload);
 }
 
@@ -567,7 +568,8 @@ function trackForPush(event, data) {
   }
 
   const failed = method === "turn/failed";
-  const errorText = String(params.turn?.error?.message ?? "");
+  const rawError = params.error ?? params.turn?.error;
+  const errorText = String(typeof rawError === "string" ? rawError : (rawError?.message ?? ""));
 
   // A turn you stopped yourself is not news.
   if (failed && /cancel/i.test(errorText)) {
@@ -634,10 +636,18 @@ async function lookupThreadTitle(provider, threadId) {
   }
 }
 
-async function trackExternalCompletion({ provider = "codex", threadId, terminalId, terminalOutcome, reply = "" } = {}) {
+async function trackExternalCompletion({ provider = "codex", threadId, terminalId, terminalOutcome, terminalError, reply = "" } = {}) {
   if (!threadId || !terminalId) { return; }
   const key = metaKey(provider, threadId);
   const ownedAt = recentBridgeTerminals.get(key) ?? 0;
+
+  // An interrupted turn is terminal for run-state purposes, but it is not a
+  // successful completion and should not consume a one-shot completion alert
+  // or send a misleading "finished" notification.
+  if (terminalOutcome === "aborted") {
+    threadSubscriptions.acknowledge({ provider, threadId, terminalId });
+    return;
+  }
 
   // The ordinary provider event already sends the existing global completion
   // push for a bridge-owned turn. The file watcher sees the same terminal record
@@ -664,7 +674,7 @@ async function trackExternalCompletion({ provider = "codex", threadId, terminalI
   if (!title) { title = await lookupThreadTitle(provider, threadId); }
 
   const failed = terminalOutcome === "failed";
-  const body = notificationBody(reply, { failed });
+  const body = notificationBody(reply, { failed, errorText: terminalError?.message });
 
   await push.send({
     title: notificationTitle(title),

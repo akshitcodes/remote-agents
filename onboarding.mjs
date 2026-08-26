@@ -38,7 +38,9 @@ export function onboardingHtml(userAgent = "") {
          <p class="onboard-note" id="installPwaHint">If the button stays disabled, use Chrome's menu and choose <strong>Install app</strong> or <strong>Add to Home screen</strong>.</p>`
       : `<p>Install this app from your browser's menu, then open the installed app to enable notifications.</p>`;
 
-  return `<section id="installOnboarding" class="onboard" data-platform="${platform}" aria-labelledby="installOnboardingTitle">
+  // Start hidden so an installed PWA never paints this server-rendered overlay
+  // while its client script is still detecting standalone display mode.
+  return `<section id="installOnboarding" class="onboard" data-platform="${platform}" hidden aria-labelledby="installOnboardingTitle">
     <div class="onboard-card">
       <div class="onboard-kicker">One last step</div>
       <h1 id="installOnboardingTitle">Install Remote Agents</h1>

@@ -87,6 +87,15 @@ test("installed-app notification onboarding uses the real idempotent subscriptio
   assert.doesNotMatch(flow, /enablePushSubscription/);
 });
 
+test("install onboarding cannot flash before standalone detection finishes", () => {
+  const start = html.indexOf("function wireInstallOnboarding()");
+  const end = html.indexOf("function wireNotificationOnboarding()", start);
+  const flow = html.slice(start, end);
+  assert.match(html, /#installOnboarding:not\(\.install-ready\) \{ display: none; \}/);
+  assert.match(flow, /if \(isStandalone\(\).*hide\(\);\s*return;/s);
+  assert.match(flow, /panel\.hidden = false;\s*panel\.classList\.add\("install-ready"\);/);
+});
+
 test("task list has compact provider-agnostic and provider-specific views", () => {
   assert.match(html, /data-view="recent"/);
   assert.match(html, /data-view="provider"/);
@@ -142,6 +151,17 @@ test("usage sheet shows account limits for all providers and never thread usage"
   assert.doesNotMatch(html, /Latest local turn/);
   assert.doesNotMatch(html, /last input tokens/);
   assert.doesNotMatch(html, /Models used \(last turn\)/);
+});
+
+test("provider terminal errors stay visible live and after transcript reload", () => {
+  assert.match(html, /case "turnError"/);
+  assert.match(html, /showTurnFailure\(frame\.terminalError, frame\.terminalId\)/);
+  assert.match(html, /showTurnFailure\(error \|\| "Turn failed", params\.turn\?\.id/);
+  assert.match(html, /mcpServer\/startupStatus\/updated/);
+  assert.match(html, /rateLimitReachedType/);
+  assert.match(server, /terminalError, reply: reply \|\| terminalText/);
+  assert.match(server, /const rawError = params\.error \?\? params\.turn\?\.error/);
+  assert.match(server, /notificationBody\(reply, \{ failed, errorText: terminalError\?\.message \}\)/);
 });
 
 test("desktop workspace keeps session navigation visible and constrains the chat", () => {
