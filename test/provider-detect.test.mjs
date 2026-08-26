@@ -15,7 +15,7 @@ let uniq = 0;
 
 // HOME and the search dirs are read when the module initialises, so each machine
 // shape needs its own instance.
-async function onMachine({ home, path, bins = {}, files = {}, timeoutMs = 1500 }, run) {
+async function onMachine({ home, path, bins = {}, files = {}, timeoutMs = 8000 }, run) {
   const saved = {
     HOME: process.env.HOME,
     PATH: process.env.PATH,
@@ -71,7 +71,7 @@ const HANGS = "#!/bin/sh\nsleep 30\n";
 const SAYS = (text, code = 0) => `#!/bin/sh\ncat <<'EOF'\n${text}\nEOF\nexit ${code}\n`;
 
 test("a slow auth probe stays usable instead of reading as a failure", async (t) => {
-  await onMachine({ home: machine(t), bins: { grok: HANGS } }, (detect) => {
+  await onMachine({ home: machine(t), bins: { grok: HANGS }, timeoutMs: 1500 }, (detect) => {
     const row = detect.detectProviders().rows.find((r) => r.name === "grok");
 
     assert.equal(row.installed, true);
@@ -121,6 +121,7 @@ test("stored credentials carry a provider whose CLI never answers", async (t) =>
     home: machine(t),
     bins: { codex: HANGS },
     files: { ".codex/auth.json": JSON.stringify({ tokens: { access_token: "x" } }) },
+    timeoutMs: 1500,
   }, (detect) => {
     const row = detect.detectProviders().rows.find((r) => r.name === "codex");
 
@@ -203,7 +204,7 @@ test("resolved paths are absolute, so the service agrees with the shell", async 
 // The regression that shipped: a Mac with Claude installed and working was told
 // "No provider CLI is ready" and setup exited. Only facts may block.
 test("an unreadable sign-in does not block setup", async (t) => {
-  await onMachine({ home: machine(t), bins: { claude: HANGS } }, (detect) => {
+  await onMachine({ home: machine(t), bins: { claude: HANGS }, timeoutMs: 1500 }, (detect) => {
     const result = detect.detectProviders();
 
     assert.equal(result.rows.find((r) => r.name === "claude").state, "unknown");

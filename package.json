@@ -26,6 +26,7 @@
     "codex-titles.mjs",
     "recent-threads.mjs",
     "provider-detect.mjs",
+    "cli-capabilities.mjs",
     "config.mjs",
     "onboarding.mjs",
     "usage-state.mjs",

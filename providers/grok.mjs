@@ -14,6 +14,7 @@
 
 import { execFile, spawn } from "node:child_process";
 import { augmentedPath, providerBinary } from "../provider-detect.mjs";
+import { capabilitiesFor, pickChoice, supportsFlag, UNKNOWN_CAPABILITIES } from "../cli-capabilities.mjs";
 import { randomBytes } from "node:crypto";
 import { readdirSync, statSync, openSync, readSync, closeSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -64,20 +65,30 @@ export function parseGrokModels(output) {
 // Our UI mode keys → whether to auto-approve tools. Grok also supports
 // --permission-mode (default|acceptEdits|auto|dontAsk|bypassPermissions|plan);
 // we use --always-approve for full bypass and --permission-mode for the rest.
-export function permissionArgsFor(value) {
+export function grokCapabilities(bin = providerBinary("grok")) {
+  return capabilitiesFor(bin, { label: "grok" });
+}
+
+// Values in preference order, for the same reason as Claude's: the accepted set
+// changes between releases, and asking for one this build rejects stops the agent
+// from starting at all.
+export function permissionArgsFor(value, caps = UNKNOWN_CAPABILITIES) {
   switch (value) {
     case "bypass":
     case "full":
     case "danger-full-access":
-      return ["--always-approve"];
+      // --always-approve is Grok's own shorthand; bypassPermissions expresses the
+      // same intent through the shared flag, for builds without it.
+      if (supportsFlag(caps, "--always-approve")) { return ["--always-approve"]; }
+      return permissionModeArgs(caps, ["bypassPermissions", "dontAsk"], value);
     case "plan":
     case "chat":
     case "read-only":
-      return ["--permission-mode", "plan"];
+      return permissionModeArgs(caps, ["plan"], value);
     case "acceptEdits":
     case "agent":
     case "workspace-write":
-      return ["--permission-mode", "acceptEdits"];
+      return permissionModeArgs(caps, ["acceptEdits"], value);
     case "manual":
     case "default":
       throw new Error("Grok manual approvals are not supported by this bridge");
@@ -86,11 +97,34 @@ export function permissionArgsFor(value) {
   }
 }
 
-export function grokSessionArgs({ model, effort, modeKey }) {
+function permissionModeArgs(caps, preferences, modeKey) {
+  const chosen = pickChoice(caps, "--permission-mode", preferences);
+
+  if (!chosen) {
+    console.error(`[grok] this build accepts none of ${preferences.join("/")} for --permission-mode; leaving its default`);
+    return [];
+  }
+
+  if (chosen !== preferences[0]) {
+    console.error(`[grok] ${modeKey} is unavailable in this build; using --permission-mode ${chosen}`);
+  }
+
+  return ["--permission-mode", chosen];
+}
+
+export function grokSessionArgs({ model, effort, modeKey, caps = UNKNOWN_CAPABILITIES }) {
   const args = ["agent"];
   if (model) { args.push("--model", model); }
-  if (effort) { args.push("--reasoning-effort", effort); }
-  args.push(...permissionArgsFor(modeKey));
+
+  if (effort) {
+    if (supportsFlag(caps, "--reasoning-effort")) {
+      args.push("--reasoning-effort", effort);
+    } else {
+      console.error(`[grok] this build has no --reasoning-effort; sending without the ${effort} effort setting`);
+    }
+  }
+
+  args.push(...permissionArgsFor(modeKey, caps));
   args.push("stdio");
   return args;
 }
@@ -952,7 +986,7 @@ export class GrokProvider extends BaseProvider {
     const resolvedModel = model || undefined;
     const resolvedEffort = effort || undefined;
     const resolvedMode = modeKey || undefined;
-    const args = grokSessionArgs({ model: resolvedModel, effort: resolvedEffort, modeKey: resolvedMode });
+    const args = grokSessionArgs({ model: resolvedModel, effort: resolvedEffort, modeKey: resolvedMode, caps: grokCapabilities(this.binary) });
 
     let child;
 

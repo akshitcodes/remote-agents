@@ -26,6 +26,7 @@ import { createInterface } from "node:readline";
 import { promisify } from "node:util";
 
 import { augmentedPath, providerBinary } from "../provider-detect.mjs";
+import { capabilitiesFor, pickChoice, supportsFlag, UNKNOWN_CAPABILITIES } from "../cli-capabilities.mjs";
 import { BaseProvider, toEpochSec, makeLineReader } from "./base.mjs";
 
 const PROJECTS_DIR = join(homedir(), ".claude", "projects");
@@ -249,39 +250,69 @@ export async function observedClaudeModelIds(paths) {
   return [...models];
 }
 
-// Our permission modes -> Claude --permission-mode. The CLI accepts
-// acceptEdits | auto | bypassPermissions | manual | dontAsk | plan. Accepts the
-// UI mode keys plus legacy/Codex aliases for safety.
-function permissionModeFor(value) {
+// Our permission modes -> the values Claude's --permission-mode accepts, in
+// order of preference. More than one is listed because the accepted set moves
+// between releases: 2.1.0 offered `default` and `delegate` but not `auto`, while
+// 2.1.238 offers `auto` and `manual` but no longer lists `default`. Asking for a
+// value the installed build rejects makes the CLI refuse to start.
+function permissionModePreferences(value) {
   switch (value) {
     case "plan":
     case "chat":
     case "read-only":
-      return "plan";
+      return ["plan"];
     case "bypass":
     case "full":
     case "danger-full-access":
-      return "bypassPermissions";
+      return ["bypassPermissions"];
     case "acceptEdits":
     case "agent":
     case "workspace-write":
-      return "acceptEdits";
+      return ["acceptEdits"];
     // Claude's own safety check runs each action and pauses on anything risky —
     // the mode the desktop/VS Code client defaults to. No phone-side hook here:
-    // gating every command would just turn this back into Manual.
+    // gating every command would just turn this back into Manual. On builds
+    // without it, `default` is the closest behaviour that still asks.
     case "auto":
     case "on-request":
-      return "auto";
+      return ["auto", "default"];
     case "dontAsk":
-      return "dontAsk";
+      return ["dontAsk", "bypassPermissions"];
+    // Ask about everything, which is what this bridge's Manual mode means. 2.1.238
+    // calls it `manual`; older builds call the same behaviour `default`, and
+    // 2.1.238 still accepts `default` even though it no longer advertises it — so
+    // `default` leads, and is what a CLI we could not interrogate still receives.
     case "manual":
     case "default":
     default:
-      return "default";
+      return ["default", "manual"];
   }
 }
 
-export function claudeSessionArgs({ emitThreadId, model, effort, modeKey, isDraft, hookPath, endpoint, hookSecret, nodePath = process.execPath }) {
+export function claudeCapabilities(bin = providerBinary("claude")) {
+  return capabilitiesFor(bin, { label: "claude" });
+}
+
+// Add --permission-mode only if this build takes one of the values we can mean.
+// Omitting it leaves the CLI on its own default, which is far better than a
+// refusal to start.
+function pushPermissionMode(args, caps, modeKey) {
+  const preferences = permissionModePreferences(modeKey);
+  const chosen = pickChoice(caps, "--permission-mode", preferences);
+
+  if (!chosen) {
+    console.error(`[claude] this build accepts none of ${preferences.join("/")} for --permission-mode; leaving its default`);
+    return;
+  }
+
+  if (chosen !== preferences[0]) {
+    console.error(`[claude] ${modeKey ?? "default"} is unavailable in this build; using --permission-mode ${chosen}`);
+  }
+
+  args.push("--permission-mode", chosen);
+}
+
+export function claudeSessionArgs({ emitThreadId, model, effort, modeKey, isDraft, hookPath, endpoint, hookSecret, nodePath = process.execPath, caps = UNKNOWN_CAPABILITIES }) {
   const args = [
     "-p",
     "--input-format", "stream-json",
@@ -292,11 +323,19 @@ export function claudeSessionArgs({ emitThreadId, model, effort, modeKey, isDraf
 
   if (!isDraft) { args.push("--resume", emitThreadId); }
   if (model) { args.push("--model", model); }
-  if (effort) { args.push("--effort", effort); }
+  // --effort only exists from Claude Code 2.1.x onwards; older builds fail with
+  // `unknown option '--effort'` and never start.
+  if (effort) {
+    if (supportsFlag(caps, "--effort")) {
+      args.push("--effort", effort);
+    } else {
+      console.error(`[claude] this build has no --effort; sending without the ${effort} effort setting`);
+    }
+  }
 
   const interactive = hookPath && endpoint && (modeKey === "manual" || modeKey === "default" || modeKey == null);
   if (interactive) {
-    args.push("--permission-mode", "default");
+    pushPermissionMode(args, caps, "default");
     const url = `http://${endpoint.host}:${endpoint.port}/internal/claude-approval`;
     const settings = {
       hooks: {
@@ -311,7 +350,7 @@ export function claudeSessionArgs({ emitThreadId, model, effort, modeKey, isDraf
     };
     args.push("--settings", JSON.stringify(settings));
   } else {
-    args.push("--permission-mode", permissionModeFor(modeKey));
+    pushPermissionMode(args, caps, modeKey);
   }
 
   return args;
@@ -1083,6 +1122,8 @@ export class ClaudeProvider extends BaseProvider {
     const resolvedModel = model || undefined;
     const resolvedEffort = effort || undefined;
     const resolvedModeKey = modeKey || undefined;
+    // Resolve once, so the flags we choose describe the build we then run.
+    const bin = providerBinary("claude");
 
     const args = claudeSessionArgs({
       emitThreadId,
@@ -1093,12 +1134,13 @@ export class ClaudeProvider extends BaseProvider {
       hookPath: this.hookPath,
       endpoint: this.endpoint,
       hookSecret: this.hookSecret,
+      caps: claudeCapabilities(bin),
     });
 
     let child;
 
     try {
-      child = spawn(providerBinary("claude"), args, { cwd, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, PATH: augmentedPath() } });
+      child = spawn(bin, args, { cwd, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, PATH: augmentedPath() } });
     } catch (e) {
       throw Object.assign(new Error("failed to spawn claude: " + (e.message ?? e)), { status: 500 });
     }
