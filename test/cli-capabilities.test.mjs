@@ -15,9 +15,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { parseCliHelp, pickChoice, supportsFlag, UNKNOWN_CAPABILITIES } from "../cli-capabilities.mjs";
+import { capabilitiesFor, clearCapabilityCache, parseCliHelp, pickChoice, supportsFlag, UNKNOWN_CAPABILITIES } from "../cli-capabilities.mjs";
 import { claudeSessionArgs } from "../providers/claude.mjs";
-import { grokSessionArgs, permissionArgsFor } from "../providers/grok.mjs";
+import { GrokProvider, grokModelsFromAcp, grokSessionArgs, permissionArgsFor, verifyGrokSessionSettings } from "../providers/grok.mjs";
 
 const CLAUDE_2_1_0 = `
   --model <model>                       Model for the current session
@@ -53,6 +53,29 @@ const GROK_1_0_5 = `
 const old = () => parseCliHelp(CLAUDE_2_1_0);
 const current = () => parseCliHelp(CLAUDE_2_1_238);
 
+test("capability probes do not block the bridge and cache each help command separately", async () => {
+  clearCapabilityCache();
+  const started = Date.now();
+  const effortProbe = capabilitiesFor(process.execPath, {
+    args: ["-e", "setTimeout(() => console.log('--effort'), 100)"],
+    timeoutMs: 1000,
+    label: "fixture",
+  });
+
+  assert.ok(Date.now() - started < 50, "starting a help probe must not block the event loop");
+  const effort = await effortProbe;
+  const permission = await capabilitiesFor(process.execPath, {
+    args: ["-e", "console.log('--permission-mode')"],
+    timeoutMs: 1000,
+    label: "fixture",
+  });
+
+  assert.ok(effort.flags.has("--effort"));
+  assert.ok(!effort.flags.has("--permission-mode"));
+  assert.ok(permission.flags.has("--permission-mode"));
+  assert.ok(!permission.flags.has("--effort"));
+});
+
 test("help is parsed in both the commander and clap layouts", () => {
   assert.deepEqual([...old().choices.get("--permission-mode")].sort(),
     ["acceptEdits", "bypassPermissions", "default", "delegate", "dontAsk", "plan"]);
@@ -65,24 +88,47 @@ test("help is parsed in both the commander and clap layouts", () => {
   assert.ok(grok.flags.has("--always-approve"));
 });
 
-test("--effort is omitted on a build that has never heard of it", () => {
+test("choice lists stay attached to their option row, not flags mentioned in prose", () => {
+  const parsed = parseCliHelp(`
+  --output-format <format>  Output format (only works with --print)
+                            (choices: "text", "json", "stream-json")
+  --print                   Print and exit
+  --permission-mode <mode>  Permission mode (choices: "manual", "plan")
+`);
+  assert.deepEqual([...parsed.choices.get("--output-format")], ["text", "json", "stream-json"]);
+  assert.equal(parsed.choices.has("--print"), false);
+  assert.deepEqual([...parsed.choices.get("--permission-mode")], ["manual", "plan"]);
+});
+
+test("Grok-style indentation terminates each option block", () => {
+  const parsed = parseCliHelp(`
+      --model <MODEL>
+          Model ID to use
+      --reasoning-effort <EFFORT>
+          Reasoning effort (low, medium, high)
+      --always-approve
+          Approve every action
+`);
+  assert.equal(parsed.choices.has("--model"), false);
+  assert.deepEqual([...parsed.choices.get("--reasoning-effort")], ["low", "medium", "high"]);
+  assert.equal(parsed.choices.has("--always-approve"), false);
+});
+
+test("an explicit effort fails closed on a build that has never heard of it", () => {
   assert.equal(supportsFlag(old(), "--effort"), false);
   assert.equal(supportsFlag(current(), "--effort"), true);
 
-  const args = claudeSessionArgs({ emitThreadId: "t", model: "opus", effort: "high", modeKey: "bypass", caps: old() });
-  assert.ok(!args.includes("--effort"), "an unsupported --effort must never be sent");
-  // The rest of the request still goes through: losing an effort setting is a
-  // far better outcome than a CLI that will not start.
-  assert.ok(args.includes("--model") && args.includes("opus"));
-  assert.deepEqual(args.slice(args.indexOf("--permission-mode"), args.indexOf("--permission-mode") + 2),
-    ["--permission-mode", "bypassPermissions"]);
+  assert.throws(
+    () => claudeSessionArgs({ emitThreadId: "t", model: "opus", effort: "high", modeKey: "bypass", caps: old() }),
+    (error) => error.code === "provider_cli_incompatible" && /reasoning effort high/.test(error.message),
+  );
 });
 
-test("Auto falls back to the closest mode the build accepts", () => {
-  // 2.1.0 has no `auto`; `default` also pauses on risky actions.
-  const older = claudeSessionArgs({ emitThreadId: "t", model: "opus", modeKey: "auto", caps: old() });
-  assert.deepEqual(older.slice(older.indexOf("--permission-mode"), older.indexOf("--permission-mode") + 2),
-    ["--permission-mode", "default"]);
+test("Auto is never silently replaced with a different permission contract", () => {
+  assert.throws(
+    () => claudeSessionArgs({ emitThreadId: "t", model: "opus", modeKey: "auto", caps: old() }),
+    (error) => error.code === "provider_cli_incompatible" && /selected auto permission mode/.test(error.message),
+  );
 
   const newer = claudeSessionArgs({ emitThreadId: "t", model: "opus", modeKey: "auto", caps: current() });
   assert.deepEqual(newer.slice(newer.indexOf("--permission-mode"), newer.indexOf("--permission-mode") + 2),
@@ -103,36 +149,117 @@ test("Manual maps to a value each build accepts, keeping the approval hook", () 
   }
 });
 
-test("a build that accepts no value we can mean gets no --permission-mode", () => {
-  // Better the CLI's own default than a refusal to start.
+test("a build that accepts no exact permission value fails closed", () => {
   const stripped = parseCliHelp(`--model <model> Model\n--permission-mode <mode> (choices: "somethingElse")`);
-  const args = claudeSessionArgs({ emitThreadId: "t", model: "opus", modeKey: "plan", caps: stripped });
-
-  assert.ok(!args.includes("--permission-mode"));
-  assert.ok(args.includes("--model"));
+  assert.throws(
+    () => claudeSessionArgs({ emitThreadId: "t", model: "opus", modeKey: "plan", caps: stripped }),
+    (error) => error.code === "provider_cli_incompatible" && /selected plan permission mode/.test(error.message),
+  );
 });
 
-test("unreadable help keeps the behaviour this bridge was written against", () => {
-  // A CLI we could not interrogate is not evidence that a flag is missing.
+test("unreadable help never guesses an exact provider setting", () => {
+  // Low-level probes retain unknown rather than inventing unsupported flags,
+  // while the provider boundary refuses an exact mode it cannot prove.
   assert.equal(supportsFlag(UNKNOWN_CAPABILITIES, "--effort"), true);
   assert.equal(pickChoice(UNKNOWN_CAPABILITIES, "--permission-mode", ["auto", "default"]), "auto");
 
-  const args = claudeSessionArgs({ emitThreadId: "t", model: "opus", effort: "high", modeKey: "auto" });
-  assert.ok(args.includes("--effort"));
-  assert.deepEqual(args.slice(args.indexOf("--permission-mode"), args.indexOf("--permission-mode") + 2),
-    ["--permission-mode", "auto"]);
+  assert.throws(
+    () => claudeSessionArgs({ emitThreadId: "t", model: "provider-default", effort: "provider-default", modeKey: "auto" }),
+    (error) => error.code === "provider_cli_incompatible",
+  );
 });
 
-test("Grok drops an unsupported effort flag and finds another way to bypass", () => {
+test("Grok fails closed on unsupported effort and positions root permission flags correctly", () => {
   const noEffort = parseCliHelp(`-m, --model <MODEL>\n  --permission-mode <MODE>\n  [possible values: default, bypassPermissions, plan]`);
 
-  const args = grokSessionArgs({ model: "grok-4.5", effort: "high", modeKey: "bypass", caps: noEffort });
-  assert.ok(!args.includes("--reasoning-effort"));
-  // No --always-approve in this build, so the shared flag carries the intent.
-  assert.deepEqual(args, ["agent", "--model", "grok-4.5", "--permission-mode", "bypassPermissions", "stdio"]);
+  assert.throws(
+    () => grokSessionArgs({ model: "grok-4.5", effort: "high", modeKey: "bypass", caps: noEffort }),
+    (error) => error.code === "provider_cli_incompatible" && /reasoning effort high/.test(error.message),
+  );
+
+  assert.deepEqual(grokSessionArgs({ model: "grok-4.5", modeKey: "bypass", caps: noEffort }),
+    ["--permission-mode", "bypassPermissions", "agent", "--model", "grok-4.5", "stdio"]);
 
   const full = parseCliHelp(GROK_1_0_5);
   assert.deepEqual(grokSessionArgs({ model: "grok-4.5", effort: "high", modeKey: "bypass", caps: full }),
     ["agent", "--model", "grok-4.5", "--reasoning-effort", "high", "--always-approve", "stdio"]);
   assert.deepEqual(permissionArgsFor("plan", full), ["--permission-mode", "plan"]);
+});
+
+test("Grok models and per-model efforts come from ACP metadata without bridge guesses", () => {
+  const models = grokModelsFromAcp({
+    agentCapabilities: { promptCapabilities: { image: false }, loadSession: true },
+    _meta: {
+      modelState: {
+        currentModelId: "grok-new",
+        availableModels: [
+          {
+            modelId: "grok-new", name: "Grok New", description: "Provider description",
+            _meta: { reasoningEffort: "high", reasoningEfforts: [
+              { value: "ultra", description: "Provider ultra", default: false },
+              { value: "high", description: "Provider high", default: true },
+            ] },
+          },
+          { modelId: "grok-fast", name: "Grok Fast", _meta: { supportsReasoningEffort: false } },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(models[0].supportedReasoningEfforts.map((effort) => effort.reasoningEffort), ["ultra", "high"]);
+  assert.equal(models[0].defaultReasoningEffort, "high");
+  assert.equal(models[0].isDefault, true);
+  assert.deepEqual(models[0].inputModalities, ["text"]);
+  assert.deepEqual(models[1].supportedReasoningEfforts.map((effort) => effort.reasoningEffort), ["provider-default"]);
+});
+
+test("Grok dispatch settings are checked against the provider's session echo", () => {
+  const setup = {
+    models: { currentModelId: "grok-4.6" },
+    _meta: { "x.ai/sessionConfig": { options: [
+      { id: "high", category: "mode", selected: false },
+      { id: "medium", category: "mode", selected: true },
+    ] } },
+  };
+
+  assert.deepEqual(verifyGrokSessionSettings(setup, { model: "grok-4.6", effort: "medium" }), {
+    model: "grok-4.6", effort: "medium",
+  });
+  assert.throws(() => verifyGrokSessionSettings(setup, { model: "grok-4.5", effort: "medium" }),
+    (error) => error.code === "provider_settings_unconfirmed" && /Nothing was sent/.test(error.message));
+  assert.throws(() => verifyGrokSessionSettings(setup, { model: "grok-4.6", effort: "high" }),
+    (error) => error.code === "provider_settings_unconfirmed" && /Nothing was sent/.test(error.message));
+});
+
+test("a transient Grok ACP refresh keeps the last native capability snapshot", async (t) => {
+  let probes = 0;
+  const initialized = {
+    agentCapabilities: { promptCapabilities: { image: false }, loadSession: true },
+    _meta: { modelState: { currentModelId: "grok-4.6", availableModels: [{
+      modelId: "grok-4.6", name: "Grok 4.6",
+      _meta: { reasoningEfforts: [
+        { value: "high", default: true },
+        { value: "medium", default: false },
+      ] },
+    }] } },
+  };
+  const provider = new GrokProvider(() => {}, {
+    binary: process.execPath,
+    capabilityFetcher: async () => {
+      probes += 1;
+      if (probes === 1) { return initialized; }
+      throw new Error("temporary ACP failure");
+    },
+    cliCapabilityFetcher: async () => parseCliHelp(GROK_1_0_5),
+  });
+  t.after(() => clearInterval(provider.reaper));
+
+  const first = await provider.models();
+  provider.modelCache.at = 0;
+  const stale = await provider.models();
+
+  assert.deepEqual(stale.data, first.data);
+  assert.equal(stale.capabilities.stale, true);
+  assert.match(stale.capabilities.refreshError, /temporary ACP failure/);
+  assert.equal(probes, 2);
 });

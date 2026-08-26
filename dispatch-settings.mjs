@@ -15,7 +15,7 @@ function sameJson(left, right) {
 // Build the exact, validated settings snapshot that is allowed to cross the
 // provider boundary. Missing values fail closed: silently omitting --model or
 // an RPC model field would let a CLI choose a default that contradicts the UI.
-export function validateDispatchSettings(providerName, body, models, resolvedThreadSettings = null) {
+export function validateDispatchSettings(providerName, body, models, resolvedThreadSettings = null, providerCapabilities = null) {
   const model = clean(body?.model);
   const effort = clean(body?.effort);
   const mode = clean(body?.mode);
@@ -25,6 +25,13 @@ export function validateDispatchSettings(providerName, body, models, resolvedThr
   const providerExactMode = providerName === "codex" && mode === "provider-exact";
   if (!isKnownMode(providerName, mode) && !providerExactMode) {
     throw invalid("Permission mode is unavailable or does not match this provider.", "permission_mode_unavailable");
+  }
+  if (!providerExactMode && Array.isArray(providerCapabilities?.permissionModes)
+      && !providerCapabilities.permissionModes.includes(mode)) {
+    throw invalid(
+      `The installed ${providerName} provider does not advertise permission mode ${mode}. Refresh settings or update the provider.`,
+      "provider_cli_incompatible",
+    );
   }
 
   const advertised = (models ?? []).find((candidate) => candidate?.id === model);

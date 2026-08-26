@@ -14,7 +14,7 @@
 
 import { execFile, spawn } from "node:child_process";
 import { augmentedPath, providerBinary } from "../provider-detect.mjs";
-import { capabilitiesFor, pickChoice, supportsFlag, UNKNOWN_CAPABILITIES } from "../cli-capabilities.mjs";
+import { capabilitiesFor, mergeCapabilities, pickChoice, UNKNOWN_CAPABILITIES } from "../cli-capabilities.mjs";
 import { randomBytes } from "node:crypto";
 import { readdirSync, statSync, openSync, readSync, closeSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -38,12 +38,7 @@ const SHELL_TOOLS = new Set(["run_terminal_command", "Bash", "bash"]);
 
 const execFileAsync = promisify(execFile);
 const MODEL_CACHE_MS = 5 * 60 * 1000;
-
-const EFFORTS = [
-  { reasoningEffort: "low", description: "Quick, fast implementations." },
-  { reasoningEffort: "medium", description: "Balanced effort with standard implementation and testing." },
-  { reasoningEffort: "high", description: "Highest implementation quality with extensive reasoning (default)." },
-];
+const PROVIDER_DEFAULT = "provider-default";
 
 export function parseGrokModels(output) {
   const text = String(output ?? "");
@@ -62,33 +57,142 @@ export function parseGrokModels(output) {
   }));
 }
 
+export function grokModelsFromAcp(initialized) {
+  const modelState = initialized?._meta?.modelState;
+  const image = initialized?.agentCapabilities?.promptCapabilities?.image === true;
+  if (!Array.isArray(modelState?.availableModels) || !modelState.availableModels.length) { return null; }
+
+  return modelState.availableModels.map((model) => {
+    const advertisedEfforts = Array.isArray(model?._meta?.reasoningEfforts) ? model._meta.reasoningEfforts : [];
+    const efforts = advertisedEfforts.length
+      ? advertisedEfforts.map((effort) => ({
+          reasoningEffort: String(effort.value ?? effort.id),
+          description: String(effort.description ?? effort.label ?? "Provider-advertised reasoning effort."),
+        }))
+      : [{ reasoningEffort: PROVIDER_DEFAULT, description: "Let Grok choose its own default effort." }];
+    const defaultEffort = advertisedEfforts.find((effort) => effort.default)?.value
+      ?? model?._meta?.reasoningEffort
+      ?? PROVIDER_DEFAULT;
+
+    return {
+      id: String(model.modelId),
+      displayName: String(model.name ?? model.modelId),
+      description: String(model.description ?? "Available from this installed Grok provider."),
+      isDefault: model.modelId === modelState.currentModelId,
+      supportedReasoningEfforts: efforts,
+      defaultReasoningEffort: String(defaultEffort),
+      inputModalities: image ? ["text", "image"] : ["text"],
+      hidden: false,
+      source: "acp_initialize",
+    };
+  });
+}
+
+async function initializeGrokAcp(bin, timeoutMs = 10000) {
+  const child = spawn(bin, ["agent", "stdio"], {
+    stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env, PATH: augmentedPath() },
+  });
+  child.stderr.resume();
+  const input = Writable.toWeb(child.stdin);
+  const output = Readable.toWeb(child.stdout);
+  const conn = new ClientSideConnection(() => ({
+    sessionUpdate: async () => {},
+    requestPermission: async () => ({ outcome: { outcome: "cancelled" } }),
+    readTextFile: async () => ({ content: "" }),
+    writeTextFile: async () => ({}),
+  }), ndJsonStream(input, output));
+  let timer;
+
+  try {
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error("Grok capability discovery timed out")), timeoutMs);
+      timer.unref?.();
+    });
+    return await Promise.race([
+      conn.initialize({ protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false } }),
+      timeout,
+      new Promise((_, reject) => child.once("error", reject)),
+      new Promise((_, reject) => child.once("exit", (code) => reject(new Error(`Grok capability process exited (${code})`)))),
+    ]);
+  } finally {
+    clearTimeout(timer);
+    try { child.kill("SIGTERM"); } catch {}
+  }
+}
+
+export function verifyGrokSessionSettings(setup, { model, effort } = {}) {
+  const selectedModel = setup?.models?.currentModelId ?? setup?._meta?.["x.ai/sessionDetail"]?.currentModelId ?? null;
+  const options = setup?._meta?.["x.ai/sessionConfig"]?.options;
+  const selectedEffort = Array.isArray(options)
+    ? options.find((option) => option.category === "mode" && option.selected)?.id ?? null
+    : null;
+
+  if (model && model !== PROVIDER_DEFAULT && selectedModel !== model) {
+    throw Object.assign(new Error(
+      selectedModel
+        ? `Grok started model ${selectedModel}, not the requested ${model}. Nothing was sent.`
+        : `Grok did not confirm requested model ${model}. Nothing was sent.`,
+    ), { status: 409, code: "provider_settings_unconfirmed" });
+  }
+
+  if (effort && effort !== PROVIDER_DEFAULT && selectedEffort !== effort) {
+    throw Object.assign(new Error(
+      selectedEffort
+        ? `Grok started effort ${selectedEffort}, not the requested ${effort}. Nothing was sent.`
+        : `Grok did not confirm requested effort ${effort}. Nothing was sent.`,
+    ), { status: 409, code: "provider_settings_unconfirmed" });
+  }
+
+  return { model: selectedModel, effort: selectedEffort };
+}
+
+export function grokPromptContent(text, attachments = []) {
+  const prompt = [];
+  if (String(text ?? "").trim()) { prompt.push({ type: "text", text: String(text) }); }
+  for (const attachment of attachments) {
+    prompt.push({ type: "image", mimeType: attachment.mimeType, data: readFileSync(attachment.path).toString("base64") });
+  }
+  return prompt;
+}
+
 // Our UI mode keys → whether to auto-approve tools. Grok also supports
 // --permission-mode (default|acceptEdits|auto|dontAsk|bypassPermissions|plan);
 // we use --always-approve for full bypass and --permission-mode for the rest.
-export function grokCapabilities(bin = providerBinary("grok")) {
-  return capabilitiesFor(bin, { label: "grok" });
+export async function grokCapabilities(bin = providerBinary("grok")) {
+  const [root, agent] = await Promise.all([
+    capabilitiesFor(bin, { label: "grok" }),
+    capabilitiesFor(bin, { args: ["agent", "--help"], label: "grok" }),
+  ]);
+  return { ...mergeCapabilities(root, agent), scopes: { root, agent } };
+}
+
+function grokScope(caps, name) {
+  return caps?.scopes?.[name] ?? caps;
 }
 
 // Values in preference order, for the same reason as Claude's: the accepted set
 // changes between releases, and asking for one this build rejects stops the agent
 // from starting at all.
 export function permissionArgsFor(value, caps = UNKNOWN_CAPABILITIES) {
+  const rootCaps = grokScope(caps, "root");
+  const agentCaps = grokScope(caps, "agent");
   switch (value) {
     case "bypass":
     case "full":
     case "danger-full-access":
       // --always-approve is Grok's own shorthand; bypassPermissions expresses the
       // same intent through the shared flag, for builds without it.
-      if (supportsFlag(caps, "--always-approve")) { return ["--always-approve"]; }
-      return permissionModeArgs(caps, ["bypassPermissions", "dontAsk"], value);
+      if (agentCaps.readable && agentCaps.flags.has("--always-approve")) { return ["--always-approve"]; }
+      return permissionModeArgs(rootCaps, ["bypassPermissions"], value);
     case "plan":
     case "chat":
     case "read-only":
-      return permissionModeArgs(caps, ["plan"], value);
+      return permissionModeArgs(rootCaps, ["plan"], value);
     case "acceptEdits":
     case "agent":
     case "workspace-write":
-      return permissionModeArgs(caps, ["acceptEdits"], value);
+      return permissionModeArgs(rootCaps, ["acceptEdits"], value);
     case "manual":
     case "default":
       throw new Error("Grok manual approvals are not supported by this bridge");
@@ -98,11 +202,12 @@ export function permissionArgsFor(value, caps = UNKNOWN_CAPABILITIES) {
 }
 
 function permissionModeArgs(caps, preferences, modeKey) {
-  const chosen = pickChoice(caps, "--permission-mode", preferences);
+  const chosen = caps.readable ? pickChoice(caps, "--permission-mode", preferences) : null;
 
   if (!chosen) {
-    console.error(`[grok] this build accepts none of ${preferences.join("/")} for --permission-mode; leaving its default`);
-    return [];
+    throw Object.assign(new Error(
+      `This Grok version cannot apply the selected ${modeKey} permission mode. Update Grok, then retry.`,
+    ), { status: 409, code: "provider_cli_incompatible" });
   }
 
   if (chosen !== preferences[0]) {
@@ -113,18 +218,25 @@ function permissionModeArgs(caps, preferences, modeKey) {
 }
 
 export function grokSessionArgs({ model, effort, modeKey, caps = UNKNOWN_CAPABILITIES }) {
-  const args = ["agent"];
+  const agentCaps = grokScope(caps, "agent");
+  const permissionArgs = permissionArgsFor(modeKey, caps);
+  // --permission-mode is a root Grok option and must precede the `agent`
+  // subcommand. --always-approve is also accepted by `grok agent`, so keep it
+  // with the agent options used by current builds.
+  const args = permissionArgs[0] === "--permission-mode" ? [...permissionArgs, "agent"] : ["agent"];
   if (model) { args.push("--model", model); }
 
-  if (effort) {
-    if (supportsFlag(caps, "--reasoning-effort")) {
+  if (effort && effort !== PROVIDER_DEFAULT) {
+    if (agentCaps.readable && agentCaps.flags.has("--reasoning-effort")) {
       args.push("--reasoning-effort", effort);
     } else {
-      console.error(`[grok] this build has no --reasoning-effort; sending without the ${effort} effort setting`);
+      throw Object.assign(new Error(
+        `This Grok version cannot apply reasoning effort ${effort}. Update Grok, then retry.`,
+      ), { status: 409, code: "provider_cli_incompatible" });
     }
   }
 
-  args.push(...permissionArgsFor(modeKey, caps));
+  if (permissionArgs[0] === "--always-approve") { args.push(...permissionArgs); }
   args.push("stdio");
   return args;
 }
@@ -354,7 +466,7 @@ function toolUseToItem(block) {
 }
 
 export class GrokProvider extends BaseProvider {
-  constructor(emit, { billingFetcher = null, binary = null } = {}) {
+  constructor(emit, { billingFetcher = null, capabilityFetcher = null, cliCapabilityFetcher = null, binary = null } = {}) {
     super(emit, "grok");
 
     // Persistent ACP sessions: threadId and (once known) native sessionId
@@ -367,6 +479,8 @@ export class GrokProvider extends BaseProvider {
 
     this.modelCache = null;
     this.binary = binary ?? providerBinary("grok");
+    this.capabilityFetcher = capabilityFetcher ?? (() => initializeGrokAcp(this.binary));
+    this.cliCapabilityFetcher = cliCapabilityFetcher ?? (() => grokCapabilities(this.binary));
     this.billingFetcher = billingFetcher ?? (() => this.fetchBillingNative());
     this.billingCache = null;
     this.billingInFlight = null;
@@ -844,22 +958,90 @@ export class GrokProvider extends BaseProvider {
   }
 
   async models() {
-    if (!this.modelCache || Date.now() - this.modelCache.at > MODEL_CACHE_MS) {
-      const { stdout } = await execFileAsync(this.binary, ["models"], {
-        timeout: 15000,
-        maxBuffer: 1024 * 1024,
-        env: { ...process.env, PATH: augmentedPath() },
-      });
-      this.modelCache = { at: Date.now(), data: parseGrokModels(stdout) };
+    let binaryRevision = this.binary;
+    try {
+      const stat = statSync(this.binary);
+      binaryRevision = `${this.binary}:${stat.mtimeMs}:${stat.size}`;
+    } catch {}
+
+    if (!this.modelCache || this.modelCache.binaryRevision !== binaryRevision || Date.now() - this.modelCache.at > MODEL_CACHE_MS) {
+      const previous = this.modelCache;
+      let discoveryError = null;
+      const [initialized, cliCaps] = await Promise.all([
+        Promise.resolve().then(() => this.capabilityFetcher()).catch((error) => {
+          discoveryError = error;
+          return null;
+        }),
+        this.cliCapabilityFetcher(),
+      ]);
+
+      // A transient ACP refresh must not narrow a capability set the same
+      // installed binary already confirmed. Keep the last good native snapshot,
+      // mark its freshness honestly, and retry after the normal cache window.
+      // A binary revision change never reuses old metadata.
+      if (!initialized && previous?.binaryRevision === binaryRevision
+          && previous.capabilities?.source === "acp_initialize") {
+        this.modelCache = {
+          ...previous,
+          at: Date.now(),
+          capabilities: {
+            ...previous.capabilities,
+            stale: true,
+            refreshError: String(discoveryError?.message ?? "ACP capability refresh failed"),
+          },
+        };
+        return { data: this.modelCache.data, capabilities: this.modelCache.capabilities };
+      }
+
+      let data = grokModelsFromAcp(initialized);
+
+      if (!data) {
+        const { stdout } = await execFileAsync(this.binary, ["models"], {
+          timeout: 15000,
+          maxBuffer: 1024 * 1024,
+          env: { ...process.env, PATH: augmentedPath() },
+        });
+        data = parseGrokModels(stdout).map((model) => ({
+          ...model,
+          supportedReasoningEfforts: [{ reasoningEffort: PROVIDER_DEFAULT, description: "Let Grok choose its own default effort." }],
+          defaultReasoningEffort: PROVIDER_DEFAULT,
+          inputModalities: ["text"],
+          hidden: false,
+          source: "cli_models",
+        }));
+      }
+
+      const promptCapabilities = initialized?.agentCapabilities?.promptCapabilities ?? {};
+      const rootCaps = grokScope(cliCaps, "root");
+      const agentCaps = grokScope(cliCaps, "agent");
+      const permissionModes = (agentCaps.readable && agentCaps.flags.has("--always-approve"))
+        || (rootCaps.readable && rootCaps.choices.get("--permission-mode")?.has("bypassPermissions"))
+        ? ["bypass"]
+        : [];
+      this.modelCache = {
+        at: Date.now(),
+        binaryRevision,
+        data,
+        capabilities: {
+          source: initialized ? "acp_initialize" : "cli_help",
+          provenance: {
+            models: initialized ? "acp_initialize_model_state" : "cli_models",
+            efforts: initialized ? "acp_initialize_model_state" : "provider_default",
+            inputModalities: initialized ? "acp_initialize_prompt_capabilities" : "unavailable",
+            permissionModes: "cli_help",
+            controls: "acp_initialize",
+          },
+          permissionModes,
+          inputModalities: promptCapabilities.image === true ? ["text", "image"] : ["text"],
+          loadSession: initialized?.agentCapabilities?.loadSession === true,
+          nativeSteer: false,
+          nativeInterrupt: true,
+          stale: false,
+        },
+      };
     }
 
-    const data = this.modelCache.data.map((m) => ({
-      ...m,
-      supportedReasoningEfforts: EFFORTS,
-      defaultReasoningEffort: "high",
-      hidden: false,
-    }));
-    return { data };
+    return { data: this.modelCache.data, capabilities: this.modelCache.capabilities };
   }
 
   async fetchBillingNative() {
@@ -986,7 +1168,7 @@ export class GrokProvider extends BaseProvider {
     const resolvedModel = model || undefined;
     const resolvedEffort = effort || undefined;
     const resolvedMode = modeKey || undefined;
-    const args = grokSessionArgs({ model: resolvedModel, effort: resolvedEffort, modeKey: resolvedMode, caps: grokCapabilities(this.binary) });
+    const args = grokSessionArgs({ model: resolvedModel, effort: resolvedEffort, modeKey: resolvedMode, caps: await this.cliCapabilityFetcher() });
 
     let child;
 
@@ -1068,7 +1250,7 @@ export class GrokProvider extends BaseProvider {
     session.conn = conn;
 
     session.ready = (async () => {
-      await conn.initialize({
+      const initialized = await conn.initialize({
         protocolVersion: 1,
         clientCapabilities: {
           fs: { readTextFile: true, writeTextFile: true },
@@ -1076,8 +1258,10 @@ export class GrokProvider extends BaseProvider {
         },
       });
 
+      let setup;
       if (isDraft) {
         const r = await conn.newSession({ cwd, mcpServers: [] });
+        setup = r;
         session.sessionId = r.sessionId;
         this.sessions.set(r.sessionId, session);
         this.drafts.delete(emitThreadId);
@@ -1086,7 +1270,7 @@ export class GrokProvider extends BaseProvider {
         session.loadingHistory = true;
 
         try {
-          await conn.loadSession({ sessionId: emitThreadId, cwd, mcpServers: [] });
+          setup = await conn.loadSession({ sessionId: emitThreadId, cwd, mcpServers: [] });
           session.sessionId = emitThreadId;
           this.sessions.set(emitThreadId, session);
         } finally {
@@ -1094,11 +1278,14 @@ export class GrokProvider extends BaseProvider {
         }
       }
 
+      verifyGrokSessionSettings(setup ?? initialized, { model: resolvedModel, effort: resolvedEffort });
+
       session.lastUsed = Date.now();
     })();
 
     // Surface ready failures as dead sessions.
     session.ready.catch((err) => {
+      try { child.kill("SIGTERM"); } catch {}
       onDead(String(err?.message ?? err));
     });
 
@@ -1391,7 +1578,8 @@ export class GrokProvider extends BaseProvider {
   async send(body = {}) {
     const { threadId, text, attachments = [], model, effort, mode, sandbox, cwd, draft } = body;
 
-    if (attachments.length) {
+    const providerCapabilities = (await this.models()).capabilities;
+    if (attachments.length && !providerCapabilities.inputModalities.includes("image")) {
       throw Object.assign(new Error("This Grok CLI reports that image prompts are unsupported"), { status: 409, code: "images_unsupported" });
     }
 
@@ -1439,7 +1627,7 @@ export class GrokProvider extends BaseProvider {
 
     const sid = session.sessionId;
     session.conn
-      .prompt({ sessionId: sid, prompt: [{ type: "text", text }] })
+      .prompt({ sessionId: sid, prompt: grokPromptContent(text, attachments) })
       .then((res) => this.finishTurn(session, res))
       .catch((err) => this.failTurn(session, err));
 

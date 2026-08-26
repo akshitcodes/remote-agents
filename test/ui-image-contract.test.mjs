@@ -26,8 +26,10 @@ test("failed delivery recovery distinguishes pre-dispatch failures and remains a
   assert.match(html, /if \(btn\.isConnected && btn\.disabled\)/);
 });
 
-test("Grok image UI is disabled and cancel-before-send requires owned active work", () => {
-  assert.match(html, /activeProvider\(\) === "grok"/);
+test("image UI follows provider metadata and Grok cancel-before-send requires owned active work", () => {
+  assert.match(html, /function supportsInput\(modality\)/);
+  assert.match(html, /!supportsInput\("image"\)/);
+  assert.match(html, /capabilitiesByProvider\.set\(provider, res\.capabilities/);
   assert.match(html, /requireActive: true/);
   assert.match(html, /Stopping Grok safely, then sending this message/);
 });
@@ -206,7 +208,8 @@ test("composer settings fail closed and distinguish confirmed values from next-t
   assert.match(html, /function dispatchReadiness\(\)[\s\S]*?No exact model is selected/);
   assert.match(html, /settingsTruth\.state === "error"/);
   assert.match(html, /Next model/);
-  assert.match(html, /Exact settings sent to provider/);
+  assert.match(html, /Requested settings accepted by provider/);
+  assert.match(html, /awaiting recorded confirmation/);
   assert.match(html, /const accepted = await api\("\/api\/message"/);
   assert.match(html, /const dispatch = \{[\s\S]*?model: state\.model,[\s\S]*?approvalPolicy: m\.approvalPolicy/);
   assert.match(html, /Current turn accepted · next override saved/);
@@ -223,6 +226,6 @@ test("composer settings fail closed and distinguish confirmed values from next-t
   assert.match(html, /threadProvider !== state\.modelsProvider/);
   assert.match(html, /if \(!state\.active\) \{ await initModels\(name\); \}/);
   assert.match(html, /function openUsageSheet\(\)[\s\S]*?const provider = activeProvider\(\)/);
-  assert.match(server, /validateDispatchSettings\(provider\.name, body, listed, recorded\)/);
+  assert.match(server, /validateDispatchSettings\(provider\.name, body, listed, recorded, capabilities\)/);
   assert.match(server, /validateNewThreadModel\(p\.name, body\.model, listed\)/);
 });

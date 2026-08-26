@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
+import { parseCliHelp } from "../cli-capabilities.mjs";
 import { permissionArgsFor as grokPermissionArgsFor } from "../providers/grok.mjs";
 
 import {
@@ -104,7 +105,16 @@ test("provider permission values map only to exact existing mode keys", () => {
   assert.equal(claudeModeKey("bypassPermissions"), "bypass");
   assert.equal(claudeModeKey("dontAsk"), null);
   assert.throws(() => grokPermissionArgsFor("manual"), /not supported/);
-  assert.deepEqual(grokPermissionArgsFor("bypass"), ["--always-approve"]);
+  assert.throws(() => grokPermissionArgsFor("bypass"), (error) => error.code === "provider_cli_incompatible");
+  assert.deepEqual(grokPermissionArgsFor("bypass", parseCliHelp("--always-approve\n")), ["--always-approve"]);
+});
+
+test("dispatch rejects a mode the installed provider no longer advertises", () => {
+  assert.throws(() => validateDispatchSettings("claude", {
+    model: "opus", effort: "high", mode: "auto",
+  }, [{ id: "opus", supportedReasoningEfforts: [{ reasoningEffort: "high" }] }], null, {
+    permissionModes: ["manual", "plan"],
+  }), (error) => error.code === "provider_cli_incompatible");
 });
 
 test("an authoritative model absent from the provider list is preserved and marked unlisted", async (t) => {

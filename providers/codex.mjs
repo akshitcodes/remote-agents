@@ -762,7 +762,26 @@ export class CodexProvider extends BaseProvider {
       this.cache.models = await this.rpc("model/list", {});
     }
 
-    return this.cache.models;
+    const result = this.cache.models;
+    const inputModalities = [...new Set((result?.data ?? []).flatMap((model) => model.inputModalities ?? []))];
+    return {
+      ...result,
+      capabilities: {
+        source: "app_server",
+        provenance: {
+          models: "app_server_model_list",
+          efforts: "app_server_model_list",
+          inputModalities: "app_server_model_list",
+          permissionModes: "bridge_presets_over_app_server_policy",
+          controls: "app_server_rpc",
+        },
+        permissionModes: ["read-only", "auto", "full"],
+        inputModalities,
+        nativeQueue: true,
+        nativeSteer: true,
+        nativeInterrupt: true,
+      },
+    };
   }
 
   async usage({ refresh } = {}) {

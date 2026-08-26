@@ -192,9 +192,15 @@ test("missing Grok executable rejects the native billing check without crashing"
 test("Grok model discovery uses the resolved executable outside the service PATH", async () => {
   const root = mkdtempSync(join(tmpdir(), "grok-models-"));
   const binary = join(root, "grok");
-  writeFileSync(binary, "#!/bin/sh\nprintf 'Default model: grok-4.6\\n  * grok-4.6 (default)\\n'\n");
+  writeFileSync(binary, `#!/bin/sh
+if [ "$1" = "--help" ] || [ "$2" = "--help" ]; then
+  printf '%s\n' '  --always-approve' '  --reasoning-effort <EFFORT>'
+else
+  printf 'Default model: grok-4.6\n  * grok-4.6 (default)\n'
+fi
+`);
   chmodSync(binary, 0o755);
-  const provider = new GrokProvider(() => {}, { binary });
+  const provider = new GrokProvider(() => {}, { binary, capabilityFetcher: async () => null });
 
   try {
     const result = await provider.models();

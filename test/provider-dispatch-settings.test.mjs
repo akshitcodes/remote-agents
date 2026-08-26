@@ -1,9 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ClaudeProvider, claudeSessionArgs } from "../providers/claude.mjs";
+import { parseCliHelp } from "../cli-capabilities.mjs";
+import { ClaudeProvider, claudeSessionArgs, claudeTurnError } from "../providers/claude.mjs";
 import { CodexProvider, sandboxPolicyFor } from "../providers/codex.mjs";
 import { grokSessionArgs, parseGrokModels } from "../providers/grok.mjs";
+
+const CLAUDE_CAPS = parseCliHelp(`
+  --effort <level> (low, medium, high, xhigh, max)
+  --permission-mode <mode> (choices: "acceptEdits", "auto", "bypassPermissions", "manual", "plan")
+`);
+const GROK_CAPS = parseCliHelp(`
+  --permission-mode <MODE> [possible values: default, acceptEdits, bypassPermissions, plan]
+  --reasoning-effort <EFFORT>
+  --always-approve
+`);
 
 test("Codex turn/start receives the exact model, effort, approval, and sandbox snapshot", async () => {
   const provider = new CodexProvider(() => {});
@@ -74,6 +85,7 @@ test("Claude CLI args carry exact model, effort, and native permission mode", ()
     effort: "xhigh",
     modeKey: "auto",
     isDraft: false,
+    caps: CLAUDE_CAPS,
   });
   assert.deepEqual(args.slice(args.indexOf("--model"), args.indexOf("--model") + 2), ["--model", "claude-opus-5"]);
   assert.deepEqual(args.slice(args.indexOf("--effort"), args.indexOf("--effort") + 2), ["--effort", "xhigh"]);
@@ -91,19 +103,26 @@ test("Claude Manual keeps exact settings while routing approvals through the hoo
     endpoint: { host: "127.0.0.1", port: 8484 },
     hookSecret: "secret",
     nodePath: "/usr/bin/node",
+    caps: CLAUDE_CAPS,
   });
-  assert.deepEqual(args.slice(args.indexOf("--permission-mode"), args.indexOf("--permission-mode") + 2), ["--permission-mode", "default"]);
+  assert.deepEqual(args.slice(args.indexOf("--permission-mode"), args.indexOf("--permission-mode") + 2), ["--permission-mode", "manual"]);
   assert.match(args[args.indexOf("--settings") + 1], /claude-approval/);
   assert.ok(args.includes("opus"));
   assert.ok(args.includes("high"));
 });
 
+test("Claude's silent effort fallback is surfaced as a provider settings failure", () => {
+  const error = claudeTurnError("Warning: Unknown --effort value 'superhigh' — ignoring it and using the default effort.");
+  assert.equal(error.code, "provider_settings_unconfirmed");
+  assert.match(error.message, /rejected an exact model or effort setting/);
+});
+
 test("Grok CLI args carry exact model, effort, and permission behavior", () => {
-  assert.deepEqual(grokSessionArgs({ model: "grok-4.5", effort: "high", modeKey: "bypass" }), [
+  assert.deepEqual(grokSessionArgs({ model: "grok-4.5", effort: "high", modeKey: "bypass", caps: GROK_CAPS }), [
     "agent", "--model", "grok-4.5", "--reasoning-effort", "high", "--always-approve", "stdio",
   ]);
   assert.throws(
-    () => grokSessionArgs({ model: "grok-4.5", effort: "high", modeKey: "manual" }),
+    () => grokSessionArgs({ model: "grok-4.5", effort: "high", modeKey: "manual", caps: GROK_CAPS }),
     /not supported/,
   );
 });

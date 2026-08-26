@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -11,6 +11,19 @@ function fixtureDir(t) {
   const dir = mkdtempSync(join(tmpdir(), "codex-phone-claude-models-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
+}
+
+function claudeBinary(t, root) {
+  const path = join(root, "claude-fixture");
+  writeFileSync(path, `#!/bin/sh
+cat <<'EOF'
+  --effort <level> (low, medium, high, xhigh, max)
+  --model <model> Alias for the latest model (e.g. 'fable', 'opus', or 'sonnet') or a full model ID.
+  --permission-mode <mode> (choices: "acceptEdits", "auto", "bypassPermissions", "manual", "plan")
+EOF
+`);
+  chmodSync(path, 0o755);
+  return path;
 }
 
 function assertCodexModelShape(model) {
@@ -36,7 +49,7 @@ test("Claude models match the Codex picker shape and include recursive transcrip
     JSON.stringify({ type: "assistant", message: { model: "claude-sonnet-5" }, effort: "medium" }),
   ].join("\n") + "\n");
 
-  const provider = new ClaudeProvider(() => {}, { projectsDir: root });
+  const provider = new ClaudeProvider(() => {}, { projectsDir: root, binary: claudeBinary(t, root) });
   const { data } = await provider.models();
 
   assert.ok(data.some((model) => model.id === "claude-opus-5" && model.source === "transcript"));
@@ -44,17 +57,19 @@ test("Claude models match the Codex picker shape and include recursive transcrip
   data.forEach(assertCodexModelShape);
   assert.deepEqual(
     data[0].supportedReasoningEfforts.map((effort) => effort.reasoningEffort),
-    ["low", "medium", "high", "xhigh", "max"],
+    ["provider-default", "low", "medium", "high", "xhigh", "max"],
   );
 });
 
 test("Claude model discovery falls back to CLI-documented aliases without transcript history", async (t) => {
-  const provider = new ClaudeProvider(() => {}, { projectsDir: fixtureDir(t) });
+  const root = fixtureDir(t);
+  const provider = new ClaudeProvider(() => {}, { projectsDir: root, binary: claudeBinary(t, root) });
   const { data } = await provider.models();
 
-  assert.deepEqual(data.map((model) => model.id), ["opus", "sonnet", "fable"]);
+  assert.deepEqual(data.map((model) => model.id), ["provider-default", "fable", "opus", "sonnet"]);
   assert.equal(data[0].isDefault, true);
-  assert.ok(data.every((model) => model.source === "cli_help"));
+  assert.equal(data[0].source, "provider_default");
+  assert.ok(data.slice(1).every((model) => model.source === "cli_help"));
 });
 
 test("a real Claude full ID round-trips unchanged through per-thread settings", async (t) => {

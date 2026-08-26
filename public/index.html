@@ -573,6 +573,7 @@ const state = {
   searchTimer: null,
   models: [], model: null, effort: null,
   modelsProvider: null,
+  capabilitiesByProvider: new Map(),
   modelRequestSeq: 0,
   modeByProvider: { codex: "auto", claude: "manual", grok: "bypass" }, // defaults for new threads
   threadMode: null,          // server-resolved mode for the open thread
@@ -673,7 +674,18 @@ function effectiveSendBehavior() {
   return sendModesFor(activeProvider()).steer;
 }
 
-function modeSetFor(provider) { return MODE_SETS[provider] || MODE_SETS.codex; }
+function modeSetFor(provider) {
+  const base = MODE_SETS[provider] || MODE_SETS.codex;
+  const advertised = state.capabilitiesByProvider.get(provider)?.permissionModes;
+  if (!Array.isArray(advertised)) { return base; }
+  return Object.fromEntries(Object.entries(base).filter(([key]) => advertised.includes(key)));
+}
+
+function supportsInput(modality) {
+  const modelModes = currentModel()?.inputModalities;
+  if (Array.isArray(modelModes)) { return modelModes.includes(modality); }
+  return state.capabilitiesByProvider.get(activeProvider())?.inputModalities?.includes(modality) === true;
+}
 
 // Resolve the open thread's mode first. Global picks are defaults for sessions
 // with no provider/store value, not a competing opinion about an existing one.
@@ -710,8 +722,12 @@ function currentMode() {
   let key = state.active && state.threadMode ? state.threadMode : state.modeByProvider[p];
 
   if (!set[key]) {
-    key = DEFAULT_MODE[p];
+    key = set[DEFAULT_MODE[p]] ? DEFAULT_MODE[p] : Object.keys(set)[0] ?? null;
     state.modeByProvider[p] = key;
+  }
+
+  if (!key || !set[key]) {
+    return { key: null, name: "Unavailable", desc: `${PROVIDER_LABELS[p] || "Provider"} does not advertise a permission mode this bridge can apply exactly.`, unknown: true };
   }
 
   return { key, ...set[key] };
@@ -3648,7 +3664,7 @@ async function doSend(text, { attachments = [], bubble, requestId, pendingEntry 
         state.settingsTruth = {
           state: "accepted",
           sources: { model: "provider_accept", effort: "provider_accept", mode: "provider_accept" },
-          message: "Exact settings sent to provider",
+          message: "Requested settings accepted by provider",
         };
       } else {
         // The user changed the controls while the request was in flight. Keep
@@ -3672,7 +3688,7 @@ async function doSend(text, { attachments = [], bubble, requestId, pendingEntry 
     setBusy(false);
     failSendProgress(e);
 
-    if (["model_unavailable", "effort_unavailable", "permission_mode_unavailable", "model_not_available", "effort_not_supported", "permission_mode_mismatch", "model_verification_failed"].includes(e.code)) {
+    if (["model_unavailable", "effort_unavailable", "permission_mode_unavailable", "model_not_available", "effort_not_supported", "permission_mode_mismatch", "model_verification_failed", "provider_cli_incompatible", "provider_settings_unconfirmed"].includes(e.code)) {
       state.settingsTruth = { state: "error", sources: {}, message: "Settings rejected · send blocked" };
       syncControls();
     }
@@ -4241,9 +4257,11 @@ function dispatchReadiness() {
 
 function settingsSourceMessage(settings) {
   const values = [settings?.sources?.model, settings?.sources?.effort, settings?.sources?.mode];
-  const providerCount = values.filter((source) => source && !source.startsWith("bridge_")).length;
+  const acceptedCount = values.filter((source) => source === "provider_accept").length;
+  const providerCount = values.filter((source) => source && source !== "provider_accept" && !source.startsWith("bridge_")).length;
   const savedCount = values.filter((source) => source?.startsWith("bridge_")).length;
   const missingCount = values.filter((source) => !source).length;
+  if (acceptedCount) { return "Requested settings accepted · awaiting recorded confirmation"; }
   if (providerCount && savedCount) { return "Provider-confirmed · saved overrides"; }
   if (providerCount && missingCount) { return "Provider-confirmed · defaults for missing fields"; }
   if (providerCount) { return `Confirmed from ${PROVIDER_LABELS[activeProvider()] || "provider"}`; }
@@ -4510,18 +4528,18 @@ function syncControls() {
   const readiness = dispatchReadiness();
   const truth = state.settingsTruth;
   $("modelName").textContent = m?.displayName || state.model || "—";
-  $("effortName").textContent = state.effort || "—";
+  $("effortName").textContent = state.effort === "provider-default" ? "Provider default" : state.effort || "—";
   $("modelLabel").textContent = truth.sources?.model === "bridge_override" ? "Next model" : "Model";
   $("effortLabel").textContent = truth.sources?.effort === "bridge_override" ? "Next effort" : "Effort";
   $("modeName").textContent = currentMode().name;
   const sendBehavior = effectiveSendBehavior();
   $("steerName").textContent = sendBehavior.name;
   $("steerCtl").title = sendBehavior.desc;
-  const grok = activeProvider() === "grok";
-  $("attachBtn").disabled = grok || state.uploadingAttachments > 0;
-  $("attachBtn").title = grok ? "The installed Grok CLI does not support image prompts" : "Attach images";
-  $("modelCtl").title = state.model ? `Exact provider model ID: ${state.model}` : readiness.reason;
-  $("effortCtl").title = state.effort ? `Exact reasoning effort: ${state.effort}` : readiness.reason;
+  const imagesSupported = supportsInput("image");
+  $("attachBtn").disabled = !imagesSupported || state.uploadingAttachments > 0;
+  $("attachBtn").title = imagesSupported ? "Attach images" : `${providerLabel()} does not advertise image prompt support`;
+  $("modelCtl").title = state.model === "provider-default" ? "Let the provider select its current default model" : (state.model ? `Exact provider model ID: ${state.model}` : readiness.reason);
+  $("effortCtl").title = state.effort === "provider-default" ? "Let the provider select its current default effort" : (state.effort ? `Exact reasoning effort: ${state.effort}` : readiness.reason);
   $("modeCtl").title = currentMode().unknown
     ? readiness.reason
     : (currentMode().providerExact ? currentMode().desc : `Exact permission preset: ${currentMode().key}`);
@@ -5558,6 +5576,7 @@ async function initModels(provider = state.provider) {
     const res = await api("/api/models?provider=" + encodeURIComponent(provider));
     if (requestSeq !== state.modelRequestSeq) { return false; }
     state.models = res.data ?? [];
+    state.capabilitiesByProvider.set(provider, res.capabilities ?? null);
     state.modelsReady = state.models.length > 0;
     state.modelsProvider = provider;
     const prefs = loadPrefs();
@@ -5592,7 +5611,7 @@ $("sidebarToggleBtn").onclick = () => toggleSidebar();
 $("loadMore").onclick = () => loadThreads(true);
 $("sendBtn").onclick = send;
 $("attachBtn").onclick = () => {
-  if (activeProvider() === "grok") { chip("⚠️", "This Grok CLI does not support image prompts"); return; }
+  if (!supportsInput("image")) { chip("⚠️", `${providerLabel()} does not advertise image prompt support`); return; }
   $("imageInput").click();
 };
 $("imageInput").onchange = () => uploadImages($("imageInput").files);

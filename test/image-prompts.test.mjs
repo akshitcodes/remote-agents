@@ -6,7 +6,8 @@ import test from "node:test";
 
 import { codexUserInput } from "../providers/codex.mjs";
 import { claudeUserContent } from "../providers/claude.mjs";
-import { GrokProvider } from "../providers/grok.mjs";
+import { GrokProvider, grokPromptContent } from "../providers/grok.mjs";
+import { parseCliHelp } from "../cli-capabilities.mjs";
 
 const PNG_1PX = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
 
@@ -31,8 +32,25 @@ test("Claude prompt emits an Anthropic base64 image content block", () => {
   ]);
 });
 
+test("Grok ACP image blocks are ready when the provider advertises image input", () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-phone-grok-image-"));
+  const path = join(root, "image.png");
+  writeFileSync(path, PNG_1PX);
+
+  assert.deepEqual(grokPromptContent("inspect this", [{ path, mimeType: "image/png" }]), [
+    { type: "text", text: "inspect this" },
+    { type: "image", mimeType: "image/png", data: PNG_1PX.toString("base64") },
+  ]);
+});
+
 test("Grok explicitly rejects images instead of silently dropping them", async () => {
-  const provider = new GrokProvider(() => {});
+  const provider = new GrokProvider(() => {}, {
+    capabilityFetcher: async () => ({
+      agentCapabilities: { promptCapabilities: { image: false } },
+      _meta: { modelState: { currentModelId: "grok-test", availableModels: [{ modelId: "grok-test", name: "Grok Test", _meta: { reasoningEfforts: [{ value: "high", default: true }] } }] } },
+    }),
+    cliCapabilityFetcher: async () => parseCliHelp("--always-approve\n--reasoning-effort <EFFORT>"),
+  });
 
   await assert.rejects(
     provider.send({ threadId: "thread-grok", text: "inspect", attachments: [{ path: "/tmp/image.png" }] }),

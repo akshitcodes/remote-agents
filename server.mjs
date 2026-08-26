@@ -400,8 +400,11 @@ async function sendOnce(provider, body, method = "send") {
 
   if (method === "send") {
     let listed;
+    let capabilities;
     try {
-      listed = (await provider.models())?.data ?? [];
+      const catalog = await provider.models();
+      listed = catalog?.data ?? [];
+      capabilities = catalog?.capabilities ?? null;
     } catch (error) {
       throw Object.assign(new Error(`Could not verify ${provider.name} models before sending: ${error?.message ?? error}`), {
         status: 503,
@@ -412,7 +415,7 @@ async function sendOnce(provider, body, method = "send") {
     const recorded = body?.threadId
       ? await threadSettings.resolve(provider.name, body.threadId)
       : null;
-    dispatch = validateDispatchSettings(provider.name, body, listed, recorded);
+    dispatch = validateDispatchSettings(provider.name, body, listed, recorded, capabilities);
   }
 
   for (const key of ["model", "effort", "mode"]) {

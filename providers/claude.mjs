@@ -57,6 +57,13 @@ export function claudeTurnError(message) {
     };
   }
 
+  if (/Unknown --(?:effort|model) value|ignoring it and using the default/i.test(text)) {
+    return {
+      message: `Claude rejected an exact model or effort setting: ${text.trim()}`,
+      code: "provider_settings_unconfirmed",
+    };
+  }
+
   return { message: text };
 }
 
@@ -105,23 +112,7 @@ req.write(payload);
 req.end();
 `;
 
-// Claude Code 2.1.228 has no model-list or config-list command. Its --model
-// help does explicitly document these aliases, so they are the only curated
-// choices used when a fresh install has no transcript history yet. Full IDs are
-// discovered from successful assistant records below rather than guessed here.
-const MODEL_FALLBACKS = [
-  { id: "opus", family: "opus", displayName: "Claude Opus (latest)", description: "Latest Opus alias — deep reasoning for complex tasks.", isDefault: true },
-  { id: "sonnet", family: "sonnet", displayName: "Claude Sonnet (latest)", description: "Latest Sonnet alias — balanced speed and capability." },
-  { id: "fable", family: "fable", displayName: "Claude Fable (latest)", description: "Latest Fable alias — fast, strong general-purpose work." },
-];
-
-const EFFORTS = [
-  { reasoningEffort: "low", description: "Minimal thinking; fastest replies." },
-  { reasoningEffort: "medium", description: "Moderate thinking for routine work." },
-  { reasoningEffort: "high", description: "Thorough thinking (default)." },
-  { reasoningEffort: "xhigh", description: "Extended thinking for hard problems." },
-  { reasoningEffort: "max", description: "Maximum thinking budget." },
-];
+const PROVIDER_DEFAULT = "provider-default";
 
 const MODEL_FAMILY_ORDER = new Map([
   ["opus", 0],
@@ -168,7 +159,25 @@ function observedModelDescription(family) {
   }
 }
 
-export function buildClaudeModelList(observedIds = []) {
+export function claudeModelAliasesFromHelp(help) {
+  const block = /--model\s+<[^>]+>([\s\S]*?)(?=\n\s{0,4}(?:-[a-zA-Z],\s*)?--[a-z]|$)/.exec(String(help ?? ""))?.[1] ?? "";
+  const aliasExample = /alias[^\n]*\(e\.g\.\s*([^)]+)\)/i.exec(block)?.[1] ?? "";
+  return [...aliasExample.matchAll(/["']([a-z][a-z0-9._-]*)["']/gi)]
+    .map((match) => match[1])
+    .filter((id, index, all) => !id.startsWith("claude-") && all.indexOf(id) === index);
+}
+
+function providerDefaultModel() {
+  return {
+    id: PROVIDER_DEFAULT,
+    displayName: "Claude default",
+    description: "Let this installed Claude Code build choose its own current default model.",
+    isDefault: true,
+    source: "provider_default",
+  };
+}
+
+export function buildClaudeModelList(observedIds = [], aliases = []) {
   const observed = [...new Set(observedIds)].filter(isClaudeModelId).map((id) => {
     const family = claudeModelFamily(id);
     const familyName = family ? family[0].toUpperCase() + family.slice(1) : "Model";
@@ -193,11 +202,18 @@ export function buildClaudeModelList(observedIds = []) {
     byFamily.set(model.family, rows);
   }
 
-  const data = [];
-  for (const fallback of MODEL_FALLBACKS) {
-    data.push({ ...fallback, source: "cli_help" });
-    data.push(...(byFamily.get(fallback.family) ?? []));
-    byFamily.delete(fallback.family);
+  const data = [providerDefaultModel()];
+  for (const id of aliases) {
+    const family = claudeModelFamily(id) ?? id;
+    const familyName = family[0].toUpperCase() + family.slice(1);
+    data.push({
+      id,
+      displayName: `Claude ${familyName} (latest)`,
+      description: `Model alias advertised by this installed Claude Code build.`,
+      source: "cli_help",
+    });
+    data.push(...(byFamily.get(family) ?? []));
+    byFamily.delete(family);
   }
 
   for (const family of ["haiku", ...byFamily.keys()]) {
@@ -271,17 +287,17 @@ function permissionModePreferences(value) {
       return ["acceptEdits"];
     // Claude's own safety check runs each action and pauses on anything risky —
     // the mode the desktop/VS Code client defaults to. No phone-side hook here:
-    // gating every command would just turn this back into Manual. On builds
-    // without it, `default` is the closest behaviour that still asks.
+    // gating every command would just turn this back into Manual.
     case "auto":
     case "on-request":
-      return ["auto", "default"];
+      return ["auto"];
     case "dontAsk":
-      return ["dontAsk", "bypassPermissions"];
+      return ["dontAsk"];
     // Ask about everything, which is what this bridge's Manual mode means. 2.1.238
     // calls it `manual`; older builds call the same behaviour `default`, and
-    // 2.1.238 still accepts `default` even though it no longer advertises it — so
-    // `default` leads, and is what a CLI we could not interrogate still receives.
+    // 2.1.238 still accepts `default` even though it no longer advertises it.
+    // Prefer the value this particular build advertises; both names represent
+    // the same bridge Manual contract.
     case "manual":
     case "default":
     default:
@@ -293,20 +309,36 @@ export function claudeCapabilities(bin = providerBinary("claude")) {
   return capabilitiesFor(bin, { label: "claude" });
 }
 
-// Add --permission-mode only if this build takes one of the values we can mean.
-// Omitting it leaves the CLI on its own default, which is far better than a
-// refusal to start.
+function claudeEfforts(caps) {
+  const advertised = [...(caps.choices.get("--effort") ?? [])];
+  return [
+    { reasoningEffort: PROVIDER_DEFAULT, description: "Let Claude Code choose its own default effort." },
+    ...advertised.map((reasoningEffort) => ({ reasoningEffort, description: `Effort advertised by this installed Claude Code build.` })),
+  ];
+}
+
+function claudePermissionModes(caps) {
+  if (!caps.readable) { return []; }
+  const advertised = caps.choices.get("--permission-mode") ?? new Set();
+  const modes = [];
+  if (advertised.has("manual") || advertised.has("default")) { modes.push("manual"); }
+  if (advertised.has("auto")) { modes.push("auto"); }
+  if (advertised.has("acceptEdits")) { modes.push("acceptEdits"); }
+  if (advertised.has("plan")) { modes.push("plan"); }
+  if (advertised.has("bypassPermissions")) { modes.push("bypass"); }
+  return modes;
+}
+
+// Add --permission-mode only when this build advertises a value with the exact
+// bridge meaning. Permission behavior is never silently omitted or widened.
 function pushPermissionMode(args, caps, modeKey) {
   const preferences = permissionModePreferences(modeKey);
-  const chosen = pickChoice(caps, "--permission-mode", preferences);
+  const chosen = caps.readable ? pickChoice(caps, "--permission-mode", preferences) : null;
 
   if (!chosen) {
-    console.error(`[claude] this build accepts none of ${preferences.join("/")} for --permission-mode; leaving its default`);
-    return;
-  }
-
-  if (chosen !== preferences[0]) {
-    console.error(`[claude] ${modeKey ?? "default"} is unavailable in this build; using --permission-mode ${chosen}`);
+    throw Object.assign(new Error(
+      `This Claude Code version cannot apply the selected ${modeKey ?? "manual"} permission mode. Update Claude Code, then retry.`,
+    ), { status: 409, code: "provider_cli_incompatible" });
   }
 
   args.push("--permission-mode", chosen);
@@ -322,14 +354,17 @@ export function claudeSessionArgs({ emitThreadId, model, effort, modeKey, isDraf
   ];
 
   if (!isDraft) { args.push("--resume", emitThreadId); }
-  if (model) { args.push("--model", model); }
+  if (model && model !== PROVIDER_DEFAULT) { args.push("--model", model); }
   // --effort only exists from Claude Code 2.1.x onwards; older builds fail with
   // `unknown option '--effort'` and never start.
-  if (effort) {
-    if (supportsFlag(caps, "--effort")) {
+  if (effort && effort !== PROVIDER_DEFAULT) {
+    const advertised = caps.readable ? caps.choices.get("--effort") : null;
+    if (supportsFlag(caps, "--effort") && advertised?.has(effort)) {
       args.push("--effort", effort);
     } else {
-      console.error(`[claude] this build has no --effort; sending without the ${effort} effort setting`);
+      throw Object.assign(new Error(
+        `This Claude Code version cannot apply reasoning effort ${effort}. Update Claude Code, then retry.`,
+      ), { status: 409, code: "provider_cli_incompatible" });
     }
   }
 
@@ -587,7 +622,7 @@ export function claudeUserContent(text, attachments = []) {
 }
 
 export class ClaudeProvider extends BaseProvider {
-  constructor(emit, { acceptTimeoutMs = DEFAULT_ACCEPT_TIMEOUT_MS, projectsDir = PROJECTS_DIR, usageCommand = "cswap" } = {}) {
+  constructor(emit, { acceptTimeoutMs = DEFAULT_ACCEPT_TIMEOUT_MS, binary = null, projectsDir = PROJECTS_DIR, usageCommand = "cswap" } = {}) {
     super(emit, "claude");
 
     // Active sessions: threadId and (once known) native sessionId both point at
@@ -596,6 +631,7 @@ export class ClaudeProvider extends BaseProvider {
     this.sessions = new Map();
     this.acceptTimeoutMs = acceptTimeoutMs;
     this.projectsDir = projectsDir;
+    this.binary = binary ?? providerBinary("claude");
     this.usageCommand = usageCommand;
     this.summaryCache = new Map(); // path -> { mtime, summary }
     this.modelCache = null; // { signature, data }
@@ -963,8 +999,10 @@ export class ClaudeProvider extends BaseProvider {
   }
 
   async models() {
+    const bin = this.binary;
+    const caps = await claudeCapabilities(bin);
     const paths = listClaudeTranscriptPaths(this.projectsDir);
-    const signature = paths.map((path) => {
+    const signature = `${caps.text}\n` + paths.map((path) => {
       try {
         const stat = statSync(path);
         return `${path}:${stat.size}:${stat.mtimeMs}`;
@@ -974,18 +1012,31 @@ export class ClaudeProvider extends BaseProvider {
     }).join("\n");
 
     if (this.modelCache?.signature === signature) {
-      return { data: this.modelCache.data };
+      return { data: this.modelCache.data, capabilities: this.modelCache.capabilities };
     }
 
     const observed = await observedClaudeModelIds(paths);
-    const data = buildClaudeModelList(observed).map((m) => ({
+    const efforts = claudeEfforts(caps);
+    const data = buildClaudeModelList(observed, claudeModelAliasesFromHelp(caps.text)).map((m) => ({
       ...m,
-      supportedReasoningEfforts: EFFORTS,
-      defaultReasoningEffort: "high",
+      supportedReasoningEfforts: efforts,
+      defaultReasoningEffort: PROVIDER_DEFAULT,
+      inputModalities: ["text", "image"],
       hidden: false,
     }));
-    this.modelCache = { signature, data };
-    return { data };
+    const capabilities = {
+      source: caps.readable ? "cli_help+transcript" : "provider_default_only",
+      provenance: {
+        models: caps.readable ? "cli_help+transcript" : "transcript+provider_default",
+        efforts: caps.readable ? "cli_help" : "provider_default",
+        permissionModes: caps.readable ? "cli_help" : "unavailable",
+        inputModalities: "tested_stream_json_adapter",
+      },
+      permissionModes: claudePermissionModes(caps),
+      inputModalities: ["text", "image"],
+    };
+    this.modelCache = { signature, data, capabilities };
+    return { data, capabilities };
   }
 
   async usage() {
@@ -1123,7 +1174,7 @@ export class ClaudeProvider extends BaseProvider {
     const resolvedEffort = effort || undefined;
     const resolvedModeKey = modeKey || undefined;
     // Resolve once, so the flags we choose describe the build we then run.
-    const bin = providerBinary("claude");
+    const bin = this.binary;
 
     const args = claudeSessionArgs({
       emitThreadId,
@@ -1134,7 +1185,7 @@ export class ClaudeProvider extends BaseProvider {
       hookPath: this.hookPath,
       endpoint: this.endpoint,
       hookSecret: this.hookSecret,
-      caps: claudeCapabilities(bin),
+      caps: await claudeCapabilities(bin),
     });
 
     let child;
@@ -1450,8 +1501,14 @@ export class ClaudeProvider extends BaseProvider {
       }
 
       // Enrich usage(): accumulate spend and remember the last token/model breakdown.
-      const failed = obj.subtype && obj.subtype !== "success";
-      const error = failed ? claudeTurnError(obj.result ?? obj.subtype) : undefined;
+      const providerSettingError = claudeTurnError(session.stderr);
+      const failed = (obj.subtype && obj.subtype !== "success")
+        || providerSettingError.code === "provider_settings_unconfirmed";
+      const error = failed
+        ? (providerSettingError.code === "provider_settings_unconfirmed"
+            ? providerSettingError
+            : claudeTurnError(obj.result ?? obj.subtype))
+        : undefined;
 
       if (failed && session._rejectTurnAccepted) {
         this.clearAcceptTimer(session);

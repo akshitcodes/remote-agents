@@ -220,25 +220,32 @@ does even though launchd gives services a minimal `PATH`.
 
 ## Provider CLI versions
 
-Provider CLIs add, rename and retire flags between releases, so this bridge reads
-each installed CLI's own `--help` instead of assuming the flags on the machine it
-was built on. Anything a build does not advertise is dropped, or mapped to the
-nearest value it does accept, and the substitution is logged.
+Provider CLIs add, rename and retire capabilities between releases. The bridge
+therefore uses the strongest provider-owned surface available: Codex app-server
+`model/list`; Grok ACP initialization metadata; and, where no structured API
+exists, the installed CLI's own `--help`. Claude model aliases come from help,
+while full model IDs are learned from successful provider transcripts. Every
+provider also offers an explicit **Provider default** choice rather than making
+the bridge guess a value.
+
+Known equivalent names such as Claude's `default`/`manual` are mapped to the same
+Manual contract. If a build cannot prove it can apply the model, effort, or
+permission setting shown in the UI, the send is refused with an upgrade/reload
+instruction instead of silently running with different settings.
 
 For example, Claude Code 2.1.0 has no `--effort` and does not accept
-`--permission-mode auto`, while 2.1.238 has both and no longer advertises
-`default`. On 2.1.0 a send therefore goes out without the effort setting and with
-`--permission-mode default`, and the log says so:
+`--permission-mode auto`, while 2.1.238 has both and calls manual approval
+`manual` instead of `default`. On 2.1.0 a Manual send uses the equivalent
+`--permission-mode default`; a send asking for Auto or explicit reasoning effort
+returns a clear instruction to update Claude Code.
 
-```
-[claude] this build has no --effort; sending without the high effort setting
-[claude] auto is unavailable in this build; using --permission-mode default
-```
-
-Losing an effort setting is a much better outcome than the CLI refusing to start,
-which is what happens when it is handed a flag it has never heard of. If a CLI's
-help cannot be read at all, the flags this bridge was written against are sent
-unchanged, since an unreadable `--help` is not evidence that a flag is missing.
+This keeps the status bar truthful: choosing High can never secretly run the
+provider's default effort, and a restrictive permission mode can never be widened.
+If a CLI's help cannot be read, explicit help-derived settings fail closed and
+the probe is retried later. Provider-default model/effort remains discoverable,
+but a send waits until its permission contract can also be proven. This avoids
+both freezing the bridge during discovery and guessing from the version
+installed on the package author's machine.
 
 ## Notifications
 
