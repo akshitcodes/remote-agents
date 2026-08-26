@@ -2957,6 +2957,21 @@ function syncPendingActions(entry) {
     return;
   }
 
+  if (canSteerPendingEntry(entry)) {
+    const steer = document.createElement("button");
+    steer.type = "button";
+    steer.className = "pending-action steer";
+    steer.textContent = activeProvider() === "grok" ? "Interrupt & send now" : "Steer now";
+    steer.title = activeProvider() === "grok"
+      ? "Cancel the current Grok turn, wait for confirmation, then send this message"
+      : "Move this queued message into the running turn at its next safe boundary";
+    steer.onclick = async (event) => {
+      event.stopPropagation();
+      await steerPendingEntry(entry);
+    };
+    actions.appendChild(steer);
+  }
+
   const edit = document.createElement("button");
   edit.type = "button";
   edit.className = "pending-action edit";
@@ -2969,6 +2984,33 @@ function syncPendingActions(entry) {
   cancel.onclick = (event) => { event.stopPropagation(); removePendingEntry(entry); };
   actions.append(edit, cancel);
   entry.chip.appendChild(actions);
+}
+
+function canSteerPendingEntry(entry) {
+  if (!state.pending.includes(entry) || entry.dispatching || entry.mayHaveDispatched || entry.nativeQueue) { return false; }
+  if (!state.active || !state.busy || state.turnOwnership !== "bridge") { return false; }
+  return (entry.provider || activeProvider()) === activeProvider()
+    && (entry.threadId || state.active.id) === state.active.id;
+}
+
+async function steerPendingEntry(entry) {
+  if (!canSteerPendingEntry(entry)) {
+    chip("⚠️", "The active turn changed. This message is still safely queued.");
+    syncPendingActions(entry);
+    return false;
+  }
+
+  entry.intendedSendMode = "steer";
+  entry.awaitingOwnership = false;
+  const label = entry.chip?.querySelector(":scope > span");
+  if (label) {
+    label.textContent = activeProvider() === "grok"
+      ? "Stopping Grok safely, then sending this message…"
+      : "Steering into the current turn…";
+  }
+  savePending();
+  await trySteer(entry);
+  return !state.pending.includes(entry);
 }
 
 function restorePending() {
@@ -3909,6 +3951,10 @@ function setBusy(busy, { external = false, ownershipChecking = false, ownershipU
   if (state.externalTurn && activeProvider() === "codex") {
     refreshActivityGroup(state.activityGroup, { live: true });
   }
+  // Queue actions depend on live ownership. Refresh them whenever that state
+  // changes so a safe Steer action appears without requiring a page reload,
+  // and disappears immediately if the turn moves elsewhere or finishes.
+  for (const entry of state.pending) { syncPendingActions(entry); }
   // Only offer Stop for a turn this bridge owns. An externally observed turn
   // has no safe interrupt handle; showing Stop there would imply control we do
   // not have and used to discard the user's queue before the interrupt failed.

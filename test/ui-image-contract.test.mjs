@@ -28,6 +28,12 @@ test("failed delivery recovery distinguishes pre-dispatch failures and remains a
   assert.match(html, /dismiss\.textContent = uncertain \? "Dismiss" : "Cancel"/);
   assert.match(html, /dropFailedSend\(f\.requestId\);\s*bubble\.remove\(\)/);
   assert.match(html, /dropFailedSend\(id\);\s*bubble\.remove\(\)/);
+  assert.match(html, /function canSteerPendingEntry\(entry\)/);
+  assert.match(html, /entry\.nativeQueue\) \{ return false; \}/);
+  assert.match(html, /state\.turnOwnership !== "bridge"/);
+  assert.match(html, /steer\.textContent = activeProvider\(\) === "grok" \? "Interrupt & send now" : "Steer now"/);
+  assert.match(html, /async function steerPendingEntry\(entry\)[\s\S]*?entry\.intendedSendMode = "steer"[\s\S]*?await trySteer\(entry\)/);
+  assert.match(html, /for \(const entry of state\.pending\) \{ syncPendingActions\(entry\); \}/);
 });
 
 test("image UI follows provider metadata and Grok cancel-before-send requires owned active work", () => {
