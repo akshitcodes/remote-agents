@@ -79,6 +79,14 @@ const BRIDGE_TERMINAL_TTL_MS = 15 * 60 * 1000;
 
 function turnKey(provider, threadId) { return (provider || "codex") + ":" + threadId; }
 
+// A bridge-owned turn already has an authoritative provider event stream.
+// Feeding the same turn's session-file mutations into clients creates a second
+// producer for identical items and races live deltas against transcript replay.
+// External/file updates resume after the provider terminal removes ownership.
+export function shouldEmitExternalUpdate(provider, threadId, turns = activeTurns) {
+  return !turns.has(turnKey(provider, threadId));
+}
+
 // Bridge lifecycle events are authoritative for turns the bridge owns. Claude
 // can accept a prompt and then exit without appending an assistant terminal
 // record, leaving the session file's final user marker looking active. Suppress
@@ -342,6 +350,8 @@ const trailing = new Map();
 async function emitExternal({ provider, threadId, running, runConfidence, terminalId, terminalOutcome, terminalText, terminalError, changed }) {
   const key = metaKey(provider, threadId);
   const terminal = { terminalId, terminalOutcome, terminalError };
+
+  if (!shouldEmitExternalUpdate(provider, threadId)) { return; }
 
   if (!changed) {
     trackExternalCompletion({ provider, threadId, terminalId, terminalOutcome, terminalError, reply: terminalText }).catch(() => {});

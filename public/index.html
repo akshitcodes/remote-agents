@@ -5514,11 +5514,12 @@ async function resyncOpenThread({ force = false } = {}) {
 
   if (!t || t.draft || state.resyncing) { return; }
 
-  // Don't clobber a turn we're streaming ourselves — its live deltas are truth.
-  // An external turn is the opposite case: re-reading is the only way to see it.
-  if (state.busy && !state.externalTurn && (!force || state.sendStage)) {
-    return;
-  }
+  // Never introduce a second producer while this bridge is already streaming
+  // the turn. A focus/online "force" refresh used to replay Claude's session
+  // file alongside its live deltas, drawing every assistant message twice.
+  // The provider terminal schedules one canonical refresh immediately after
+  // ownership ends, which also recovers anything missed during a disconnect.
+  if (state.busy && !state.externalTurn) { return; }
 
   // Following along at the bottom should keep following; someone reading back
   // through the transcript should stay where they are.

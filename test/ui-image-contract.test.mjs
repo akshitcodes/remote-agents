@@ -78,6 +78,11 @@ test("stop, draft adoption, and reconnect preserve queue truth", () => {
   assert.match(html, /refreshApprovals\(\);\s*refreshLockStatus\(\);/);
 });
 
+test("a bridge-owned live stream cannot be replayed by a forced transcript refresh", () => {
+  assert.match(html, /if \(state\.busy && !state\.externalTurn\) \{ return; \}/);
+  assert.doesNotMatch(html, /state\.busy && !state\.externalTurn && \(!force \|\| state\.sendStage\)/);
+});
+
 test("task rows expose grouped subagents and device-scoped notification modes", () => {
   assert.match(html, /childCount} subagent/);
   assert.match(html, /document\.createElement\("button"\)/);

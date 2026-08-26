@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { classifyRunningState, observeProviderTail } from "../watch.mjs";
-import { resolveThreadRunState } from "../server.mjs";
+import { resolveThreadRunState, shouldEmitExternalUpdate } from "../server.mjs";
 
 test("missing tail markers remain explicitly heuristic", () => {
   assert.deepEqual(classifyRunningState(null, 1_000), {
@@ -128,4 +128,13 @@ test("an owned turn remains running even if an older terminal marker exists", ()
     source: "bridge",
     turnId: "turn-live",
   });
+});
+
+test("session-file updates cannot race a bridge-owned provider stream", () => {
+  const turns = new Set(["claude:thread-live"]);
+
+  assert.equal(shouldEmitExternalUpdate("claude", "thread-live", turns), false);
+  assert.equal(shouldEmitExternalUpdate("claude", "thread-external", turns), true);
+  turns.delete("claude:thread-live");
+  assert.equal(shouldEmitExternalUpdate("claude", "thread-live", turns), true);
 });
