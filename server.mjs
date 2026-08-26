@@ -75,8 +75,38 @@ const sseClients = new Set(); // http responses subscribed to events
 // something we already know for certain — see trackActiveTurn.
 const activeTurns = new Set();
 const recentBridgeTerminals = new Map(); // provider:thread -> completion observed from our owner
+const BRIDGE_TERMINAL_TTL_MS = 15 * 60 * 1000;
 
 function turnKey(provider, threadId) { return (provider || "codex") + ":" + threadId; }
+
+// Bridge lifecycle events are authoritative for turns the bridge owns. Claude
+// can accept a prompt and then exit without appending an assistant terminal
+// record, leaving the session file's final user marker looking active. Suppress
+// only when the terminal belongs to that exact marker; a later external prompt
+// has a different marker and remains visible as running.
+export function resolveThreadRunState({ owned = false, observed = null, bridgeTerminal = null, turnId = null } = {}) {
+  if (owned) {
+    return { running: true, confidence: "bridge", source: "bridge", turnId };
+  }
+
+  const terminalMatchesMarker = !!(
+    observed?.running
+    && observed.activeMarkerId
+    && bridgeTerminal?.activeMarkerId
+    && observed.activeMarkerId === bridgeTerminal.activeMarkerId
+  );
+
+  if (terminalMatchesMarker) {
+    return { running: false, confidence: "bridge_terminal", source: "bridge", turnId: null };
+  }
+
+  return {
+    running: !!observed?.running,
+    confidence: observed?.confidence ?? "unknown",
+    source: "session_file",
+    turnId: null,
+  };
+}
 
 // Keep the safety decision next to the authoritative turn set, not in the UI.
 // The optional set makes this exact route path testable without starting a turn.
@@ -117,14 +147,21 @@ function trackActiveTurn(event, data) {
   const key = turnKey(provider, threadId);
 
   if (method === "turn/started") {
+    recentBridgeTerminals.delete(key);
     activeTurns.add(key);
   } else if (method === "turn/completed" || method === "turn/failed" || method === "turn/aborted") {
-    if (activeTurns.has(key)) { recentBridgeTerminals.set(key, Date.now()); }
+    if (activeTurns.has(key)) {
+      const observed = watch.runningDetails(provider, [threadId])[threadId];
+      recentBridgeTerminals.set(key, {
+        at: Date.now(),
+        activeMarkerId: observed?.activeMarkerId ?? null,
+      });
+    }
     activeTurns.delete(key);
 
-    const cutoff = Date.now() - 60000;
-    for (const [terminalKey, at] of recentBridgeTerminals) {
-      if (at < cutoff) { recentBridgeTerminals.delete(terminalKey); }
+    const cutoff = Date.now() - BRIDGE_TERMINAL_TTL_MS;
+    for (const [terminalKey, terminal] of recentBridgeTerminals) {
+      if ((terminal?.at ?? 0) < cutoff) { recentBridgeTerminals.delete(terminalKey); }
     }
   } else if (method === "thread/adopted" && params.sessionId) {
     // The turn streamed under a draft id; carry it onto the real one.
@@ -642,7 +679,7 @@ async function lookupThreadTitle(provider, threadId) {
 async function trackExternalCompletion({ provider = "codex", threadId, terminalId, terminalOutcome, terminalError, reply = "" } = {}) {
   if (!threadId || !terminalId) { return; }
   const key = metaKey(provider, threadId);
-  const ownedAt = recentBridgeTerminals.get(key) ?? 0;
+  const ownedAt = recentBridgeTerminals.get(key)?.at ?? 0;
 
   // An interrupted turn is terminal for run-state purposes, but it is not a
   // successful completion and should not consume a one-shot completion alert
@@ -897,13 +934,12 @@ function providerFromBody(res, body) {
 function threadRuntime(provider, threadId) {
   const owned = activeTurns.has(turnKey(provider.name, threadId));
   const observed = watch.runningDetails(provider.name, [threadId])[threadId];
-
-  return {
-    running: owned || !!observed?.running,
-    confidence: owned ? "bridge" : (observed?.confidence ?? "unknown"),
-    source: owned ? "bridge" : "session_file",
+  return resolveThreadRunState({
+    owned,
+    observed,
+    bridgeTerminal: recentBridgeTerminals.get(turnKey(provider.name, threadId)),
     turnId: owned ? (provider.activeTurnId?.(threadId) ?? null) : null,
-  };
+  });
 }
 
 // Read a file for the viewer, scoped to the thread's project. "Project" means
@@ -1023,15 +1059,25 @@ async function listThreadsWithState(p, { search, cursor } = {}) {
   for (const t of listed.data ?? []) {
     for (const child of t.subagents ?? []) {
       const childOwned = activeTurns.has(turnKey(p.name, child.id));
-      child.running = childOwned || !!running[child.id]?.running;
-      child.runConfidence = childOwned ? "bridge" : (running[child.id]?.confidence ?? "unknown");
+      const childState = resolveThreadRunState({
+        owned: childOwned,
+        observed: running[child.id],
+        bridgeTerminal: recentBridgeTerminals.get(turnKey(p.name, child.id)),
+      });
+      child.running = childState.running;
+      child.runConfidence = childState.confidence;
     }
 
     // A task is active when its own turn or any grouped subagent is active.
     const owned = activeTurns.has(turnKey(p.name, t.id));
     const activeChild = (t.subagents ?? []).some((child) => child.running);
-    t.running = owned || !!running[t.id]?.running || activeChild;
-    t.runConfidence = owned ? "bridge" : (activeChild ? "subagent" : (running[t.id]?.confidence ?? "unknown"));
+    const taskState = resolveThreadRunState({
+      owned,
+      observed: running[t.id],
+      bridgeTerminal: recentBridgeTerminals.get(turnKey(p.name, t.id)),
+    });
+    t.running = taskState.running || activeChild;
+    t.runConfidence = activeChild && !taskState.running ? "subagent" : taskState.confidence;
   }
 
   return listed;

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { classifyRunningState, observeProviderTail } from "../watch.mjs";
+import { resolveThreadRunState } from "../server.mjs";
 
 test("missing tail markers remain explicitly heuristic", () => {
   assert.deepEqual(classifyRunningState(null, 1_000), {
@@ -86,4 +87,45 @@ test("a Codex turn_aborted marker clears a preceding task_started state", () => 
 test("tool traffic is not mistaken for a completed turn", () => {
   assert.equal(observeProviderTail("claude", [JSON.stringify({ type: "assistant", message: { stop_reason: "tool_use" } })]), null);
   assert.equal(observeProviderTail("grok", [JSON.stringify({ type: "assistant", content: "Calling", tool_calls: [{ id: "tool" }] })]), null);
+});
+
+test("a bridge terminal overrides only its exact stale Claude prompt marker", () => {
+  const firstPrompt = observeProviderTail("claude", [JSON.stringify({
+    type: "user",
+    uuid: "prompt-1",
+    message: { role: "user", content: "Follow up" },
+  })]);
+  const terminal = { at: Date.now(), activeMarkerId: firstPrompt.activeMarkerId };
+
+  assert.deepEqual(resolveThreadRunState({ observed: { ...firstPrompt, confidence: "marker" }, bridgeTerminal: terminal }), {
+    running: false,
+    confidence: "bridge_terminal",
+    source: "bridge",
+    turnId: null,
+  });
+
+  const laterPrompt = observeProviderTail("claude", [JSON.stringify({
+    type: "user",
+    uuid: "prompt-2",
+    message: { role: "user", content: "A genuinely new turn" },
+  })]);
+
+  assert.equal(resolveThreadRunState({
+    observed: { ...laterPrompt, confidence: "marker" },
+    bridgeTerminal: terminal,
+  }).running, true);
+});
+
+test("an owned turn remains running even if an older terminal marker exists", () => {
+  assert.deepEqual(resolveThreadRunState({
+    owned: true,
+    observed: { running: false, confidence: "marker" },
+    bridgeTerminal: { at: Date.now(), activeMarkerId: "claude-user:old" },
+    turnId: "turn-live",
+  }), {
+    running: true,
+    confidence: "bridge",
+    source: "bridge",
+    turnId: "turn-live",
+  });
 });

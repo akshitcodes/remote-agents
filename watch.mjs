@@ -281,7 +281,16 @@ function claudeObservation(lines) {
       const content = r?.message?.content;
       const isToolResult = Array.isArray(content) && content.some((c) => c?.type === "tool_result");
 
-      if (!isToolResult) { return { running: true }; }
+      if (!isToolResult) {
+        return {
+          running: true,
+          // A bridge terminal can arrive without Claude writing an assistant
+          // end marker (for example when its process exits after accepting the
+          // prompt). Keep the exact prompt identity so the server can suppress
+          // only that stale start marker, never a later genuine prompt.
+          activeMarkerId: recordId("claude-user", r, line),
+        };
+      }
     }
 
     return undefined;
@@ -362,6 +371,10 @@ function runningDetailFromFile(provider, path, stat) {
   const silentFor = Date.now() - stat.mtimeMs;
 
   const state = classifyRunningState(observation?.running ?? null, silentFor);
+
+  if (state.running && observation?.activeMarkerId) {
+    state.activeMarkerId = observation.activeMarkerId;
+  }
 
   if (!state.running && state.confidence === "marker" && observation?.terminalId) {
     state.terminalId = observation.terminalId;
