@@ -111,6 +111,11 @@ export function summarize(file) {
       preview = String(rec.payload.message ?? "").trim().slice(0, 200);
     }
 
+    if (!preview && rec.type === "response_item" && rec.payload?.type === "message" && rec.payload?.role === "user") {
+      const text = messageText(rec.payload.content).trim();
+      if (!isInternalUserEnvelope(text)) { preview = text.slice(0, 200); }
+    }
+
     if (meta && preview) { break; }
   }
 
@@ -160,6 +165,24 @@ function textOf(output) {
   return "";
 }
 
+function messageText(content) {
+  if (!Array.isArray(content)) { return ""; }
+
+  return content
+    .filter((part) => part?.type === "input_text" || part?.type === "output_text" || part?.type === "text")
+    .map((part) => String(part.text ?? ""))
+    .filter(Boolean)
+    .join("\n");
+}
+
+// Codex persists environment/plugin envelopes as user-role messages because
+// they are part of the model input. They are not messages the user typed and
+// the native clients do not render them in the conversation.
+function isInternalUserEnvelope(text) {
+  const trimmed = String(text ?? "").trim();
+  return /^<(environment_context|recommended_plugins)>[\s\S]*<\/\1>$/.test(trimmed);
+}
+
 // A tool call and its output are separate records, often far apart, so calls are
 // kept by call_id until their output shows up.
 function commandLabel(payload) {
@@ -183,6 +206,8 @@ export function newParseState() {
     pending: new Map(), // call_id -> the commandExecution awaiting its output
     current: null,
     n: 0,
+    recordNo: 0,
+    recentMessages: new Map(),
   };
 }
 
@@ -208,10 +233,30 @@ export function feedLines(st, lines) {
     return item;
   };
 
+  // Some Codex versions persist the same visible message in both the legacy
+  // event stream and the newer response-item stream. Keep compatibility with
+  // either format without rendering the mirror twice.
+  const pushMessage = (item, source) => {
+    const body = item.type === "agentMessage"
+      ? item.text
+      : item.content?.map((part) => `${part.type}:${part.text ?? part.attachment?.id ?? ""}`).join("|");
+    const fingerprint = `${item.type}:${body}`;
+    const recent = st.recentMessages.get(fingerprint);
+
+    if (recent && recent.source !== source && st.recordNo - recent.recordNo <= 8) {
+      return null;
+    }
+
+    st.recentMessages.set(fingerprint, { source, recordNo: st.recordNo });
+    return push(item);
+  };
+
   for (const line of lines) {
     const rec = parse(line);
 
     if (!rec) { continue; }
+
+    st.recordNo += 1;
 
     const p = rec.payload ?? {};
 
@@ -220,6 +265,7 @@ export function feedLines(st, lines) {
         case "task_started":
           st.current = { items: [] };
           turns.push(st.current);
+          st.recentMessages.clear();
           break;
 
         case "task_complete":
@@ -247,14 +293,14 @@ export function feedLines(st, lines) {
               content.push({ type: "localImage", ...(match ? { attachment: match } : {}) });
             }
 
-            if (content.length) { push({ id: id(), type: "userMessage", content }); }
+            if (content.length) { pushMessage({ id: id(), type: "userMessage", content }, "legacy-event"); }
           }
 
           break;
 
         case "agent_message":
           if (String(p.message ?? "").trim()) {
-            push({ id: id(), type: "agentMessage", text: String(p.message) });
+            pushMessage({ id: id(), type: "agentMessage", text: String(p.message) }, "legacy-event");
           }
 
           break;
@@ -296,6 +342,30 @@ export function feedLines(st, lines) {
     }
 
     if (rec.type !== "response_item") { continue; }
+
+    if (p.type === "message") {
+      const text = messageText(p.content).trim();
+
+      if (p.role === "user" && !isInternalUserEnvelope(text)) {
+        const content = text ? [{ type: "text", text }] : [];
+
+        for (const part of p.content ?? []) {
+          if (part?.type === "input_image" || part?.type === "image") {
+            const path = part.path ?? part.file_path ?? part.local_path;
+            const match = path ? storedAttachmentForPath(path) : null;
+            content.push(path ? { type: "localImage", ...(match ? { attachment: match } : {}) } : { type: "image" });
+          }
+        }
+
+        if (content.length) {
+          pushMessage({ id: p.id ?? id(), type: "userMessage", content }, "response-item");
+        }
+      } else if (p.role === "assistant" && text) {
+        pushMessage({ id: p.id ?? id(), type: "agentMessage", text }, "response-item");
+      }
+
+      continue;
+    }
 
     if (p.type === "custom_tool_call" || p.type === "function_call") {
       const item = push({ id: id(), type: "commandExecution", command: commandLabel(p), status: "running" });
