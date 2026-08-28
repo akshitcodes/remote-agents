@@ -155,6 +155,17 @@
   .md code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.86em; background: var(--bg3); padding: 1px 5px; border-radius: 5px; }
   .md pre { background: var(--bg); border: 1px solid var(--border); border-radius: 9px; padding: 11px 12px; overflow-x: auto; margin: 0 0 10px; }
   .md pre code { background: none; padding: 0; font-size: 12.5px; line-height: 1.5; color: var(--fg); }
+  .md .code-card { max-width: 100%; margin: 0 0 12px; overflow: hidden; border: 1px solid var(--border); border-radius: 12px; background: #15191f; box-shadow: inset 0 1px 0 #ffffff08; }
+  .md .code-card-head { min-height: 44px; display: flex; align-items: center; gap: 10px; padding: 0 3px 0 12px; border-bottom: 1px solid var(--border); background: #ffffff05; }
+  .md .code-language { flex: 1; min-width: 0; color: var(--fg-dim); font-size: 12px; font-weight: 560; letter-spacing: .01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .md .code-copy { width: 44px; height: 44px; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; border: 0; border-radius: 8px; background: transparent; color: var(--fg-dim); cursor: pointer; }
+  .md .code-copy:hover { color: var(--fg); background: #ffffff0a; }
+  .md .code-copy:focus-visible { color: var(--fg); background: #ffffff0a; outline: 2px solid var(--accent2); outline-offset: -3px; }
+  .md .code-copy[data-state="copied"] { color: var(--accent); }
+  .md .code-copy[data-state="failed"] { color: var(--danger); }
+  .md .code-copy svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .md .code-card pre { margin: 0; border: 0; border-radius: 0; background: transparent; padding: 13px 14px 15px; }
+  .md .code-card pre code { display: block; min-width: max-content; }
   .md blockquote { margin: 0 0 8px; padding: 2px 0 2px 12px; border-left: 3px solid var(--border); color: var(--fg-dim); }
   .md hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
   .md table { border-collapse: collapse; display: block; overflow-x: auto; margin: 0 0 10px; font-size: 13px; }
@@ -558,7 +569,157 @@ function renderMarkdown(src) {
   // absolute paths first; the click handler opens those in the file viewer.
   const normalized = src.replace(/(\]\(\s*)file:\/\/(?:localhost)?(\/)/gi, "$1$2");
   const html = window.marked.parse(normalized);
-  return window.DOMPurify.sanitize(html, { ADD_ATTR: ["target"] });
+  return window.DOMPurify.sanitize(html, {
+    ADD_ATTR: ["target"],
+    // Interactive controls are created only by this client after sanitizing.
+    // Agent-authored styles/hidden content must not disguise what a copy action copies.
+    FORBID_TAGS: ["button", "style"],
+    FORBID_ATTR: ["style", "hidden"],
+  });
+}
+
+// BEGIN code-block-metadata (pure so language decisions stay unit-testable)
+const CODE_LANGUAGE_LABELS = {
+  bash: "Shell", c: "C", cpp: "C++", csharp: "C#", css: "CSS", diff: "Diff",
+  dockerfile: "Dockerfile", go: "Go", graphql: "GraphQL", html: "HTML", ini: "INI",
+  java: "Java", javascript: "JavaScript", js: "JavaScript", json: "JSON", jsx: "JSX",
+  kotlin: "Kotlin", markdown: "Markdown", md: "Markdown", php: "PHP", plaintext: "Plain text",
+  py: "Python", python: "Python", rb: "Ruby", ruby: "Ruby", rust: "Rust", sh: "Shell",
+  shell: "Shell", sql: "SQL", swift: "Swift", text: "Plain text", toml: "TOML", ts: "TypeScript",
+  tsx: "TSX", typescript: "TypeScript", xml: "XML",
+  yaml: "YAML", yml: "YAML",
+};
+const MAX_CODE_HIGHLIGHT_CHARS = 200_000;
+
+function codeBlockMetadata(className, text) {
+  const explicit = String(className || "").match(/(?:^|\s)language-([^\s]+)/i)?.[1]?.toLowerCase() || null;
+  let language = explicit;
+  let inferred = false;
+
+  if (!language) {
+    const candidate = String(text || "").trim();
+
+    if (candidate.length <= MAX_CODE_HIGHLIGHT_CHARS && ((candidate.startsWith("{") && candidate.endsWith("}")) || (candidate.startsWith("[") && candidate.endsWith("]")))) {
+      try {
+        JSON.parse(candidate);
+        language = "json";
+        inferred = true;
+      } catch { /* ordinary plain text containing braces */ }
+    }
+  }
+
+  const label = language
+    ? CODE_LANGUAGE_LABELS[language] || language.replace(/(^|[-_])([a-z])/g, (_match, gap, letter) => (gap ? " " : "") + letter.toUpperCase())
+    : "Plain text";
+  return { language, label, inferred };
+}
+// END code-block-metadata
+
+const COPY_CODE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>';
+const COPIED_CODE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>';
+
+function decorateCodeBlocks(root) {
+  for (const code of root.querySelectorAll("pre > code")) {
+    const pre = code.parentElement;
+    if (!pre || code._codeCardDecorated) { continue; }
+    code._codeCardDecorated = true;
+
+    const sourceText = code.textContent || "";
+    const metadata = codeBlockMetadata(code.className, sourceText);
+    // Marked code fences are already plain text. Raw agent HTML can contain
+    // hidden descendants, so flatten it before display and retain the exact
+    // same source for copying. Copied content can never exceed visible source.
+    for (const attr of Array.from(pre.attributes)) { pre.removeAttribute(attr.name); }
+    for (const attr of Array.from(code.attributes)) { code.removeAttribute(attr.name); }
+    code.className = metadata.language ? `language-${metadata.language}` : "";
+    code.textContent = sourceText;
+    if (sourceText.length <= MAX_CODE_HIGHLIGHT_CHARS && metadata.language && window.hljs?.getLanguage?.(metadata.language)) {
+      try { window.hljs.highlightElement(code); } catch { /* retain safe plain code */ }
+    }
+
+    const card = document.createElement("div");
+    card.className = "code-card";
+    const head = document.createElement("div");
+    head.className = "code-card-head";
+    const label = document.createElement("span");
+    label.className = "code-language";
+    label.textContent = metadata.label;
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.className = "code-copy";
+    copy.dataset.copyLabel = `Copy ${metadata.label} code`;
+    copy.dataset.copyTitle = `Copy ${metadata.label}`;
+    copy.setAttribute("aria-label", copy.dataset.copyLabel);
+    copy.title = copy.dataset.copyTitle;
+    copy.innerHTML = COPY_CODE_ICON;
+    // Bind copy behavior to the exact DOM node we created. Agent-authored HTML
+    // may retain class names after sanitization, but it cannot forge JS identity.
+    copy._codeEl = code;
+    copy._copyText = sourceText;
+    head.append(label, copy);
+    pre.replaceWith(card);
+    card.append(head, pre);
+  }
+}
+
+function renderFinalMarkdownInto(el, text) {
+  el.innerHTML = renderMarkdown(text);
+  decorateCodeBlocks(el);
+}
+
+async function writeClipboardText(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const fallback = document.createElement("textarea");
+  fallback.value = text;
+  fallback.setAttribute("readonly", "");
+  fallback.style.position = "fixed";
+  fallback.style.left = "-9999px";
+  fallback.style.top = "0";
+  fallback.style.opacity = "0";
+  const previousFocus = document.activeElement;
+  document.body.appendChild(fallback);
+  let copied = false;
+
+  try {
+    fallback.focus();
+    fallback.select();
+    fallback.setSelectionRange(0, fallback.value.length);
+    copied = document.execCommand("copy");
+  } finally {
+    fallback.remove();
+    if (previousFocus instanceof HTMLElement) { previousFocus.focus({ preventScroll: true }); }
+  }
+
+  if (!copied) { throw new Error("Copy is unavailable"); }
+}
+
+async function copyCodeBlock(button) {
+  const code = button._codeEl;
+  if (!code) { return; }
+
+  try {
+    await writeClipboardText(button._copyText || "");
+    button.dataset.state = "copied";
+    button.setAttribute("aria-label", "Copied code");
+    button.title = "Copied";
+    button.innerHTML = COPIED_CODE_ICON;
+  } catch {
+    button.dataset.state = "failed";
+    button.setAttribute("aria-label", "Could not copy code");
+    button.title = "Could not copy";
+  }
+
+  clearTimeout(button._copyReset);
+  button._copyReset = setTimeout(() => {
+    button.dataset.state = "";
+    button.setAttribute("aria-label", button.dataset.copyLabel || "Copy code");
+    button.title = button.dataset.copyTitle || "Copy code";
+    button.innerHTML = COPY_CODE_ICON;
+  }, 1800);
 }
 
 const state = {
@@ -1397,7 +1558,8 @@ function addAgent(text, streaming, itemId) {
   el.className = "msg agent md" + (streaming ? " streaming" : "");
   if (itemId) { el.dataset.itemId = itemId; }
   el._raw = text || "";
-  el.innerHTML = renderMarkdown(el._raw);
+  if (streaming) { el.innerHTML = renderMarkdown(el._raw); }
+  else { renderFinalMarkdownInto(el, el._raw); }
   registerFilesFromEl(el);
   box().appendChild(el);
   scrollDown();
@@ -2110,7 +2272,11 @@ function findItemEl(itemId) {
 // refetch replace that map, so a bubble orphaned by one of those resets is
 // unreachable through it and would blink for the rest of the session.
 function clearCarets() {
-  box().querySelectorAll(".msg.agent.streaming").forEach((el) => el.classList.remove("streaming"));
+  box().querySelectorAll(".msg.agent.streaming").forEach((el) => {
+    el.classList.remove("streaming");
+    renderFinalMarkdownInto(el, el._raw || "");
+    registerFilesFromEl(el);
+  });
 }
 
 function liveItem(itemId, factory) {
@@ -2286,7 +2452,7 @@ function onNotify(method, params, provider) {
       if (item.type === "agentMessage" && rec) {
         rec.el.classList.remove("streaming");
         rec.el._raw = item.text ?? rec.el._raw;
-        rec.el.innerHTML = renderMarkdown(rec.el._raw);
+        renderFinalMarkdownInto(rec.el, rec.el._raw);
         registerFilesFromEl(rec.el);
       } else if (item.type === "commandExecution" && rec) {
         // The summary can arrive with the completed item rather than the
@@ -5852,6 +6018,11 @@ $("messages").addEventListener("scroll", () => {
   stickToBottom = atBottom();
   updateJumpBtn();
 }, { passive: true });
+
+$("messages").addEventListener("click", (event) => {
+  const copy = event.target.closest?.(".code-copy");
+  if (copy) { copyCodeBlock(copy); }
+});
 
 $("jumpBtn").onclick = () => scrollDown({ force: true });
 
