@@ -33,11 +33,24 @@ const POLL_MS = 1000;
 // server records those directly.
 const ASSUME_ACTIVE_MS = 90000;
 
+// A marker-backed turn may legitimately be quiet during a long tool call, so
+// silence alone is not permission to treat it as finished. It is still useful
+// to stop presenting that state as confidently healthy, though. This
+// intermediate state keeps queue/interrupt safety unchanged while making a
+// disappeared worker visible well before the conservative stale timeout.
+const STALLED_AFTER_MS = 2 * 60 * 1000;
+
 // A turn that is interrupted — you hit escape, the CLI was killed, the machine
 // slept — never writes its end marker, so its log is left looking mid-turn
 // forever. Past this much silence, stop believing the marker: an agent can go
 // quiet for a while during one long tool call, but not this long.
 const STALE_AFTER_MS = 10 * 60 * 1000;
+
+// The abnormal-exit warning is incident recovery, not permanent thread
+// metadata. An old abandoned start marker remains unconfirmed (so queued work
+// is never auto-dispatched), but it should not paint a thread red forever or
+// re-add the same ten-minute warning on every future open.
+const STALE_NOTICE_UNTIL_MS = 30 * 60 * 1000;
 
 // Enough of the file's end to find the most recent turn marker without reading
 // a multi-megabyte log on every poll.
@@ -391,8 +404,16 @@ export function classifyRunningState(marker, silentFor) {
     return { running: silentFor < ASSUME_ACTIVE_MS, confidence: "heuristic" };
   }
 
+  if (marker && silentFor > STALE_NOTICE_UNTIL_MS) {
+    return { running: false, confidence: "historical_stale" };
+  }
+
   if (marker && silentFor > STALE_AFTER_MS) {
     return { running: false, confidence: "stale_timeout" };
+  }
+
+  if (marker && silentFor > STALLED_AFTER_MS) {
+    return { running: true, confidence: "stalled" };
   }
 
   return { running: marker, confidence: "marker" };

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -152,4 +152,47 @@ test("Claude acknowledgement timeout is uncertain without killing the live turn"
     provider.send({ threadId: "thread-claude", text: "second", cwd: "/tmp" }),
     (error) => error.status === 409 && error.code === "turn_in_progress",
   );
+});
+
+test("Claude Stop refuses to claim success when this bridge has no active turn", async () => {
+  const provider = new ClaudeProvider(() => {});
+
+  await assert.rejects(
+    provider.interrupt({ threadId: "running-somewhere-else", requireActive: true }),
+    (error) => error.status === 409 && error.code === "not_our_turn",
+  );
+
+  const idle = fakeSession(provider, () => {});
+  provider.sessions.set(idle.emitThreadId, idle);
+
+  await assert.rejects(
+    provider.interrupt({ threadId: idle.emitThreadId, requireActive: true }),
+    (error) => error.status === 409 && error.code === "not_our_turn",
+  );
+});
+
+test("Claude transcript images retain a bridge attachment reference", async () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-phone-claude-history-"));
+  const project = join(root, "project");
+  mkdirSync(project);
+  writeFileSync(join(project, "thread-image.jsonl"), JSON.stringify({
+    type: "user",
+    message: {
+      content: [
+        { type: "text", text: "inspect" },
+        { type: "image", source: { type: "base64", media_type: "image/png", data: "encoded-image" } },
+      ],
+    },
+  }) + "\n");
+  const provider = new ClaudeProvider(() => {}, {
+    projectsDir: root,
+    attachmentLookup: (data) => data === "encoded-image" ? { id: "stored.png", mimeType: "image/png" } : null,
+  });
+
+  const result = await provider.readThread("thread-image");
+
+  assert.deepEqual(result.thread.turns[0].items[0].content, [
+    { type: "text", text: "inspect" },
+    { type: "image", attachment: { id: "stored.png", mimeType: "image/png" } },
+  ]);
 });

@@ -17,6 +17,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { titleFor } from "./codex-titles.mjs";
+import { storedAttachmentForPath } from "./attachments.mjs";
 
 const SESSIONS = join(homedir(), ".codex", "sessions");
 
@@ -241,7 +242,10 @@ export function feedLines(st, lines) {
 
             if (String(p.message ?? "").trim()) { content.push({ type: "text", text: String(p.message) }); }
             for (const _ of p.images ?? []) { content.push({ type: "image" }); }
-            for (const _ of p.local_images ?? []) { content.push({ type: "localImage" }); }
+            for (const path of p.local_images ?? []) {
+              const match = storedAttachmentForPath(path);
+              content.push({ type: "localImage", ...(match ? { attachment: match } : {}) });
+            }
 
             if (content.length) { push({ id: id(), type: "userMessage", content }); }
           }

@@ -14,6 +14,13 @@ test("image references survive queue, steer, send, retry, and reload paths", () 
   assert.match(html, /state\.failedSends\.push\(\{ provider, threadId, text, requestId, attachments, retryWithNewId \}\)/);
   assert.match(html, /Steer delivery could not be confirmed/);
   assert.match(html, /retryWithNewId/);
+  assert.match(html, /const attachments = imageParts\.map\(\(part\) => part\.attachment \?\? null\)/);
+  assert.match(html, /button\.onclick = \(\) => viewAttachment\(attachment\)/);
+  assert.match(html, /id="imageViewer"/);
+  assert.match(html, /composerWrap\.addEventListener\("drop"/);
+  assert.match(html, /event\.dataTransfer\?\.files/);
+  assert.match(html, /Drop images to attach/);
+  assert.match(html, /document\.addEventListener\("drop"/);
 });
 
 test("failed delivery recovery distinguishes pre-dispatch failures and remains actionable", () => {
@@ -153,6 +160,16 @@ test("live run-state transitions re-rank Recent Work and reconcile canonical sta
   const notifyEnd = html.indexOf("// Once real turn output arrives", notifyStart);
   const notify = html.slice(notifyStart, notifyEnd);
   assert.ok(notify.indexOf('method === "turn/started"') < notify.indexOf("provider !== activeProvider()"), "cross-provider run state is recorded before transcript filtering");
+});
+
+test("quiet and vanished provider turns degrade visibly without unsafe queue dispatch", () => {
+  assert.match(html, /confidence === "stalled"[\s\S]*?label: "no recent activity"/);
+  assert.match(html, /confidence === "stale_timeout"[\s\S]*?label: "likely stopped"/);
+  assert.match(html, /No provider activity was recorded for 10 minutes/);
+  assert.match(html, /abnormalEnd[\s\S]*?setBusy\(false\)[\s\S]*?showTurnFailure/);
+  assert.match(html, /requireActive: true/);
+  assert.match(html, /updateRowRunning\(provider, tid, on, confidence\)/);
+  assert.match(html, /No recent activity — the provider may be stalled/);
 });
 
 test("usage sheet shows account limits for all providers and never thread usage", () => {

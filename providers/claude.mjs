@@ -27,6 +27,7 @@ import { promisify } from "node:util";
 
 import { augmentedPath, providerBinary } from "../provider-detect.mjs";
 import { capabilitiesFor, pickChoice, supportsFlag, UNKNOWN_CAPABILITIES } from "../cli-capabilities.mjs";
+import { storedAttachmentForBase64 } from "../attachments.mjs";
 import { BaseProvider, toEpochSec, makeLineReader } from "./base.mjs";
 
 const PROJECTS_DIR = join(homedir(), ".claude", "projects");
@@ -622,7 +623,7 @@ export function claudeUserContent(text, attachments = []) {
 }
 
 export class ClaudeProvider extends BaseProvider {
-  constructor(emit, { acceptTimeoutMs = DEFAULT_ACCEPT_TIMEOUT_MS, binary = null, projectsDir = PROJECTS_DIR, usageCommand = "cswap" } = {}) {
+  constructor(emit, { acceptTimeoutMs = DEFAULT_ACCEPT_TIMEOUT_MS, binary = null, projectsDir = PROJECTS_DIR, usageCommand = "cswap", attachmentLookup = storedAttachmentForBase64 } = {}) {
     super(emit, "claude");
 
     // Active sessions: threadId and (once known) native sessionId both point at
@@ -633,6 +634,7 @@ export class ClaudeProvider extends BaseProvider {
     this.projectsDir = projectsDir;
     this.binary = binary ?? providerBinary("claude");
     this.usageCommand = usageCommand;
+    this.attachmentLookup = attachmentLookup;
     this.summaryCache = new Map(); // path -> { mtime, summary }
     this.modelCache = null; // { signature, data }
     this.drafts = new Map(); // draft id -> cwd (recovered on send)
@@ -931,7 +933,12 @@ export class ClaudeProvider extends BaseProvider {
             type: "userMessage",
             content: [
               ...textBlocks.map((b) => ({ type: "text", text: b.text })),
-              ...imageBlocks.map(() => ({ type: "image" })),
+              ...imageBlocks.map((block) => {
+                const match = block.source?.type === "base64"
+                  ? this.attachmentLookup(block.source.data)
+                  : null;
+                return { type: "image", ...(match ? { attachment: match } : {}) };
+              }),
             ],
           });
         }
@@ -1707,8 +1714,15 @@ export class ClaudeProvider extends BaseProvider {
   // Prefer a control interrupt on stdin; fall back to killing the child (next
   // send respawns warm). Correct Stop matters more than keeping warmth after Stop.
   // Empirically: control_request / type:interrupt are best-effort; kill is reliable.
-  async interrupt({ threadId } = {}) {
+  async interrupt({ threadId, requireActive = false } = {}) {
     const session = this.sessions.get(threadId);
+
+    if (requireActive && (!session || session.dead || !session.busy)) {
+      throw Object.assign(new Error("the active Claude turn is not owned by this bridge"), {
+        status: 409,
+        code: "not_our_turn",
+      });
+    }
 
     if (!session || session.dead) {
       return { ok: true };

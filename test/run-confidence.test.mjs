@@ -27,9 +27,17 @@ test("only explicit completion is classified as a marker-backed idle state", () 
 });
 
 test("a stale start marker is not promoted to confirmed completion", () => {
+  assert.deepEqual(classifyRunningState(true, 3 * 60 * 1000), {
+    running: true,
+    confidence: "stalled",
+  });
   assert.deepEqual(classifyRunningState(true, 11 * 60 * 1000), {
     running: false,
     confidence: "stale_timeout",
+  });
+  assert.deepEqual(classifyRunningState(true, 31 * 60 * 1000), {
+    running: false,
+    confidence: "historical_stale",
   });
 });
 

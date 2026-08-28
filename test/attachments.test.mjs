@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { pruneAttachments, readAttachment, resolveAttachmentIds, storeAttachment } from "../attachments.mjs";
+import { pruneAttachments, readAttachment, resolveAttachmentIds, storeAttachment, storedAttachmentForBase64, storedAttachmentForPath } from "../attachments.mjs";
 
 const PNG_1PX = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
 
@@ -18,6 +18,36 @@ test("uploaded image is magic-validated, stored privately, and resolvable by opa
   assert.match(stored.id, /^[a-z0-9-]+\.png$/);
   assert.equal(resolved.path.startsWith(root + "/"), true);
   assert.deepEqual(read.data, PNG_1PX);
+});
+
+test("provider transcript image bytes and paths recover only bridge-owned attachments", () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-phone-attachment-history-"));
+  const data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+  const stored = storeAttachment({ data, name: "history.png" }, { root });
+  const path = join(root, stored.id);
+
+  assert.deepEqual(storedAttachmentForPath(path, { root }), { id: stored.id, name: "history.png", mimeType: "image/png" });
+  assert.deepEqual(storedAttachmentForBase64(data, { root }), { id: stored.id, name: "history.png", mimeType: "image/png" });
+  assert.equal(storedAttachmentForPath(join(tmpdir(), "untrusted.png"), { root }), null);
+});
+
+test("historical image lookup is not displaced by newer thread uploads", () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-phone-attachment-index-"));
+  const uploads = [];
+
+  for (let index = 0; index < 13; index++) {
+    const buffer = Buffer.concat([PNG_1PX, Buffer.from(String(index))]);
+    uploads.push({
+      data: buffer.toString("base64"),
+      stored: storeAttachment({ data: buffer.toString("base64"), name: `image-${index}.png` }, { root }),
+    });
+  }
+
+  assert.deepEqual(storedAttachmentForBase64(uploads[0].data, { root }), {
+    id: uploads[0].stored.id,
+    name: "image-0.png",
+    mimeType: "image/png",
+  });
 });
 
 test("attachment references reject traversal, duplication, missing files, and non-images", () => {

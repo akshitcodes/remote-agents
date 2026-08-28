@@ -98,7 +98,10 @@
   .chip.time { background: none; padding: 0; margin-left: auto; flex-shrink: 0; font-variant-numeric: tabular-nums; }
   .chip.ready-badge { color: var(--fg-faint); background: transparent; padding-left: 0; }
   .chip.run-badge { display: inline-flex; align-items: center; gap: 5px; color: var(--accent); background: #2ea04322; }
-  .run-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: pulse 1.3s ease-in-out infinite; }
+  .chip.run-badge.stalled { color: #d29922; background: #d2992222; }
+  .chip.run-badge.abnormal { color: var(--danger); background: #f8514920; }
+  .run-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; animation: pulse 1.3s ease-in-out infinite; }
+  .chip.run-badge.abnormal .run-dot { animation: none; }
   /* A message that didn't send stays visible and carries its own retry, so the
      failure is attached to the thing that failed. */
   .msg.user.failed { border: 1px solid var(--danger); opacity: .85; }
@@ -113,6 +116,7 @@
   /* Floats over the transcript rather than living in it: #messages is the
      scroller and is rebuilt on every render, which would wipe the pill. */
   #livePill { display: none; position: absolute; top: 8px; left: 50%; transform: translateX(-50%); z-index: 6; max-width: 92%; align-items: center; gap: 6px; font-size: 11px; font-weight: 600; color: var(--accent); background: #12351bee; border: 1px solid #2ea04366; border-radius: 20px; padding: 5px 12px; box-shadow: 0 2px 10px #0006; white-space: nowrap; }
+  #livePill.stalled { color: #d29922; background: #3d2f12ee; border-color: #d2992266; }
   body.livesync #livePill { display: flex; }
   /* Shown only when the transcript is scrolled away from the bottom, so a
      running turn never yanks the view out from under you — see stickToBottom. */
@@ -247,6 +251,8 @@
 
   /* composer + controls */
   #composerWrap { background: var(--bg2); border-top: 1px solid var(--border); flex-shrink: 0; max-width: 100%; overflow-x: hidden; padding: 8px 10px calc(env(safe-area-inset-bottom) + 8px); }
+  #composerWrap.dragover { position: relative; outline: 2px solid var(--accent2); outline-offset: -3px; background: #1f6feb18; }
+  #composerWrap.dragover::after { content: "Drop images to attach"; position: absolute; inset: 5px; z-index: 8; display: grid; place-items: center; border: 1px dashed var(--accent2); border-radius: 12px; color: var(--accent2); background: #0d1117e8; font-size: 14px; font-weight: 650; pointer-events: none; }
   #controls { display: flex; gap: 7px; margin-bottom: 8px; flex-wrap: wrap; min-width: 0; }
   .ctl { display: flex; align-items: center; gap: 5px; background: var(--bg3); border: 1px solid var(--border); color: var(--fg-dim); border-radius: 8px; padding: 5px 9px; font-size: 12px; cursor: pointer; white-space: nowrap; }
   .ctl:active { background: var(--bg); }
@@ -273,8 +279,13 @@
   .attachment-preview img { width: 100%; height: 100%; object-fit: cover; display: block; }
   .attachment-preview button { position: absolute; right: 2px; top: 2px; width: 20px; height: 20px; border: 0; border-radius: 50%; color: #fff; background: #000b; font-size: 14px; line-height: 18px; }
   .msg.user .user-images { display: grid; grid-template-columns: repeat(2, minmax(0, 150px)); gap: 5px; margin-bottom: 6px; }
+  .msg.user .image-thumb { display: block; width: 100%; min-width: 0; padding: 0; border: 0; border-radius: 9px; overflow: hidden; background: #0002; cursor: zoom-in; }
   .msg.user .user-images img, .msg.user .image-placeholder { width: 100%; max-height: 190px; min-height: 72px; object-fit: cover; border-radius: 9px; background: #0002; }
+  .msg.user .image-thumb img { display: block; }
   .msg.user .image-placeholder { display: flex; align-items: center; justify-content: center; color: var(--fg-dim); font-size: 12px; }
+  #imageViewer { position: fixed; inset: 0; z-index: 100; display: none; align-items: center; justify-content: center; padding: 24px; border: 0; background: #000d; cursor: zoom-out; }
+  #imageViewer.show { display: flex; }
+  #imageViewer img { max-width: min(100%, 1400px); max-height: 92dvh; object-fit: contain; border-radius: 10px; box-shadow: 0 18px 80px #000; }
 
   /* sheets / modal */
   .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 50; display: none; }
@@ -540,6 +551,7 @@
 </div>
 
 <div class="overlay" id="overlay"></div>
+<button id="imageViewer" type="button" aria-label="Close image preview"><img alt="Attached image preview"></button>
 <div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="sheetTitle" inert><div class="grip"></div><div id="sheetBody"></div></div>
 
 <script src="/vendor/marked.min.js"></script>
@@ -752,7 +764,7 @@ const state = {
   pending: [],               // [{ text, chip }] messages waiting to send
   failedSends: [],           // [{ threadId, text, requestId }] sends that never landed
   running: new Set(),        // "provider:threadId" of threads with an active turn
-  runConfidence: new Map(),  // same key -> bridge | provider | marker | heuristic | stale_timeout
+  runConfidence: new Map(),  // same key -> bridge | provider | marker | heuristic | stalled | stale_timeout | historical_stale
   sseErrored: false,         // did the event stream drop (for reconnect catch-up)
   resyncing: false,          // guard against overlapping re-reads
   nativeQueueReconciling: false,
@@ -1157,6 +1169,24 @@ styleSpin.textContent = "@keyframes spin{to{transform:rotate(360deg)}}";
 document.head.appendChild(styleSpin);
 
 // ---------- session list ----------
+function runPresentation(running, confidence) {
+  if (running && confidence === "stalled") {
+    return { visible: true, label: "no recent activity", className: "stalled" };
+  }
+
+  if (!running && confidence === "stale_timeout") {
+    return { visible: true, label: "likely stopped", className: "abnormal" };
+  }
+
+  return { visible: running, label: "running", className: "" };
+}
+
+function liveRunText(confidence) {
+  return confidence === "stalled"
+    ? "No recent activity — the provider may be stalled"
+    : "Running — following live";
+}
+
 function renderRows(append) {
   const rows = $("rows");
 
@@ -1180,13 +1210,14 @@ function renderRows(append) {
     div.dataset.provider = t.provider || "codex";
     const dir = (t.cwd || "").split("/").pop() || "";
     const runningNow = isThreadRunning(t);
+    const runState = runPresentation(runningNow, state.runConfidence.get(runKey(t.provider, t.id)) ?? t.runConfidence);
     const childCount = t.subagents?.length ?? 0;
     const expanded = state.expandedSubagents.has(t.id);
     const notifyMode = state.notificationRules.get(threadRuleKey(t.provider, t.id));
-    const showReady = state.listView === "recent" && !runningNow;
+    const showReady = state.listView === "recent" && !runningNow && runState.className !== "abnormal";
     const subagentListId = "subagents-" + String(t.id).replace(/[^a-zA-Z0-9_-]/g, "");
     div.innerHTML = `<div class="row-head"><button class="row-copy" type="button"${selected ? ' aria-current="true"' : ""}><div class="titleline"><span class="chip prov"></span><div class="preview"></div></div><div class="meta">
-      <span class="chip run-badge" style="display:${runningNow ? "inline-flex" : "none"}"><span class="run-dot"></span>running</span>
+      <span class="chip run-badge ${runState.className}" style="display:${runState.visible ? "inline-flex" : "none"}"><span class="run-dot"></span><span class="run-label">${runState.label}</span></span>
       <span class="chip ready-badge" style="display:${showReady ? "inline-flex" : "none"}">ready</span>
       <span class="chip dir"></span>
       <span class="chip time"></span></div></button><div class="row-actions">
@@ -1229,13 +1260,16 @@ function renderRows(append) {
     for (const child of t.subagents ?? []) {
       const childRow = document.createElement("button");
       const childRunning = isRunning(child.provider || t.provider, child.id);
+      const childProvider = child.provider || t.provider || "codex";
+      const childRunState = runPresentation(childRunning, state.runConfidence.get(runKey(childProvider, child.id)) ?? child.runConfidence);
       const childSelected = !!state.active && state.active.id === child.id && activeProvider() === (child.provider || t.provider || "codex");
       childRow.className = "subagent-row" + (childSelected ? " active-subagent" : "");
       childRow.type = "button";
       childRow.dataset.tid = child.id;
+      childRow.dataset.provider = childProvider;
       if (childSelected) { childRow.setAttribute("aria-current", "true"); }
       childRow.innerHTML = `<div class="subagent-copy"><div class="subagent-name"></div><div class="subagent-path"></div></div>
-        <span class="chip run-badge" style="display:${childRunning ? "inline-flex" : "none"}"><span class="run-dot"></span>running</span>
+        <span class="chip run-badge ${childRunState.className}" style="display:${childRunState.visible ? "inline-flex" : "none"}"><span class="run-dot"></span><span class="run-label">${childRunState.label}</span></span>
         <span class="chip time"></span>`;
       childRow.querySelector(".subagent-name").textContent = child.agentNickname || child.name || child.preview || "Subagent";
       childRow.querySelector(".subagent-path").textContent = child.agentPath || child.preview || "Child task";
@@ -1504,6 +1538,22 @@ function syncStick() {
 // device typing into the same thread — must not move anyone's viewport.
 function attachmentUrl(id) { return "/api/attachment?id=" + encodeURIComponent(id); }
 
+function viewAttachment(attachment) {
+  if (!attachment?.id) { return; }
+  const viewer = $("imageViewer");
+  const img = viewer.querySelector("img");
+  img.src = attachmentUrl(attachment.id);
+  img.alt = attachment.name || "Attached image preview";
+  viewer.classList.add("show");
+  viewer.focus();
+}
+
+function closeAttachmentViewer() {
+  const viewer = $("imageViewer");
+  viewer.classList.remove("show");
+  viewer.querySelector("img").removeAttribute("src");
+}
+
 function addUser(text, { own = false, attachments = [], imageCount = 0 } = {}) {
   resetActivityGroup();
   const el = document.createElement("div");
@@ -1519,10 +1569,16 @@ function addUser(text, { own = false, attachments = [], imageCount = 0 } = {}) {
       const attachment = attachments[index];
 
       if (attachment?.id) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "image-thumb";
+        button.setAttribute("aria-label", `View ${attachment.name || "attached image"}`);
+        button.onclick = () => viewAttachment(attachment);
         const img = document.createElement("img");
         img.src = attachmentUrl(attachment.id);
         img.alt = attachment.name || "Attached image";
-        images.appendChild(img);
+        button.appendChild(img);
+        images.appendChild(button);
       } else {
         const placeholder = document.createElement("div");
         placeholder.className = "image-placeholder";
@@ -1907,10 +1963,12 @@ function renderItem(item, opts = {}) {
   switch (item.type) {
     case "userMessage": {
       const t = (item.content ?? []).map((c) => c.text ?? "").join("");
-      const imageCount = (item.content ?? []).filter((c) => c.type === "image" || c.type === "localImage").length;
+      const imageParts = (item.content ?? []).filter((c) => c.type === "image" || c.type === "localImage");
+      const attachments = imageParts.map((part) => part.attachment ?? null);
+      const imageCount = imageParts.length;
 
       if (t.trim() || imageCount) {
-        const el = addUser(t, { imageCount });
+        const el = addUser(t, { attachments, imageCount });
         if (item.clientId) { el.dataset.clientId = item.clientId; }
         return [el];
       }
@@ -2258,7 +2316,7 @@ function applyExternalOps(ops) {
   if (!drew) { return; }
 
   registerFilesFromEl(b);
-  setLivePill(state.externalTurn, "Running — following live");
+  setLivePill(state.externalTurn, "Running — following live", { stalled: false });
 
   if (wasAtBottom) { scrollDown({ force: true }); }
 }
@@ -2630,7 +2688,7 @@ async function openThread(t) {
   // is a snapshot, and without this a busy thread reads as a finished one.
   if (t.running || isRunning(t.provider, t.id)) {
     setBusy(true, { external: true, ownershipChecking: true });
-    setLivePill(true, "Loading new messages…");
+    setLivePill(true, "Loading new messages…", { stalled: false });
   }
 
   if (cached?.thread) {
@@ -2671,7 +2729,7 @@ async function openThread(t) {
       const external = res.runtime?.source !== "bridge";
       state.activeTurnId = external ? null : (res.runtime?.turnId ?? state.activeTurnId);
       setBusy(true, { external });
-      setLivePill(true, "Running — following live");
+      setLivePill(true, liveRunText(res.runtime?.confidence), { stalled: res.runtime?.confidence === "stalled" });
     } else {
       state.activeTurnId = null;
       // Only auto-dispatch a restored queue after a successful canonical read
@@ -4137,10 +4195,12 @@ function setBusy(busy, { external = false, ownershipChecking = false, ownershipU
   if (ownTurnEnding) { scheduleExternalRefresh(); }
 }
 
-function setLivePill(on, text) {
+function setLivePill(on, text, { stalled } = {}) {
   document.body.classList.toggle("livesync", !!on);
 
   if (text) { $("livePillText").textContent = text; }
+  if (stalled !== undefined) { $("livePill").classList.toggle("stalled", !!on && stalled); }
+  else if (!on) { $("livePill").classList.remove("stalled"); }
 }
 
 // Low-level interrupt (used by both Stop and Steer).
@@ -4148,7 +4208,7 @@ async function interruptApi() {
   if (!state.active) { return; }
 
   try {
-    await api("/api/interrupt", { provider: state.active.provider || "codex", threadId: state.active.id, turnId: state.activeTurnId });
+    await api("/api/interrupt", { provider: state.active.provider || "codex", threadId: state.active.id, turnId: state.activeTurnId, requireActive: true });
     return true;
   } catch (error) {
     chip("⚠️", "Stop failed: " + (error.message || error));
@@ -5704,6 +5764,7 @@ function markRunning(provider, tid, on, { confidence = "unknown", live = true } 
 
   const k = runKey(provider, tid);
   const had = state.running.has(k);
+  const previousConfidence = state.runConfidence.get(k);
   state.runConfidence.set(k, confidence);
 
   if (on) { state.running.add(k); } else { state.running.delete(k); }
@@ -5714,6 +5775,8 @@ function markRunning(provider, tid, on, { confidence = "unknown", live = true } 
     rerankVisibleRows({ revealRunning: on });
 
     scheduleListReconcile();
+  } else if (live && previousConfidence !== confidence) {
+    updateRowRunning(provider, tid, on, confidence);
   }
 
   // Keep the open thread's composer state honest if its run-state changed
@@ -5728,11 +5791,22 @@ function markRunning(provider, tid, on, { confidence = "unknown", live = true } 
   const ownTurnRunning = state.busy && !state.externalTurn;
 
   const confirmedEnd = confidence === "provider" || confidence === "bridge" || confidence === "marker";
+  const abnormalEnd = confidence === "stale_timeout";
+  const activeMatch = state.active && provider === activeProvider() && (tid === state.active.id || tid === state.active.draftId);
 
-  if (state.active && (tid === state.active.id || tid === state.active.draftId) && !on && !ownTurnRunning && confirmedEnd) {
+  if (activeMatch && !on && !ownTurnRunning && confirmedEnd) {
     setBusy(false);
     flushPending();
-  } else if (state.active && (tid === state.active.id || tid === state.active.draftId) && !on && state.pending.length && !confirmedEnd) {
+  } else if (activeMatch && !on && !ownTurnRunning && abnormalEnd) {
+    state.activeTurnId = null;
+    setBusy(false);
+    showTurnFailure(
+      "No provider activity was recorded for 10 minutes. The agent may have exited without reporting a final result. Check the latest messages before retrying or sending again.",
+      `stale-timeout:${provider}:${tid}`,
+    );
+  }
+
+  if (activeMatch && !on && state.pending.length && !confirmedEnd) {
     for (const entry of state.pending) {
       const label = entry.chip?.querySelector("span");
 
@@ -5747,14 +5821,22 @@ function markRunning(provider, tid, on, { confidence = "unknown", live = true } 
   }
 }
 
-function updateRowRunning(tid, on) {
+function updateRowRunning(provider, tid, on, confidence) {
   const escaped = window.CSS?.escape ? CSS.escape(tid) : tid;
+  const presentation = runPresentation(on, confidence);
 
   document.querySelectorAll('#rows [data-tid="' + escaped + '"]').forEach((row) => {
+    if ((row.dataset.provider || "codex") !== (provider || "codex")) { return; }
     const badge = row.querySelector(":scope > .run-badge, :scope > .row-head .run-badge");
-    if (badge) { badge.style.display = on ? "inline-flex" : "none"; }
+    if (badge) {
+      badge.style.display = presentation.visible ? "inline-flex" : "none";
+      badge.classList.toggle("stalled", presentation.className === "stalled");
+      badge.classList.toggle("abnormal", presentation.className === "abnormal");
+      const label = badge.querySelector(".run-label");
+      if (label) { label.textContent = presentation.label; }
+    }
     const ready = row.querySelector(":scope > .row-head .ready-badge");
-    if (ready) { ready.style.display = !on && state.listView === "recent" ? "inline-flex" : "none"; }
+    if (ready) { ready.style.display = !on && presentation.className !== "abnormal" && state.listView === "recent" ? "inline-flex" : "none"; }
   });
 }
 
@@ -5792,7 +5874,7 @@ async function resyncOpenThread({ force = false } = {}) {
 
   // Say what's happening while the fetch is in flight — a thread being followed
   // from elsewhere would otherwise just sit there looking stuck.
-  if (state.externalTurn) { setLivePill(true, "Loading new messages…"); }
+  if (state.externalTurn) { setLivePill(true, "Loading new messages…", { stalled: false }); }
 
   try {
     const res = await api("/api/thread?id=" + encodeURIComponent(t.id) + "&provider=" + encodeURIComponent(t.provider || "codex"));
@@ -5810,7 +5892,7 @@ async function resyncOpenThread({ force = false } = {}) {
     if (isRunning(t.provider, t.id)) {
       state.activeTurnId = res.runtime?.source === "bridge" ? (res.runtime?.turnId ?? state.activeTurnId) : null;
       setBusy(true, { external: res.runtime?.source !== "bridge" });
-      setLivePill(true, "Running — following live");
+      setLivePill(true, liveRunText(res.runtime?.confidence), { stalled: res.runtime?.confidence === "stalled" });
     } else if (res.runtime && ["provider", "bridge", "marker"].includes(res.runtime.confidence)) {
       state.activeTurnId = null;
       setBusy(false);
@@ -5928,7 +6010,10 @@ function connectEvents() {
 
     if (!open) { return; }
 
-    if (running) { setBusy(true, { external: true }); }
+    if (running) {
+      setBusy(true, { external: true });
+      setLivePill(true, liveRunText(runConfidence), { stalled: runConfidence === "stalled" });
+    }
 
     // The server says explicitly what happened, rather than leaving us to infer
     // it from a missing field — an inference that was quietly doing nothing.
@@ -5983,6 +6068,44 @@ $("attachBtn").onclick = () => {
   $("imageInput").click();
 };
 $("imageInput").onchange = () => uploadImages($("imageInput").files);
+let composerDragDepth = 0;
+const composerWrap = $("composerWrap");
+const containsDraggedFiles = (event) => [...(event.dataTransfer?.types ?? [])].includes("Files") || !!event.dataTransfer?.files?.length;
+
+composerWrap.addEventListener("dragenter", (event) => {
+  if (!containsDraggedFiles(event)) { return; }
+  event.preventDefault();
+  composerDragDepth++;
+  composerWrap.classList.add("dragover");
+});
+composerWrap.addEventListener("dragover", (event) => {
+  if (!containsDraggedFiles(event)) { return; }
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "copy";
+});
+composerWrap.addEventListener("dragleave", (event) => {
+  if (!composerDragDepth) { return; }
+  composerDragDepth = Math.max(0, composerDragDepth - 1);
+  if (!composerDragDepth) { composerWrap.classList.remove("dragover"); }
+});
+composerWrap.addEventListener("drop", (event) => {
+  if (!containsDraggedFiles(event)) { return; }
+  event.preventDefault();
+  composerDragDepth = 0;
+  composerWrap.classList.remove("dragover");
+  const images = [...(event.dataTransfer?.files ?? [])].filter((file) => file.type.startsWith("image/"));
+
+  if (!images.length) { chip("⚠️", "Drop PNG, JPEG, GIF, or WebP images here"); return; }
+  uploadImages(images);
+});
+// Never let a browser navigate away from the running agent because a file was
+// dropped a few pixels outside the composer.
+document.addEventListener("dragover", (event) => {
+  if (containsDraggedFiles(event)) { event.preventDefault(); }
+});
+document.addEventListener("drop", (event) => {
+  if (containsDraggedFiles(event)) { event.preventDefault(); }
+});
 $("input").addEventListener("paste", (event) => {
   const images = [...(event.clipboardData?.files ?? [])].filter((file) => file.type.startsWith("image/"));
 
@@ -5991,6 +6114,7 @@ $("input").addEventListener("paste", (event) => {
     uploadImages(images);
   }
 });
+$("imageViewer").onclick = closeAttachmentViewer;
 $("stopBtn").onclick = stopAgent;
 $("okBtn").onclick = () => answerApproval("approve");
 $("sessBtn").onclick = () => answerApproval("session");
@@ -6046,6 +6170,8 @@ document.addEventListener("keydown", (event) => {
     if (state.active && state.sidebarCollapsed) { toggleSidebar(true); }
     $("search").focus();
     $("search").select();
+  } else if (event.key === "Escape" && $("imageViewer").classList.contains("show")) {
+    closeAttachmentViewer();
   } else if (event.key === "Escape" && $("sheet").classList.contains("show")) {
     closeSheet();
   }
