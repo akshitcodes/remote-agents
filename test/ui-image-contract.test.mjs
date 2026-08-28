@@ -222,6 +222,13 @@ test("composer settings fail closed and distinguish confirmed values from next-t
   assert.match(html, /id="settingsTruth" data-state="loading" role="status"/);
   assert.match(html, /function dispatchReadiness\(\)[\s\S]*?No exact model is selected/);
   assert.match(html, /settingsTruth\.state === "error"/);
+  assert.match(html, /state\.modelsProvider !== activeProvider\(\)/);
+  assert.match(html, /state\.modelsProvider !== \(t\.provider \|\| state\.provider\)/);
+  assert.match(html, /function selectThreadSettingsPair\(settings, models, fallback\)/);
+  assert.match(html, /const selection = selectThreadSettingsPair\(settings, state\.models/);
+  assert.match(html, /saveThreadSettings\(recoverPair, \{ pending: false \}\)/);
+  assert.match(html, /!materializedMode\.unknown && !materializedMode\.providerExact/);
+  assert.match(html, /if \(selection\) \{[\s\S]*?syncControls\(\);[\s\S]*?if \(flush\) \{ flushPending\(\); \}/);
   assert.match(html, /Next model/);
   assert.match(html, /Requested settings accepted by provider/);
   assert.match(html, /awaiting recorded confirmation/);

@@ -75,7 +75,10 @@ test("Claude model discovery falls back to CLI-documented aliases without transc
 test("a real Claude full ID round-trips unchanged through per-thread settings", async (t) => {
   const dir = fixtureDir(t);
   const store = new ThreadSettingsStore({ file: join(dir, "thread-settings.json") });
-  const service = new ThreadSettingsService({ store, readers: { claude: () => null } });
+  const service = new ThreadSettingsService({ store, readers: { claude: () => ({
+    model: "claude-opus-5", effort: "high", mode: "auto", modeExposed: true,
+    source: "claude_transcript",
+  }) } });
 
   service.remember("claude", "thread-real-model", {
     model: "claude-opus-5",
@@ -88,10 +91,10 @@ test("a real Claude full ID round-trips unchanged through per-thread settings", 
 
   assert.equal(resolved.model, "claude-opus-5");
   assert.equal(resolved.modelAvailability, "unlisted");
-  assert.equal(resolved.sources.model, "bridge_store");
+  assert.equal(resolved.sources.model, "claude_transcript");
 
   const html = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
-  assert.match(html, /addCurrentThreadModel\(settings\.model, settings\.effort, availability\)/);
+  assert.match(html, /if \(providerRecordedSelection \|\| selection\?\.threadOnly\) \{ addCurrentThreadModel\(displayedModel, displayedEffort, availability\); \}/);
   assert.match(html, /displayName: model/);
   assert.match(html, /\$\("modelName"\)\.textContent = m\?\.displayName \|\| state\.model \|\| "—"/);
 });

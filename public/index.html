@@ -3757,8 +3757,14 @@ async function doSend(text, { attachments = [], bubble, requestId, pendingEntry 
     failSendProgress(e);
 
     if (["model_unavailable", "effort_unavailable", "permission_mode_unavailable", "model_not_available", "effort_not_supported", "permission_mode_mismatch", "model_verification_failed", "provider_cli_incompatible", "provider_settings_unconfirmed"].includes(e.code)) {
-      state.settingsTruth = { state: "error", sources: {}, message: "Settings rejected · send blocked" };
-      syncControls();
+      if (state.active === target) {
+        state.settingsTruth = { state: "error", sources: {}, message: "Settings changed · refreshing…" };
+        syncControls();
+        // Refresh the controls from provider truth, but leave the failed message
+        // visible for an explicit Retry/Cancel decision. Recovery must never
+        // silently turn a rejected send into a later delivery.
+        await loadThreadSettings(target, { flush: false });
+      }
     }
 
     const retryId = e.code === "delivery_uncertain" ? null : id;
@@ -4351,6 +4357,7 @@ function dispatchReadiness() {
   if (state.turnOwnership === "checking") { return { ready: false, reason: "Confirming who owns the running turn" }; }
   if (state.settingsTruth.state === "loading") { return { ready: false, reason: "Thread settings are still loading" }; }
   if (state.settingsTruth.state === "error") { return { ready: false, reason: state.settingsTruth.message || "Thread settings could not be verified" }; }
+  if (state.modelsProvider !== activeProvider()) { return { ready: false, reason: "Loading this provider's settings" }; }
   if (!state.model || !model) { return { ready: false, reason: "No exact model is selected" }; }
   if (!state.effort) { return { ready: false, reason: "No reasoning effort is selected" }; }
   if (efforts.length && !efforts.some((candidate) => candidate.reasoningEffort === state.effort)) {
@@ -4658,7 +4665,7 @@ function syncControls() {
 
 function threadSettingsBody() {
   const t = state.active;
-  if (!t?.id) { return null; }
+  if (!t?.id || state.modelsProvider !== (t.provider || state.provider)) { return null; }
   const mode = currentMode();
   const body = {
     provider: t.provider || state.provider,
@@ -4695,7 +4702,71 @@ function addCurrentThreadModel(model, effort, availability) {
   });
 }
 
-async function loadThreadSettings(t) {
+// BEGIN thread-settings-selection (kept pure so the real browser decision is unit tested)
+function selectThreadSettingsPair(settings, models, fallback) {
+  const supports = (model, effort) => {
+    if (!model || !effort) { return false; }
+    const efforts = model.supportedReasoningEfforts ?? [];
+    return !efforts.length || efforts.some((candidate) => candidate.reasoningEffort === effort);
+  };
+  const advertised = models.find((model) => model.id === settings?.model);
+  if (advertised && supports(advertised, settings?.effort)) {
+    return { model: advertised.id, effort: settings.effort, recovery: false, threadOnly: false };
+  }
+
+  const confirmed = settings?.providerConfirmed;
+  const confirmedModel = models.find((model) => model.id === confirmed?.model);
+  if (confirmedModel && supports(confirmedModel, confirmed?.effort)) {
+    return {
+      model: confirmedModel.id,
+      effort: confirmed.effort,
+      recovery: confirmed.model !== settings?.model || confirmed.effort !== settings?.effort,
+      threadOnly: false,
+    };
+  }
+
+  // A provider transcript can name a historical model that is no longer in
+  // today's picker. Preserve that exact provider-owned pair as thread-only;
+  // arbitrary bridge-only IDs never reach this branch.
+  if (confirmed?.model && confirmed?.effort && !confirmedModel) {
+    return {
+      model: confirmed.model,
+      effort: confirmed.effort,
+      recovery: confirmed.model !== settings?.model || confirmed.effort !== settings?.effort,
+      threadOnly: true,
+    };
+  }
+
+  // New threads and provider records that contain only policy facts have no
+  // saved pair to recover. Use the already-loaded provider default instead of
+  // treating the absence of an override as corrupt settings.
+  const fallbackModel = models.find((model) => model.id === fallback?.model);
+  if (!settings?.model && !settings?.effort && fallbackModel && supports(fallbackModel, fallback?.effort)) {
+    return { model: fallbackModel.id, effort: fallback.effort, recovery: false, threadOnly: false };
+  }
+
+  // Providers may persist effort independently of model. Pair that effort only
+  // with the loaded provider default when it explicitly supports the value.
+  if (!settings?.model && settings?.effort && fallbackModel && supports(fallbackModel, settings.effort)) {
+    return { model: fallbackModel.id, effort: settings.effort, recovery: false, threadOnly: false };
+  }
+
+  // Some provider records name the model but omit effort. Select that model's
+  // advertised default coherently, never an effort inherited from another model.
+  if (advertised && !settings?.effort) {
+    const efforts = advertised.supportedReasoningEfforts ?? [];
+    const effort = fallback?.model === advertised.id && supports(advertised, fallback.effort)
+      ? fallback.effort
+      : advertised.defaultReasoningEffort ?? efforts[0]?.reasoningEffort ?? null;
+    if (effort && supports(advertised, effort)) {
+      return { model: advertised.id, effort, recovery: false, threadOnly: false };
+    }
+  }
+  return null;
+}
+// END thread-settings-selection
+
+async function loadThreadSettings(t, { flush = true } = {}) {
   setSettingsTruth({ state: "loading", sources: {}, message: "Checking settings…" });
   state.models = state.models.filter((model) => !model.threadOnly);
   const prefs = loadPrefs();
@@ -4710,12 +4781,18 @@ async function loadThreadSettings(t) {
   try {
     const settings = await api(`/api/thread/settings?provider=${encodeURIComponent(t.provider || state.provider)}&threadId=${encodeURIComponent(t.id)}`);
     if (state.active !== t) { return; }
-    const availability = settings.model && state.models.length
-      ? (state.models.some((model) => model.id === settings.model) ? "listed" : "unlisted")
+    const selection = selectThreadSettingsPair(settings, state.models, { model: state.model, effort: state.effort });
+    const recoverPair = selection?.recovery ? { model: selection.model, effort: selection.effort } : null;
+    const displayedModel = selection?.model ?? settings.model;
+    const displayedEffort = selection?.effort ?? settings.effort;
+    const providerRecordedSelection = settings.providerConfirmed?.model === displayedModel
+      && settings.providerConfirmed?.effort === displayedEffort;
+    const availability = displayedModel && state.models.length
+      ? (state.models.some((model) => model.id === displayedModel) ? "listed" : "unlisted")
       : settings.modelAvailability;
-    addCurrentThreadModel(settings.model, settings.effort, availability);
-    if (settings.model) { state.model = settings.model; }
-    if (settings.effort) { state.effort = settings.effort; }
+    if (providerRecordedSelection || selection?.threadOnly) { addCurrentThreadModel(displayedModel, displayedEffort, availability); }
+    if (displayedModel) { state.model = displayedModel; }
+    if (displayedEffort) { state.effort = displayedEffort; }
     state.threadMode = settings.mode || null;
     state.threadModeUnknown = settings.modeKnown === false;
     state.threadApprovalPolicy = settings.approvalPolicy ?? null;
@@ -4725,22 +4802,39 @@ async function loadThreadSettings(t) {
     state.settingsTruth = {
       state: providerConfirmed ? "confirmed" : "override",
       sources: settings.sources ?? {},
-      message: settingsSourceMessage(settings),
+      message: recoverPair
+        ? `Recovered model and effort from ${PROVIDER_LABELS[activeProvider()] || "provider"}`
+        : settingsSourceMessage(settings),
     };
     if (!state.modelsReady) {
       state.settingsTruth = { state: "error", sources: settings.sources ?? {}, message: "Models unavailable · send blocked" };
+    } else if (!selection || !currentModel() || !state.effort) {
+      state.settingsTruth = { state: "error", sources: settings.sources ?? {}, message: "Saved settings unavailable · choose model and effort" };
+    }
+
+    // Repair only an exact provider-recorded pair. Current models must pass the
+    // loaded catalog; historical unlisted models must come from provider truth.
+    // Never independently mix one model's effort with another model.
+    if (recoverPair) {
+      saveThreadSettings(recoverPair, { pending: false }).catch((e) => chip("⚠️", "Could not repair thread settings: " + e.message));
     }
 
     // Materialize only missing facts so another browser sees the same fallback.
     // Provider-owned values stay provider-owned and are not copied as a cache.
-    const missing = {};
-    if (!settings.sources?.model && state.model) { missing.model = state.model; }
-    if (!settings.sources?.effort && state.effort) { missing.effort = state.effort; }
-    if (!settings.sources?.mode && !state.threadModeUnknown) { missing.mode = currentMode().key; }
-    if (Object.keys(missing).length) {
-      saveThreadSettings(missing, { pending: false }).catch((e) => chip("⚠️", "Could not save thread settings: " + e.message));
+    if (selection) {
+      const missing = {};
+      if (!settings.sources?.model && state.model) { missing.model = state.model; }
+      if (!settings.sources?.effort && state.effort) { missing.effort = state.effort; }
+      const materializedMode = currentMode();
+      if (!settings.sources?.mode && !materializedMode.unknown && !materializedMode.providerExact) {
+        missing.mode = materializedMode.key;
+      }
+      if (Object.keys(missing).length) {
+        saveThreadSettings(missing, { pending: false }).catch((e) => chip("⚠️", "Could not save thread settings: " + e.message));
+      }
     }
-    flushPending();
+    syncControls();
+    if (flush) { flushPending(); }
   } catch (e) {
     state.settingsTruth = { state: "error", sources: {}, message: "Settings unavailable · send blocked" };
     syncControls();

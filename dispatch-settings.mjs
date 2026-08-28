@@ -80,6 +80,77 @@ export function validateDispatchSettings(providerName, body, models, resolvedThr
   return { model, effort, mode };
 }
 
+// Settings are persisted before dispatch so another browser and a bridge
+// restart see the same next-turn choice. Validate those writes against the
+// provider's current catalog too; otherwise a stale browser can poison a
+// thread with a model/effort belonging to another provider and every later
+// send will fail before reaching the agent.
+export function validateThreadSettingsPatch(providerName, patch, models, resolvedThreadSettings = null, providerCapabilities = null) {
+  const validated = {};
+  const hasModel = Object.hasOwn(patch ?? {}, "model");
+  const hasEffort = Object.hasOwn(patch ?? {}, "effort");
+  const hasMode = Object.hasOwn(patch ?? {}, "mode");
+  const model = hasModel ? clean(patch.model) : clean(resolvedThreadSettings?.model);
+  const effort = hasEffort ? clean(patch.effort) : clean(resolvedThreadSettings?.effort);
+
+  if (hasModel) {
+    if (patch.model == null) {
+      validated.model = null;
+    } else if (!model) {
+      throw invalid("Model is unavailable. Reload the thread before saving settings.", "model_unavailable");
+    } else {
+      validated.model = model;
+    }
+  }
+
+  if (hasEffort) {
+    if (patch.effort == null) {
+      validated.effort = null;
+    } else if (!effort) {
+      throw invalid("Reasoning effort is unavailable. Reload the thread before saving settings.", "effort_unavailable");
+    } else {
+      validated.effort = effort;
+    }
+  }
+
+  if ((hasModel && patch.model != null) || (hasEffort && patch.effort != null)) {
+    const advertised = (models ?? []).find((candidate) => candidate?.id === model);
+    const providerModel = resolvedThreadSettings?.providerConfirmed?.model;
+    if (!advertised && providerModel !== model) {
+      throw invalid(`Model ${model} is not advertised by ${providerName} and is not this thread's recorded model.`, "model_not_available");
+    }
+
+    const efforts = advertised?.supportedReasoningEfforts ?? [];
+    if (effort && efforts.length && !efforts.some((candidate) => candidate?.reasoningEffort === effort)) {
+      throw invalid(`Effort ${effort} is not supported by model ${model}.`, "effort_not_supported");
+    }
+    if (!advertised && effort && resolvedThreadSettings?.providerConfirmed?.effort !== effort) {
+      throw invalid(`Effort ${effort} does not match this unlisted model's recorded effort.`, "effort_not_supported");
+    }
+  }
+
+  if (hasMode) {
+    if (patch.mode == null) {
+      validated.mode = null;
+    } else {
+      const mode = clean(patch.mode);
+      if (!isKnownMode(providerName, mode)) {
+        throw invalid("Permission mode is unavailable or does not match this provider.", "permission_mode_unavailable");
+      }
+      if (Array.isArray(providerCapabilities?.permissionModes)
+          && !providerCapabilities.permissionModes.includes(mode)) {
+        throw invalid(
+          `The installed ${providerName} provider does not advertise permission mode ${mode}. Refresh settings or update the provider.`,
+          "provider_cli_incompatible",
+        );
+      }
+      validated.mode = mode;
+    }
+  }
+
+  return validated;
+}
+
 export function validateNewThreadModel(providerName, modelValue, models) {
   const model = clean(modelValue);
   if (!model) { throw invalid("Model is unavailable. Reload models before creating a session.", "model_unavailable"); }

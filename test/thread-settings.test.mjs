@@ -271,6 +271,27 @@ test("an echoed pending value retains provider provenance for historical-model v
   }, [], resolved), { model: "gpt-history", effort: "medium", mode: "full" });
 });
 
+test("resolving settings is read-only even when a model catalog is supplied", async (t) => {
+  const dir = fixtureDir(t);
+  const store = new ThreadSettingsStore({ file: join(dir, "settings.json") });
+  store.set("codex", "thread-poisoned", {
+    model: "provider-default", effort: "provider-default", mode: "full",
+  }, { pending: true });
+  const before = structuredClone(store.get("codex", "thread-poisoned"));
+  const service = new ThreadSettingsService({
+    store,
+    readers: { codex: () => ({
+      model: "gpt-5.6-sol", effort: "medium", mode: "full", modeExposed: true,
+      source: "codex_rollout",
+    }) },
+  });
+
+  const resolved = await service.resolve("codex", "thread-poisoned", { models: [] });
+  assert.equal(resolved.model, "provider-default");
+  assert.equal(resolved.effort, "provider-default");
+  assert.deepEqual(store.get("codex", "thread-poisoned"), before);
+});
+
 test("clearing a pending mode lets the provider-owned policy resurface", async (t) => {
   const dir = fixtureDir(t);
   const store = new ThreadSettingsStore({ file: join(dir, "settings.json") });

@@ -20,7 +20,7 @@ import { CodexProvider } from "./providers/codex.mjs";
 import { ClaudeProvider } from "./providers/claude.mjs";
 import { GrokProvider } from "./providers/grok.mjs";
 import { rankRecentThreads, sortRecentThreads } from "./recent-threads.mjs";
-import { validateDispatchSettings, validateNewThreadModel } from "./dispatch-settings.mjs";
+import { validateDispatchSettings, validateNewThreadModel, validateThreadSettingsPatch } from "./dispatch-settings.mjs";
 import * as push from "./push.mjs";
 import { SendLedger } from "./send-ledger.mjs";
 import { ThreadSubscriptions } from "./thread-subscriptions.mjs";
@@ -1361,8 +1361,9 @@ const routes = {
       return json(res, 400, { error: "threadId required" });
     }
 
-    // Provider settings must stay readable even if model discovery is slow or
-    // unavailable. The client already has that independent list and compares it.
+    // Keep transcript/settings reads independent of provider startup and model
+    // discovery. The client already loaded the provider catalog separately;
+    // any repair it proposes comes back through the validated POST boundary.
     json(res, 200, await threadSettings.resolve(p.name, threadId));
   },
 
@@ -1381,7 +1382,18 @@ const routes = {
       if (body[key] !== undefined) { patch[key] = body[key]; }
     }
 
-    json(res, 200, { ok: true, stored: threadSettings.remember(p.name, body.threadId, patch, { pending: body.pending !== false }) });
+    let catalog;
+    try {
+      catalog = await p.models();
+    } catch (error) {
+      throw Object.assign(new Error(`Could not verify ${p.name} models before saving settings: ${error?.message ?? error}`), {
+        status: 503,
+        code: "model_verification_failed",
+      });
+    }
+    const recorded = await threadSettings.resolve(p.name, body.threadId);
+    const validated = validateThreadSettingsPatch(p.name, patch, catalog?.data ?? [], recorded, catalog?.capabilities ?? null);
+    json(res, 200, { ok: true, stored: threadSettings.remember(p.name, body.threadId, validated, { pending: body.pending !== false }) });
   },
 
   "GET /api/usage": async (req, res, url) => {

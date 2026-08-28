@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { validateDispatchSettings, validateNewThreadModel } from "../dispatch-settings.mjs";
+import { validateDispatchSettings, validateNewThreadModel, validateThreadSettingsPatch } from "../dispatch-settings.mjs";
 
 const MODELS = [{
   id: "gpt-5.6-sol",
@@ -111,4 +111,45 @@ test("new sessions cannot silently fall back to a provider default", () => {
     () => validateNewThreadModel("codex", "gpt-made-up", MODELS),
     (error) => error.code === "model_not_available",
   );
+});
+
+test("stored settings reject values that the selected provider does not advertise", () => {
+  assert.throws(
+    () => validateThreadSettingsPatch("codex", {
+      model: "provider-default", effort: "provider-default",
+    }, MODELS, {
+      model: "gpt-5.6-sol", effort: "high",
+      providerConfirmed: { model: "gpt-5.6-sol", effort: "high" },
+    }),
+    (error) => error.code === "model_not_available",
+  );
+
+  assert.deepEqual(validateThreadSettingsPatch("codex", {
+    model: "gpt-5.6-sol", effort: "high", mode: "full",
+  }, MODELS, null, { permissionModes: ["auto", "full"] }), {
+    model: "gpt-5.6-sol", effort: "high", mode: "full",
+  });
+
+  assert.deepEqual(validateThreadSettingsPatch("codex", { mode: null }, MODELS), { mode: null });
+  assert.deepEqual(validateThreadSettingsPatch("codex", { mode: "auto" }, MODELS, null, {
+    permissionModes: ["auto", "full"],
+  }), { mode: "auto" });
+  assert.throws(
+    () => validateThreadSettingsPatch("codex", { mode: "read-only" }, MODELS, null, {
+      permissionModes: ["auto", "full"],
+    }),
+    (error) => error.code === "provider_cli_incompatible",
+  );
+  assert.throws(
+    () => validateThreadSettingsPatch("codex", { effort: "ultra" }, MODELS, {
+      model: "gpt-5.6-sol", effort: "high",
+    }),
+    (error) => error.code === "effort_not_supported",
+  );
+
+  assert.deepEqual(validateThreadSettingsPatch("claude", {
+    model: "claude-history", effort: "high",
+  }, [], {
+    providerConfirmed: { model: "claude-history", effort: "high" },
+  }), { model: "claude-history", effort: "high" });
 });
