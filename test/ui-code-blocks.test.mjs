@@ -46,8 +46,40 @@ test("final code cards are highlighted and copyable without decorating every str
   assert.match(html, /sourceText\.length <= MAX_CODE_HIGHLIGHT_CHARS/);
   assert.match(html, /code\.textContent = sourceText/);
   assert.match(html, /function clearCarets\(\) \{[\s\S]*?renderFinalMarkdownInto\(el, el\._raw \|\| ""\)/);
-  assert.match(html, /\$\("messages"\)\.addEventListener\("click"/);
+  assert.match(html, /document\.addEventListener\("click"[\s\S]*?copyCodeBlock\(copy\)/);
 
   const appendAgent = html.match(/function appendAgent\(el, delta\) \{[\s\S]*?\n\}/)?.[0] ?? "";
   assert.doesNotMatch(appendAgent, /decorateCodeBlocks|highlightElement/);
+});
+
+test("Mermaid is lazy, bounded, sanitized, and absent from the streaming path", () => {
+  assert.match(html, /mermaid: "Mermaid"/);
+  assert.match(html, /script\.src = "\/vendor\/mermaid\.min\.js"/);
+  assert.match(html, /securityLevel: "strict"/);
+  assert.match(html, /maxTextSize: MAX_MERMAID_CHARS/);
+  assert.match(html, /maxEdges: 500/);
+  assert.match(html, /new IntersectionObserver/);
+  assert.match(html, /rootMargin: "320px 0px"/);
+  assert.match(html, /mermaidRenderQueue = mermaidRenderQueue\.then/);
+  assert.match(html, /const mermaid = await loadMermaid\(\);\s*if \(!card\.isConnected\) \{ return; \}/);
+  assert.match(html, /USE_PROFILES: \{ svg: true, svgFilters: true \}/);
+  assert.match(html, /metadata\.language === "mermaid"/);
+  assert.match(html, /scheduleMermaidBlocks\(el\)/);
+
+  const appendAgent = html.match(/function appendAgent\(el, delta\) \{[\s\S]*?\n\}/)?.[0] ?? "";
+  assert.doesNotMatch(appendAgent, /mermaid|scheduleMermaidBlocks|loadMermaid/);
+});
+
+test("HTML files render only in a scriptless isolated preview with source fallback", () => {
+  assert.match(html, /const HTML_FILE_RE = \/\\\.html\?\$\/i/);
+  assert.match(html, /const MAX_HTML_PREVIEW_CHARS = 750_000/);
+  assert.match(html, /<iframe class="html-preview" title="HTML preview" sandbox=""/);
+  assert.match(html, /default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:/);
+  assert.match(html, /Raw project HTML never enters the app DOM/);
+  assert.match(html, /FORBID_TAGS: \["script", "base", "iframe", "object", "embed"\]/);
+  assert.match(html, /meta\.getAttribute\("http-equiv"\).*=== "refresh"/);
+  assert.match(html, /querySelectorAll\("a\[href\], area\[href\]"\)/);
+  assert.match(html, /code\.textContent = d\.content/);
+  assert.match(html, /data-view="source"/);
+  assert.match(html, /function closeSheet\(\) \{[\s\S]*?frame\.srcdoc = ""/);
 });

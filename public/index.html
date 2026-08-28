@@ -170,6 +170,14 @@
   .md .code-copy svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
   .md .code-card pre { margin: 0; border: 0; border-radius: 0; background: transparent; padding: 13px 14px 15px; }
   .md .code-card pre code { display: block; min-width: max-content; }
+  .md .mermaid-card .code-card-head { padding-right: 6px; }
+  .md .mermaid-toggle { flex-shrink: 0; border: 0; border-radius: 7px; background: transparent; color: var(--fg-dim); padding: 7px 9px; font-size: 12px; font-weight: 600; cursor: pointer; }
+  .md .mermaid-toggle:hover, .md .mermaid-toggle:focus-visible { color: var(--fg); background: #ffffff0a; }
+  .md .mermaid-toggle:focus-visible { outline: 2px solid var(--accent2); outline-offset: -2px; }
+  .md .mermaid-diagram { min-height: 84px; padding: 18px 14px; display: flex; align-items: center; justify-content: center; overflow-x: auto; color: var(--fg-dim); }
+  .md .mermaid-diagram svg { display: block; max-width: 100%; height: auto; margin: auto; }
+  .md .mermaid-diagram.error { display: block; min-height: 0; color: var(--danger); font-size: 12.5px; }
+  .md .mermaid-source[hidden], .md .mermaid-diagram[hidden] { display: none; }
   .md blockquote { margin: 0 0 8px; padding: 2px 0 2px 12px; border-left: 3px solid var(--border); color: var(--fg-dim); }
   .md hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
   .md table { border-collapse: collapse; display: block; overflow-x: auto; margin: 0 0 10px; font-size: 13px; }
@@ -347,6 +355,9 @@
   .filerow .fbadge.edit { color: var(--accent2); border-color: var(--accent2); }
   .filecode { background: var(--bg); border: 1px solid var(--border); border-radius: 9px; padding: 12px; overflow-x: auto; max-height: 62dvh; overflow-y: auto; margin: 0; }
   .filecode code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12.5px; line-height: 1.55; white-space: pre; background: none; padding: 0; }
+  .html-preview { width: 100%; height: min(62dvh, 720px); display: block; border: 1px solid var(--border); border-radius: 9px; background: #fff; }
+  .html-preview-note { margin: -4px 0 10px; color: var(--fg-faint); font-size: 11.5px; }
+  .html-source[hidden], .html-preview[hidden] { display: none; }
   /* highlight.js dark theme (compact, mapped to our palette) */
   .hljs { color: var(--fg); background: transparent; }
   .hljs-comment, .hljs-quote { color: var(--fg-faint); font-style: italic; }
@@ -596,12 +607,14 @@ const CODE_LANGUAGE_LABELS = {
   dockerfile: "Dockerfile", go: "Go", graphql: "GraphQL", html: "HTML", ini: "INI",
   java: "Java", javascript: "JavaScript", js: "JavaScript", json: "JSON", jsx: "JSX",
   kotlin: "Kotlin", markdown: "Markdown", md: "Markdown", php: "PHP", plaintext: "Plain text",
+  mermaid: "Mermaid",
   py: "Python", python: "Python", rb: "Ruby", ruby: "Ruby", rust: "Rust", sh: "Shell",
   shell: "Shell", sql: "SQL", swift: "Swift", text: "Plain text", toml: "TOML", ts: "TypeScript",
   tsx: "TSX", typescript: "TypeScript", xml: "XML",
   yaml: "YAML", yml: "YAML",
 };
 const MAX_CODE_HIGHLIGHT_CHARS = 200_000;
+const MAX_MERMAID_CHARS = 50_000;
 
 function codeBlockMetadata(className, text) {
   const explicit = String(className || "").match(/(?:^|\s)language-([^\s]+)/i)?.[1]?.toLowerCase() || null;
@@ -630,6 +643,153 @@ function codeBlockMetadata(className, text) {
 const COPY_CODE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>';
 const COPIED_CODE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>';
 
+let mermaidLoader = null;
+let mermaidRenderQueue = Promise.resolve();
+let mermaidSequence = 0;
+const observedMermaidCards = new Set();
+const mermaidObserver = window.IntersectionObserver ? new IntersectionObserver((entries) => {
+  for (const entry of entries) {
+    if (!entry.isIntersecting) { continue; }
+    mermaidObserver.unobserve(entry.target);
+    observedMermaidCards.delete(entry.target);
+    queueMermaidRender(entry.target);
+  }
+}, { rootMargin: "320px 0px" }) : null;
+
+function loadMermaid() {
+  if (window.mermaid?.render) { return Promise.resolve(window.mermaid); }
+  if (mermaidLoader) { return mermaidLoader; }
+
+  mermaidLoader = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "/vendor/mermaid.min.js";
+    script.async = true;
+    script.onload = () => {
+      if (!window.mermaid?.render) {
+        reject(new Error("Mermaid did not initialize"));
+        return;
+      }
+      window.mermaid.initialize({
+        startOnLoad: false,
+        securityLevel: "strict",
+        htmlLabels: false,
+        theme: "dark",
+        maxTextSize: MAX_MERMAID_CHARS,
+        maxEdges: 500,
+        suppressErrorRendering: true,
+      });
+      resolve(window.mermaid);
+    };
+    script.onerror = () => reject(new Error("Mermaid renderer could not be loaded"));
+    document.head.appendChild(script);
+  }).catch((error) => {
+    mermaidLoader = null;
+    throw error;
+  });
+  return mermaidLoader;
+}
+
+async function renderMermaidCard(card) {
+  if (!card.isConnected || card.dataset.mermaidState !== "pending") { return; }
+  const diagram = card.querySelector(".mermaid-diagram");
+  const source = card._mermaidSource || "";
+  card.dataset.mermaidState = "rendering";
+  diagram.textContent = "Rendering diagram…";
+
+  try {
+    if (source.length > MAX_MERMAID_CHARS) {
+      throw new Error(`Diagram source exceeds ${MAX_MERMAID_CHARS.toLocaleString()} characters`);
+    }
+    const mermaid = await loadMermaid();
+    if (!card.isConnected) { return; }
+    const result = await mermaid.render(`remote_agents_mermaid_${++mermaidSequence}`, source);
+    if (!card.isConnected) { return; }
+    diagram.innerHTML = window.DOMPurify
+      ? window.DOMPurify.sanitize(result.svg, { USE_PROFILES: { svg: true, svgFilters: true } })
+      : "";
+    if (!diagram.querySelector("svg")) { throw new Error("Diagram output was rejected"); }
+    card.dataset.mermaidState = "ready";
+  } catch (error) {
+    if (!card.isConnected) { return; }
+    card.dataset.mermaidState = "error";
+    diagram.classList.add("error");
+    diagram.textContent = `Could not render this Mermaid diagram: ${error?.message || "invalid diagram"}`;
+  }
+}
+
+function queueMermaidRender(card) {
+  // Mermaid uses shared renderer state. Serialize diagrams so several cards
+  // entering the viewport together cannot interfere with each other.
+  mermaidRenderQueue = mermaidRenderQueue.then(() => renderMermaidCard(card), () => renderMermaidCard(card));
+}
+
+function scheduleMermaidBlocks(root) {
+  // Remove stale observer targets whenever a new final message/file is rendered.
+  for (const card of observedMermaidCards) {
+    if (!card.isConnected) {
+      mermaidObserver?.unobserve(card);
+      observedMermaidCards.delete(card);
+    }
+  }
+
+  for (const card of root.querySelectorAll('.mermaid-card[data-mermaid-state="pending"]')) {
+    if (mermaidObserver) {
+      observedMermaidCards.add(card);
+      mermaidObserver.observe(card);
+    } else {
+      queueMermaidRender(card);
+    }
+  }
+}
+
+function makeMermaidCard(pre, code, sourceText) {
+  for (const attr of Array.from(pre.attributes)) { pre.removeAttribute(attr.name); }
+  for (const attr of Array.from(code.attributes)) { code.removeAttribute(attr.name); }
+  code.className = "language-mermaid";
+  code.textContent = sourceText;
+
+  const card = document.createElement("div");
+  card.className = "code-card mermaid-card";
+  card.dataset.mermaidState = "pending";
+  card._mermaidSource = sourceText;
+  const head = document.createElement("div");
+  head.className = "code-card-head";
+  const label = document.createElement("span");
+  label.className = "code-language";
+  label.textContent = "Mermaid diagram";
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "mermaid-toggle";
+  toggle.textContent = "Source";
+  toggle.setAttribute("aria-pressed", "false");
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "code-copy";
+  copy.dataset.copyLabel = "Copy Mermaid source";
+  copy.dataset.copyTitle = "Copy Mermaid source";
+  copy.setAttribute("aria-label", copy.dataset.copyLabel);
+  copy.title = copy.dataset.copyTitle;
+  copy.innerHTML = COPY_CODE_ICON;
+  copy._codeEl = code;
+  copy._copyText = sourceText;
+  const diagram = document.createElement("div");
+  diagram.className = "mermaid-diagram";
+  diagram.textContent = "Diagram will render when visible…";
+  pre.className = "mermaid-source";
+  pre.hidden = true;
+  toggle.onclick = () => {
+    const showingSource = pre.hidden;
+    pre.hidden = !showingSource;
+    diagram.hidden = showingSource;
+    toggle.textContent = showingSource ? "Diagram" : "Source";
+    toggle.setAttribute("aria-pressed", String(showingSource));
+  };
+  head.append(label, toggle, copy);
+  pre.replaceWith(card);
+  card.append(head, diagram, pre);
+  return card;
+}
+
 function decorateCodeBlocks(root) {
   for (const code of root.querySelectorAll("pre > code")) {
     const pre = code.parentElement;
@@ -638,6 +798,10 @@ function decorateCodeBlocks(root) {
 
     const sourceText = code.textContent || "";
     const metadata = codeBlockMetadata(code.className, sourceText);
+    if (metadata.language === "mermaid") {
+      makeMermaidCard(pre, code, sourceText);
+      continue;
+    }
     // Marked code fences are already plain text. Raw agent HTML can contain
     // hidden descendants, so flatten it before display and retain the exact
     // same source for copying. Copied content can never exceed visible source.
@@ -677,6 +841,7 @@ function decorateCodeBlocks(root) {
 function renderFinalMarkdownInto(el, text) {
   el.innerHTML = renderMarkdown(text);
   decorateCodeBlocks(el);
+  scheduleMermaidBlocks(el);
 }
 
 async function writeClipboardText(text) {
@@ -4299,6 +4464,16 @@ function openSheet(html) {
 }
 
 function closeSheet() {
+  // An HTML preview can contain CSS/SVG animation even though script and the
+  // network are blocked. Tear it down instead of letting hidden work continue.
+  for (const frame of $("sheetBody").querySelectorAll("iframe.html-preview")) {
+    frame.srcdoc = "";
+    frame.removeAttribute("src");
+  }
+  for (const card of $("sheetBody").querySelectorAll(".mermaid-card")) {
+    mermaidObserver?.unobserve(card);
+    observedMermaidCards.delete(card);
+  }
   $("overlay").classList.remove("show");
   $("sheet").classList.remove("show");
   $("sheet").setAttribute("aria-hidden", "true");
@@ -4315,6 +4490,34 @@ function openDiffSheet(diff) {
 }
 
 const MD_FILE_RE = /\.(md|markdown|mdx)$/i;
+const HTML_FILE_RE = /\.html?$/i;
+const MAX_HTML_PREVIEW_CHARS = 750_000;
+
+function isolatedHtmlPreviewDocument(source) {
+  if (!window.DOMPurify) {
+    return `<!doctype html><pre>${esc(source)}</pre>`;
+  }
+
+  const sanitized = window.DOMPurify.sanitize(source, {
+    WHOLE_DOCUMENT: true,
+    FORBID_TAGS: ["script", "base", "iframe", "object", "embed"],
+    FORBID_ATTR: ["srcdoc"],
+  });
+  const doc = new DOMParser().parseFromString(sanitized, "text/html");
+  // Sandbox blocks script/forms/popups, while these removals also prevent a
+  // document from navigating its own frame through markup alone.
+  for (const meta of doc.querySelectorAll("meta[http-equiv]")) {
+    if (meta.getAttribute("http-equiv")?.toLowerCase() === "refresh") { meta.remove(); }
+  }
+  for (const link of doc.querySelectorAll("a[href], area[href]")) { link.removeAttribute("href"); }
+  for (const form of doc.querySelectorAll("form")) { form.removeAttribute("action"); }
+
+  const policy = doc.createElement("meta");
+  policy.httpEquiv = "Content-Security-Policy";
+  policy.content = "default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:";
+  doc.head.prepend(policy);
+  return "<!doctype html>" + doc.documentElement.outerHTML;
+}
 
 // A link the agent wrote may point at a local file rather than a URL — e.g.
 // [notes](/Users/me/proj/notes.md) or [grok.mjs](providers/grok.mjs:812). The
@@ -4556,6 +4759,43 @@ function renderFileInto(el, name, d, staleAt) {
 
   if (MD_FILE_RE.test(name)) {
     el.innerHTML = note + `<div class="md filebody">${renderMarkdown(d.content)}</div>`;
+    const markdown = el.querySelector(".md.filebody");
+    decorateCodeBlocks(markdown);
+    scheduleMermaidBlocks(markdown);
+    return;
+  }
+
+  if (HTML_FILE_RE.test(name)) {
+    const previewable = d.content.length <= MAX_HTML_PREVIEW_CHARS;
+    el.innerHTML = note + `<div class="file-tabs" data-html-tabs>
+      <button type="button" data-view="preview"${previewable ? ' class="on"' : ""}${previewable ? "" : " disabled"}>Preview</button>
+      <button type="button" data-view="source"${previewable ? "" : ' class="on"'}>Source</button>
+    </div>
+    <div class="html-preview-note">Isolated preview · scripts, forms, and network requests are disabled.</div>
+    <iframe class="html-preview" title="HTML preview" sandbox=""${previewable ? "" : " hidden"}></iframe>
+    <pre class="filecode html-source"${previewable ? " hidden" : ""}><code></code></pre>`;
+    const frame = el.querySelector(".html-preview");
+    const source = el.querySelector(".html-source");
+    const code = source.querySelector("code");
+    code.textContent = d.content;
+    code.className = "language-html";
+    if (window.hljs && d.content.length <= MAX_CODE_HIGHLIGHT_CHARS) {
+      try { hljs.highlightElement(code); } catch { /* leave as plain HTML */ }
+    }
+    if (previewable) {
+      // The iframe gets a unique opaque origin (no allow-same-origin) and its
+      // own deny-by-default CSP. Raw project HTML never enters the app DOM.
+      frame.srcdoc = isolatedHtmlPreviewDocument(d.content);
+    }
+    el.querySelectorAll("[data-html-tabs] button").forEach((button) => {
+      button.onclick = () => {
+        if (button.disabled) { return; }
+        const showPreview = button.dataset.view === "preview";
+        frame.hidden = !showPreview;
+        source.hidden = showPreview;
+        el.querySelectorAll("[data-html-tabs] button").forEach((candidate) => candidate.classList.toggle("on", candidate === button));
+      };
+    });
     return;
   }
 
@@ -6143,7 +6383,9 @@ $("messages").addEventListener("scroll", () => {
   updateJumpBtn();
 }, { passive: true });
 
-$("messages").addEventListener("click", (event) => {
+// Code cards also appear in rendered Markdown files inside the sheet. Identity
+// checks in copyCodeBlock mean a sanitized agent-authored lookalike is inert.
+document.addEventListener("click", (event) => {
   const copy = event.target.closest?.(".code-copy");
   if (copy) { copyCodeBlock(copy); }
 });

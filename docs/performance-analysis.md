@@ -97,3 +97,9 @@ Each optimization should be evaluated as part of the complete transcript lifecyc
 - Renderer CPU, memory, DOM size, and render latency compared against the measurements above.
 
 No performance optimization is included with this document. The code-card feature shipped alongside it adds syntax highlighting only after a message is final or loaded from history, never on each streaming delta, and skips inference/highlighting for blocks above 200,000 characters. Because the measurements predate that presentation change, the next optimization pass should re-baseline history rendering before using these numbers as its comparison point.
+
+## Rich-document rendering guardrails
+
+Markdown files reuse the already-loaded Marked and DOMPurify path, so they add no new library cost. Mermaid is deliberately absent from the app shell and ordinary message path: the vendored renderer is fetched and cached only after a completed/history message or opened Markdown file contains a `mermaid` fence, and each diagram is rendered only when it approaches the viewport. Rendering is serialized, source is capped at 50,000 characters, graph edges are capped at 500, and streaming deltas never trigger diagrams.
+
+HTML files use a sandboxed `iframe` preview only when the user opens that file. The iframe has an opaque origin and a deny-by-default CSP; scripts, forms, popups, same-origin access, and network requests are unavailable. Source remains accessible and is the default for files above 750,000 characters. This avoids putting untrusted project HTML into the app DOM and bounds expensive parsing for unusually large files.

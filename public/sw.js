@@ -11,7 +11,7 @@
 //
 // Bump CACHE_VERSION to force a refresh of the precached shell.
 
-const CACHE_VERSION = "remote-agents-v16";
+const CACHE_VERSION = "remote-agents-v17";
 
 // A reverse proxy in front of us (Cloudflare, a tunnel, nginx) answers with a
 // real HTTP response when the machine behind it is down — 502, or Cloudflare's
