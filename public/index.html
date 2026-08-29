@@ -1102,12 +1102,15 @@ function offlineWord(reach) {
   return effectiveReach(reach) === "host" ? "Your Mac looks offline" : "You're offline";
 }
 
-async function api(path, body) {
+async function api(path, body, options = {}) {
   let res;
 
   try {
-    res = await fetch(path, body && { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    res = await fetch(path, body
+      ? { ...options, method: "POST", headers: { "content-type": "application/json", ...(options.headers ?? {}) }, body: JSON.stringify(body) }
+      : options);
   } catch (cause) {
+    if (cause?.name === "AbortError") { throw cause; }
     // The request never left the phone.
     console.warn("Bridge request failed before a response", path, cause);
     throw unreachable(navigator.onLine ? "host" : "phone");
@@ -5846,12 +5849,12 @@ function renderUsageSheet(provider, d, error = null) {
   const planText = acc.planType ? esc(acc.planType.toUpperCase()) + " plan" : "";
   let html = `<h2>Usage remaining</h2>${usageTabsHtml(provider)}<div class="hint">${esc(acc.accountLabel || acc.email || PROVIDER_LABELS[provider] || "Agent")}${acc.accountLabel && acc.email ? " · " + esc(acc.email) : ""}${planText ? " · " + planText : ""}</div>`;
 
-  if (rateSource === "last-known" && rl) {
+  if ((rateSource === "last-known" || d._meta?.refreshError) && rl) {
     const observed = d._meta?.observedAt?.rateLimits;
     html += `<div class="usage-note">Showing the last successful quota check${observed ? ` from ${relTime(Math.floor(observed / 1000))}` : ""}; the latest refresh ${d._meta?.refreshError ? "failed" : "did not return this field"}.</div>`;
   }
 
-  if (limitsEnvelope?.fetchedAt && rateSource !== "last-known") {
+  if (limitsEnvelope?.fetchedAt && rateSource !== "last-known" && !d._meta?.refreshError) {
     html += `<div class="hint" style="margin:6px 0 10px">Updated ${relTime(limitsEnvelope.fetchedAt)}</div>`;
   }
 
@@ -5890,10 +5893,33 @@ async function loadUsageSheet(provider) {
   $("sheetBody").innerHTML = `<h2>Usage remaining</h2>${usageTabsHtml(provider)}<div class="hint">Refreshing ${esc(PROVIDER_LABELS[provider])}…</div>`;
   wireUsageSheet(provider);
 
+  const usageRequest = async (refresh, timeoutMs) => {
+    const controller = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+
+    try {
+      return await api(`/api/usage?refresh=${refresh ? "1" : "0"}&provider=${encodeURIComponent(provider)}&_=${Date.now()}`, undefined, { signal: controller.signal, cache: "no-store" });
+    } catch (error) {
+      if (timedOut) { throw Object.assign(new Error("Usage refresh timed out"), { code: "usage_refresh_timeout" }); }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
   try {
-    const data = await api("/api/usage?refresh=1&provider=" + encodeURIComponent(provider) + "&_=" + Date.now());
+    const data = await usageRequest(true, 10000);
     if (requestSeq === usageSheetRequestSeq && $("sheet").classList.contains("show") && $("sheetBody").dataset.sheetKind === "usage") { renderUsageSheet(provider, data); }
   } catch (error) {
+    if (error.code === "usage_refresh_timeout") {
+      try {
+        const fallback = await usageRequest(false, 3000);
+        fallback._meta = { ...(fallback._meta ?? {}), refreshError: true };
+        if (requestSeq === usageSheetRequestSeq && $("sheet").classList.contains("show") && $("sheetBody").dataset.sheetKind === "usage") { renderUsageSheet(provider, fallback); }
+        return;
+      } catch {}
+    }
     if (requestSeq === usageSheetRequestSeq && $("sheet").classList.contains("show") && $("sheetBody").dataset.sheetKind === "usage") { renderUsageSheet(provider, null, error); }
   }
 }

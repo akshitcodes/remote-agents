@@ -176,8 +176,12 @@ test("quiet and vanished provider turns degrade visibly without unsafe queue dis
 test("usage sheet shows account limits for all providers and never thread usage", () => {
   assert.match(html, /data-usage-provider/);
   assert.match(html, /loadUsageSheet\(button\.dataset\.usageProvider\)/);
-  assert.match(html, /\/api\/usage\?refresh=1&provider=/);
-  assert.match(html, /&_=" \+ Date\.now\(\)/);
+  assert.match(html, /\/api\/usage\?refresh=\$\{refresh \? "1" : "0"\}&provider=/);
+  assert.match(html, /cache: "no-store"/);
+  assert.match(html, /usageRequest\(true, 10000\)/);
+  assert.match(html, /usageRequest\(false, 3000\)/);
+  assert.match(html, /usage_refresh_timeout/);
+  assert.match(html, /rateSource === "last-known" \|\| d\._meta\?\.refreshError/);
   assert.match(html, /function remainingPercentOf\(limit\)/);
   assert.match(html, /100 - used/);
   assert.match(html, /% left/);
@@ -233,7 +237,7 @@ test("desktop workspace keeps session navigation visible and constrains the chat
   assert.match(html, /event\.key === "Escape"/);
   assert.match(server, /const body = renderIndexHtml\(req\.headers\["user-agent"\][\s\S]*?return res\.end\(body\)/);
   assert.match(onboarding, /const readIndexShell = createIndexShellReader\(indexHtmlPath\)/);
-  assert.match(sw, /const CACHE_VERSION = "remote-agents-v18"/);
+  assert.match(sw, /const CACHE_VERSION = "remote-agents-v19"/);
 });
 
 test("Codex write access stays provider-specific and retryable after a conflict", () => {
