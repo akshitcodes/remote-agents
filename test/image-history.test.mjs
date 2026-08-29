@@ -72,6 +72,26 @@ test("Codex rollout replay deduplicates mixed legacy and response-item messages"
   assert.equal(state.turns[0].items.filter((item) => item.type === "agentMessage").length, 1);
 });
 
+test("Codex deduplicates an incrementally observed current message and whitespace-varied legacy mirror", () => {
+  const state = newParseState();
+  feedLines(state, [
+    JSON.stringify({ type: "event_msg", payload: { type: "task_started" } }),
+    JSON.stringify({
+      type: "response_item",
+      payload: { type: "message", id: "current-user", role: "user", content: [{ type: "input_text", text: "Same visible prompt" }] },
+    }),
+  ]);
+
+  // This is the order and trailing-newline difference written by the Codex
+  // desktop app: the legacy compatibility event arrives one record later.
+  feedLines(state, [
+    JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Same visible prompt \r\n", images: [], local_images: [] } }),
+  ]);
+
+  const messages = state.turns[0].items.filter((item) => item.type === "userMessage");
+  assert.deepEqual(messages.map((item) => item.content[0].text), ["Same visible prompt"]);
+});
+
 test("Codex strips private memory metadata before mixed-schema deduplication", () => {
   const state = newParseState();
   const answer = "Everything is committed and pushed. Run the restart command.";

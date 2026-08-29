@@ -247,9 +247,10 @@ export function feedLines(st, lines) {
   // event stream and the newer response-item stream. Keep compatibility with
   // either format without rendering the mirror twice.
   const pushMessage = (item, source) => {
+    const canonicalText = (value) => String(value ?? "").replace(/\r\n?/g, "\n").trim();
     const body = item.type === "agentMessage"
-      ? item.text
-      : item.content?.map((part) => `${part.type}:${part.text ?? part.attachment?.id ?? ""}`).join("|");
+      ? canonicalText(item.text)
+      : item.content?.map((part) => `${part.type}:${part.text != null ? canonicalText(part.text) : (part.attachment?.id ?? "")}`).join("|");
     const fingerprint = `${item.type}:${body}`;
     const recent = st.recentMessages.get(fingerprint);
 
