@@ -28,6 +28,7 @@ import { pruneAttachments, readAttachment, resolveAttachmentIds, storeAttachment
 import { UsageStateStore } from "./usage-state.mjs";
 import { captureReplyStart, notificationBody, notificationTitle } from "./notification-content.mjs";
 import { localBridgeProof, validLocalProofNonce } from "./local-proof.mjs";
+import { TerminalRunner } from "./terminal-runner.mjs";
 import {
   readClaudeTranscriptThreadSettings,
   readCodexDbThreadSettings,
@@ -54,6 +55,7 @@ const authFailures = new Map();
 const threadSubscriptions = new ThreadSubscriptions({ file: join(APP_HOME, "thread-subscriptions.json") });
 const threadSettingsStore = new ThreadSettingsStore({ file: join(APP_HOME, "thread-settings.json") });
 const usageState = new UsageStateStore({ file: join(APP_HOME, "usage-state.json") });
+const terminalRunner = new TerminalRunner();
 const PROJECT_RUN_CANDIDATE_LIMIT = 30;
 let threadSettings = null;
 
@@ -1500,6 +1502,20 @@ const routes = {
     if (!p) { return; }
 
     json(res, 200, usageState.merge(p.name, {}));
+  },
+
+  "POST /api/terminal/run": async (req, res) => {
+    const body = await readBody(req);
+    json(res, 202, terminalRunner.start({ cwd: body?.cwd, command: body?.command }));
+  },
+
+  "GET /api/terminal/status": async (_req, res, url) => {
+    json(res, 200, terminalRunner.get(url.searchParams.get("id"), url.searchParams.get("offset")));
+  },
+
+  "POST /api/terminal/stop": async (req, res) => {
+    const body = await readBody(req);
+    json(res, 200, terminalRunner.stop(body?.id));
   },
 
   "GET /api/approvals": async (req, res, url) => {

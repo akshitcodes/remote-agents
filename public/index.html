@@ -414,6 +414,15 @@
   .usage-refresh svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; }
   .usage-refresh.spinning svg { animation: spin .8s linear infinite; }
   .usage-note { background: #1f6feb12; border: 1px solid #388bfd55; border-radius: 10px; padding: 10px 12px; margin: 8px 0 12px; color: var(--fg-dim); font-size: 12.5px; line-height: 1.4; }
+  .terminal-shell { display: flex; flex-direction: column; gap: 10px; min-height: min(62dvh, 620px); }
+  .terminal-cwd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .terminal-output { flex: 1; min-height: 260px; max-height: min(55dvh, 560px); overflow: auto; overscroll-behavior: contain; background: #070a0f; border: 1px solid var(--border); border-radius: 11px; padding: 12px; color: #d5dae1; font: 12.5px/1.5 ui-monospace, "SF Mono", Menlo, Monaco, monospace; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+  .terminal-form { display: flex; gap: 8px; align-items: center; }
+  .terminal-prompt { color: var(--accent); font: 700 17px ui-monospace, "SF Mono", Menlo, Monaco, monospace; }
+  .terminal-command { flex: 1; min-width: 0; }
+  .terminal-run, .terminal-stop { width: auto; min-width: 62px; margin: 0; }
+  .terminal-stop { border: 1px solid var(--danger); border-radius: 10px; padding: 10px 12px; background: #f8514914; color: #ffaaa5; font: inherit; font-weight: 600; cursor: pointer; }
+  .terminal-status { min-height: 18px; color: var(--fg-dim); font-size: 12px; }
 
   /* Laptop workspace: keep navigation in view and bound the reading measure.
      Mobile still uses the original full-screen list -> chat navigation below
@@ -561,6 +570,7 @@
     <span id="tokCount" class="mono"></span>
     <button id="diffBtn" class="hbtn icon" aria-label="Diff" style="display:none"><svg viewBox="0 0 24 24"><path d="M12 3v18M5 8h4M5 12h4M5 16h4"/><path d="M15 12h4M17 10v4"/></svg></button>
     <button id="filesBtn" class="hbtn icon" aria-label="Files" style="display:none"><svg viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg></button>
+    <button id="terminalBtn" class="hbtn icon" aria-label="Project terminal" title="Project terminal" style="display:none"><svg viewBox="0 0 24 24"><path d="M4 17l6-5-6-5"/><path d="M12 19h8"/></svg></button>
     <button id="notifyBtn" class="hbtn icon" aria-label="Task notifications" aria-haspopup="dialog" style="display:none"><svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg></button>
     <button id="usageBtn" class="hbtn icon" aria-label="Usage"><svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 18 0 9 9 0 0 0-18 0z"/><path d="M12 12l4-2"/><path d="M12 7v0"/></svg></button>
     <div id="connDot" title="event stream"></div>
@@ -991,6 +1001,7 @@ const state = {
   nativeQueueReconciling: false,
   lastDiff: "",
   threadFiles: new Map(), // path -> { path, edited } for the open thread
+  terminalJobs: new Map(), // provider:thread -> last project terminal command
   activityGroup: null,    // newest contiguous Codex activity run
   lock: { state: "unknown", label: "Checking…" },
   sendStage: null,        // { requestId, threadId, text, bubble, chip }
@@ -2965,6 +2976,7 @@ async function openThread(t) {
   state.lastDiff = "";
   state.threadFiles = new Map();
   $("filesBtn").style.display = "none";
+  $("terminalBtn").style.display = t.cwd ? "flex" : "none";
   $("notifyBtn").style.display = "flex";
   sendPresence();
   setBusy(false);
@@ -3124,6 +3136,7 @@ function backToList() {
   $("usageBtn").style.display = "flex";
   $("diffBtn").style.display = "none";
   $("filesBtn").style.display = "none";
+  $("terminalBtn").style.display = "none";
   $("notifyBtn").style.display = "none";
   updateListChrome();
   $("tokCount").textContent = "";
@@ -4957,6 +4970,170 @@ async function openFilesSheet() {
   syncSaveBtn();
 }
 
+function terminalThreadKey(thread = state.active) {
+  return thread ? runKey(thread.provider || "codex", thread.id) : null;
+}
+
+function terminalSession(thread) {
+  const key = terminalThreadKey(thread);
+  let session = state.terminalJobs.get(key);
+
+  if (!session) {
+    session = { id: null, offset: 0, log: "", state: "idle", exitCode: null, truncated: false, pollToken: 0, polling: false };
+    state.terminalJobs.set(key, session);
+  }
+
+  return session;
+}
+
+function appendTerminalOutput(session, result) {
+  if (result.truncated && !session.truncated) {
+    session.log = "[earlier output was truncated by the bridge]\n" + (result.output || "");
+    session.truncated = true;
+  } else if (result.output) {
+    session.log += result.output;
+  }
+
+  if (session.log.length > 1024 * 1024) { session.log = session.log.slice(-1024 * 1024); }
+  session.id = result.id ?? session.id;
+  session.offset = result.nextOffset ?? session.offset;
+  // A poll issued just before Stop can arrive just after the stop response.
+  // Terminal state is monotonic: stale `running` must not undo `stopping` or a
+  // terminal result already shown to the user.
+  const terminalStates = new Set(["completed", "failed", "stopped", "unconfirmed"]);
+  const staleRunning = result.state === "running" && (session.state === "stopping" || terminalStates.has(session.state));
+  if (result.state && !staleRunning) { session.state = result.state; }
+  session.exitCode = result.exitCode ?? session.exitCode;
+}
+
+function syncTerminalSheet(thread, session) {
+  const body = $("sheetBody");
+  if (body.dataset.sheetKind !== "terminal" || body.dataset.terminalKey !== terminalThreadKey(thread)) { return; }
+
+  const output = $("terminalOutput");
+  const status = $("terminalStatus");
+  const input = $("terminalCommand");
+  const run = $("terminalRun");
+  const stop = $("terminalStop");
+  if (!output || !status || !input || !run || !stop) { return; }
+
+  output.textContent = session.log || "Ready. Commands run on the bridge in this project folder.\n";
+  output.scrollTop = output.scrollHeight;
+  const active = ["running", "stopping", "starting"].includes(session.state);
+  input.disabled = active;
+  run.disabled = active;
+  stop.style.display = active && session.id ? "inline-flex" : "none";
+  status.textContent = session.state === "starting" ? "Starting…"
+    : session.state === "running" ? "Running on bridge…"
+      : session.state === "stopping" ? "Stopping…"
+        : session.state === "completed" ? `Finished · exit ${session.exitCode ?? 0}`
+          : session.state === "failed" ? `Failed${session.exitCode != null ? ` · exit ${session.exitCode}` : ""}`
+            : session.state === "stopped" ? "Stopped"
+              : session.state === "unconfirmed" ? "Start unconfirmed — check the project before running it again"
+                : "Ready";
+}
+
+async function pollTerminalJob(thread, session) {
+  if (!session.id || session.polling) { return; }
+  session.polling = true;
+  const token = ++session.pollToken;
+
+  try {
+    while (token === session.pollToken && ["running", "stopping", "starting"].includes(session.state)) {
+      if ($("sheetBody").dataset.sheetKind !== "terminal" || $("sheetBody").dataset.terminalKey !== terminalThreadKey(thread)) { break; }
+      await new Promise((resolve) => setTimeout(resolve, 450));
+      if (token !== session.pollToken || $("sheetBody").dataset.sheetKind !== "terminal" || $("sheetBody").dataset.terminalKey !== terminalThreadKey(thread)) { break; }
+      const result = await api(`/api/terminal/status?id=${encodeURIComponent(session.id)}&offset=${session.offset}`);
+      appendTerminalOutput(session, result);
+      syncTerminalSheet(thread, session);
+    }
+  } catch (error) {
+    if (error.status === 404) {
+      session.state = "unconfirmed";
+      session.log += "\n[the bridge restarted; this command belonged to the previous bridge process]\n";
+    } else if (error.reach) {
+      session.state = "unconfirmed";
+      session.log += "\n[connection to the bridge closed; the command may have restarted it]\n";
+    } else {
+      session.state = "failed";
+      session.log += `\n[status check failed: ${error.message}]\n`;
+    }
+    syncTerminalSheet(thread, session);
+  } finally {
+    session.polling = false;
+  }
+}
+
+function openTerminalSheet() {
+  const thread = state.active;
+  const cwd = thread?.cwd;
+  if (!thread || !cwd) {
+    openSheet('<h2>Project terminal</h2><div class="hint">This session does not report a project folder, so a safe working directory cannot be selected.</div>');
+    return;
+  }
+
+  const session = terminalSession(thread);
+  openSheet(`<div class="terminal-shell">
+    <h2>Project terminal</h2>
+    <div class="hint terminal-cwd mono" title="${esc(cwd)}">${esc(cwd)}</div>
+    <pre class="terminal-output" id="terminalOutput" aria-live="polite"></pre>
+    <form class="terminal-form" id="terminalForm">
+      <span class="terminal-prompt">›</span>
+      <input class="field-input terminal-command mono" id="terminalCommand" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Run a command on the bridge">
+      <button class="primary-btn terminal-run" id="terminalRun" type="submit">Run</button>
+      <button class="secondary-btn terminal-stop" id="terminalStop" type="button" style="display:none">Stop</button>
+    </form>
+    <div class="terminal-status" id="terminalStatus" role="status"></div>
+  </div>`);
+  $("sheetBody").dataset.sheetKind = "terminal";
+  $("sheetBody").dataset.terminalKey = terminalThreadKey(thread);
+  syncTerminalSheet(thread, session);
+
+  $("terminalForm").onsubmit = async (event) => {
+    event.preventDefault();
+    const command = $("terminalCommand").value.trim();
+    if (!command || ["running", "stopping", "starting"].includes(session.state)) { return; }
+
+    session.id = null;
+    session.offset = 0;
+    session.log = `$ ${command}\n`;
+    session.state = "starting";
+    session.exitCode = null;
+    session.truncated = false;
+    session.pollToken += 1;
+    syncTerminalSheet(thread, session);
+
+    try {
+      const result = await api("/api/terminal/run", { cwd, command });
+      appendTerminalOutput(session, result);
+      $("terminalCommand").value = "";
+      syncTerminalSheet(thread, session);
+      pollTerminalJob(thread, session);
+    } catch (error) {
+      // The POST may have landed even if its response was lost. Never repeat a
+      // shell command automatically; make that ambiguity explicit.
+      session.state = "unconfirmed";
+      session.log += `\n[start could not be confirmed: ${error.message}]\n`;
+      syncTerminalSheet(thread, session);
+    }
+  };
+
+  $("terminalStop").onclick = async () => {
+    if (!session.id) { return; }
+    try {
+      const result = await api("/api/terminal/stop", { id: session.id });
+      appendTerminalOutput(session, result);
+      syncTerminalSheet(thread, session);
+      pollTerminalJob(thread, session);
+    } catch (error) {
+      session.log += `\n[stop could not be confirmed: ${error.message}]\n`;
+      syncTerminalSheet(thread, session);
+    }
+  };
+
+  if (["running", "stopping", "starting"].includes(session.state)) { pollTerminalJob(thread, session); }
+}
+
 function renderFileInto(el, name, d, staleAt) {
   if (d.binary) {
     el.innerHTML = `<div class="hint">Binary file (${fmtBytes(d.size)}) — not viewable.</div>`;
@@ -6655,6 +6832,7 @@ $("usageBtn").onclick = openUsageSheet;
 $("notifyBtn").onclick = () => state.active && openTaskNotificationSheet(state.active);
 $("diffBtn").onclick = () => openDiffSheet(state.lastDiff || "No diff");
 $("filesBtn").onclick = openFilesSheet;
+$("terminalBtn").onclick = openTerminalSheet;
 $("providerSeg").querySelectorAll("[data-provider]").forEach((b) => {
   b.onclick = () => switchProvider(b.dataset.provider);
 });

@@ -260,7 +260,21 @@ test("desktop workspace keeps session navigation visible and constrains the chat
   assert.match(html, /event\.key === "Escape"/);
   assert.match(server, /const body = renderIndexHtml\(req\.headers\["user-agent"\][\s\S]*?return res\.end\(body\)/);
   assert.match(onboarding, /const readIndexShell = createIndexShellReader\(indexHtmlPath\)/);
-  assert.match(sw, /const CACHE_VERSION = "remote-agents-v20"/);
+  assert.match(sw, /const CACHE_VERSION = "remote-agents-v21"/);
+});
+
+test("project terminal is authenticated, cwd-scoped, bounded, and never auto-retries commands", () => {
+  assert.match(html, /id="terminalBtn"[^>]*aria-label="Project terminal"/);
+  assert.match(html, /function openTerminalSheet\(\)/);
+  assert.match(html, /api\("\/api\/terminal\/run", \{ cwd, command \}\)/);
+  assert.match(html, /\/api\/terminal\/status\?id=/);
+  assert.match(html, /api\("\/api\/terminal\/stop", \{ id: session\.id \}\)/);
+  assert.match(html, /Start unconfirmed — check the project before running it again/);
+  assert.match(html, /Never repeat a[\s\S]*shell command automatically/);
+  assert.match(html, /const staleRunning = result\.state === "running"/);
+  assert.match(server, /"POST \/api\/terminal\/run"/);
+  assert.match(server, /"GET \/api\/terminal\/status"/);
+  assert.match(server, /"POST \/api\/terminal\/stop"/);
 });
 
 test("Codex write access stays provider-specific and retryable after a conflict", () => {
