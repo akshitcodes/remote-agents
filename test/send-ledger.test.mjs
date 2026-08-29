@@ -102,6 +102,26 @@ test("a provider delivery timeout stays uncertain across restarts and is never r
   assert.equal(called, false);
 });
 
+test("an untyped provider exit is uncertain and can never be replayed", async (t) => {
+  const file = fixture(t);
+  const input = { provider: "codex", method: "send", requestId: "provider-exit", threadId: "t-exit" };
+  const first = new SendLedger({ file });
+
+  await assert.rejects(
+    first.run(input, async () => { throw new Error("provider process exited"); }),
+    /provider process exited/,
+  );
+  assert.equal(first.status(input).state, "uncertain");
+
+  const restarted = new SendLedger({ file });
+  let called = false;
+  await assert.rejects(
+    restarted.run(input, async () => { called = true; }),
+    (error) => error.code === "delivery_uncertain",
+  );
+  assert.equal(called, false);
+});
+
 test("delivery status distinguishes absent, accepted, failed, and restart-uncertain requests", async (t) => {
   const file = fixture(t);
   const ledger = new SendLedger({ file });

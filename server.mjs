@@ -54,6 +54,7 @@ const authFailures = new Map();
 const threadSubscriptions = new ThreadSubscriptions({ file: join(APP_HOME, "thread-subscriptions.json") });
 const threadSettingsStore = new ThreadSettingsStore({ file: join(APP_HOME, "thread-settings.json") });
 const usageState = new UsageStateStore({ file: join(APP_HOME, "usage-state.json") });
+const PROJECT_RUN_CANDIDATE_LIMIT = 30;
 let threadSettings = null;
 
 // PWA assets available after the pairing cookie is established.
@@ -757,6 +758,11 @@ function usableProviderEntries() {
   return Object.entries(providers).filter(([name]) => USABLE_PROVIDER_NAMES.has(name));
 }
 
+function scopedProviderEntries(scope) {
+  if (!scope || scope === "all") { return usableProviderEntries(); }
+  return usableProviderEntries().filter(([name]) => name === scope);
+}
+
 function readCodexThreadSettings(threadId) {
   const database = readCodexDbThreadSettings(threadId);
   const rolloutSettings = readCodexRolloutThreadSettings(findRollout(threadId));
@@ -1068,8 +1074,8 @@ function readProjectFile(cwd, p) {
 
 // ---------- routes ----------
 
-async function listThreadsWithState(p, { search, cursor } = {}) {
-  const listed = await p.listThreads({ search, cursor });
+async function listThreadsWithState(p, { search, cursor, limit } = {}) {
+  const listed = await p.listThreads({ search, cursor, limit });
   rememberThreadTitles(p.name, listed.data);
 
   // Whether each thread is mid-turn, read off the CLI's own session file, so
@@ -1100,6 +1106,33 @@ async function listThreadsWithState(p, { search, cursor } = {}) {
     });
     t.running = taskState.running || activeChild;
     t.runConfidence = activeChild && !taskState.running ? "subagent" : taskState.confidence;
+  }
+
+  return listed;
+}
+
+async function listProjectThreadsWithState(p, { search } = {}) {
+  const listed = await p.listThreads({ search, limit: null });
+  rememberThreadTitles(p.name, listed.data);
+  const candidates = [...(listed.data ?? [])]
+    .sort((a, b) => Number(b.updatedAt ?? 0) - Number(a.updatedAt ?? 0))
+    .slice(0, PROJECT_RUN_CANDIDATE_LIMIT);
+  const candidateIds = candidates.flatMap((thread) => [thread.id, ...(thread.subagents ?? []).map((child) => child.id)]);
+  const running = watch.runningDetails(p.name, candidateIds);
+
+  for (const thread of listed.data ?? []) {
+    for (const child of thread.subagents ?? []) {
+      const owned = activeTurns.has(turnKey(p.name, child.id));
+      const state = resolveThreadRunState({ owned, observed: running[child.id], bridgeTerminal: recentBridgeTerminals.get(turnKey(p.name, child.id)) });
+      child.running = state.running;
+      child.runConfidence = state.confidence;
+    }
+
+    const owned = activeTurns.has(turnKey(p.name, thread.id));
+    const activeChild = (thread.subagents ?? []).some((child) => child.running);
+    const state = resolveThreadRunState({ owned, observed: running[thread.id], bridgeTerminal: recentBridgeTerminals.get(turnKey(p.name, thread.id)) });
+    thread.running = state.running || activeChild;
+    thread.runConfidence = activeChild && !state.running ? "subagent" : state.confidence;
   }
 
   return listed;
@@ -1169,8 +1202,14 @@ const routes = {
 
   "GET /api/threads/recent": async (_req, res, url) => {
     const search = url.searchParams.get("search");
+    const providerScope = url.searchParams.get("provider") || "all";
+    const providerEntries = scopedProviderEntries(providerScope);
+
+    if (!providerEntries.length) {
+      return json(res, 400, { error: "provider is unavailable" });
+    }
+
     const decodedCursor = decodeRecentCursor(url.searchParams.get("cursor"));
-    const providerEntries = usableProviderEntries();
     const cursorState = Object.fromEntries(providerEntries.map(([name]) => [name, decodedCursor[name]]));
     const entries = providerEntries.filter(([name]) => cursorState[name] !== false && !recentProviderUnavailable(cursorState[name]));
     const settled = await Promise.allSettled(entries.map(([name, p]) => listThreadsWithState(p, {
@@ -1209,6 +1248,30 @@ const routes = {
       data: ranked.concat(more),
       featuredCount: ranked.length,
       nextCursor: hasMore ? encodeRecentCursor(nextState) : null,
+      unavailableProviders,
+    });
+  },
+
+  "GET /api/threads/projects": async (_req, res, url) => {
+    const providerScope = url.searchParams.get("provider") || "all";
+    const providerEntries = scopedProviderEntries(providerScope);
+
+    if (!providerEntries.length) {
+      return json(res, 400, { error: "provider is unavailable" });
+    }
+
+    const search = url.searchParams.get("search");
+    const settled = await Promise.allSettled(providerEntries.map(([, p]) => listProjectThreadsWithState(p, { search })));
+    const rows = [];
+    const unavailableProviders = [];
+
+    settled.forEach((result, index) => {
+      if (result.status === "fulfilled") { rows.push(...(result.value.data ?? [])); }
+      else { unavailableProviders.push(providerEntries[index][0]); }
+    });
+
+    json(res, 200, {
+      data: rows,
       unavailableProviders,
     });
   },
@@ -1429,6 +1492,14 @@ const routes = {
 
       throw error;
     }
+  },
+
+  "GET /api/usage/snapshot": async (req, res, url) => {
+    const p = providerFromQuery(res, url);
+
+    if (!p) { return; }
+
+    json(res, 200, usageState.merge(p.name, {}));
   },
 
   "GET /api/approvals": async (req, res, url) => {

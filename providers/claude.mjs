@@ -849,7 +849,7 @@ export class ClaudeProvider extends BaseProvider {
     return summaries;
   }
 
-  async listThreads({ search, cursor } = {}) {
+  async listThreads({ search, cursor, limit = PAGE_SIZE } = {}) {
     let all = this.buildSummaries();
 
     if (search) {
@@ -858,9 +858,9 @@ export class ClaudeProvider extends BaseProvider {
     }
 
     const offset = Number(cursor) || 0;
-    const page = all.slice(offset, offset + PAGE_SIZE);
-    const next = offset + PAGE_SIZE;
-    const nextCursor = next < all.length ? String(next) : null;
+    const page = limit == null ? all.slice(offset) : all.slice(offset, offset + limit);
+    const next = limit == null ? all.length : offset + limit;
+    const nextCursor = limit != null && next < all.length ? String(next) : null;
     return { data: page, nextCursor };
   }
 
@@ -1255,10 +1255,17 @@ export class ClaudeProvider extends BaseProvider {
 
       if (session.busy) {
         const error = claudeTurnError(session.stderr || msg);
-        const failure = Object.assign(new Error(error.message), {
-          status: error.code === THREAD_CONFLICT_CODE ? 409 : 500,
-          code: error.code,
-        });
+        const knownConflict = error.code === THREAD_CONFLICT_CODE;
+        const failure = Object.assign(new Error(error.message), knownConflict
+          ? { status: 409, code: error.code }
+          : {
+              // stdin accepted the user frame but the process died before the
+              // message_start acknowledgement. It may already be in Claude's
+              // transcript, so exposing an ordinary Retry could deliver it a
+              // second time.
+              status: 504,
+              code: "delivery_uncertain",
+            });
 
         if (session._rejectTurnAccepted) {
           this.clearAcceptTimer(session);

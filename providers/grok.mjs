@@ -760,7 +760,7 @@ export class GrokProvider extends BaseProvider {
     return summaries;
   }
 
-  async listThreads({ search, cursor } = {}) {
+  async listThreads({ search, cursor, limit = PAGE_SIZE } = {}) {
     let all = this.buildSummaries();
 
     if (search) {
@@ -769,9 +769,9 @@ export class GrokProvider extends BaseProvider {
     }
 
     const offset = Number(cursor) || 0;
-    const page = all.slice(offset, offset + PAGE_SIZE);
-    const next = offset + PAGE_SIZE;
-    const nextCursor = next < all.length ? String(next) : null;
+    const page = limit == null ? all.slice(offset) : all.slice(offset, offset + limit);
+    const next = limit == null ? all.length : offset + limit;
+    const nextCursor = limit != null && next < all.length ? String(next) : null;
     return { data: page, nextCursor };
   }
 

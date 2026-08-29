@@ -140,7 +140,7 @@ test("the authenticated app exposes only providers that passed CLI and login pre
   assert.equal(shell.statusCode, 200);
   assert.match(shell.body, /const AVAILABLE_PROVIDER_NAMES = \["claude"\]/);
   assert.match(shell.body, /Object\.fromEntries\(AVAILABLE_PROVIDER_NAMES/);
-  assert.match(shell.body, /button\.style\.display = PROVIDER_LABELS\[button\.dataset\.provider\]/);
+  assert.match(shell.body, /button\.dataset\.provider === "all" \|\| PROVIDER_LABELS\[button\.dataset\.provider\]/);
 
   const deadCodex = await request("/api/models?provider=codex", { headers: auth });
   assert.equal(deadCodex.statusCode, 400);

@@ -105,8 +105,8 @@ export function groupCodexSummaries(summaries, { search = "", offset = 0, limit 
     if (!q || searchable.includes(q)) { rows.push({ ...summary, subagents }); }
   }
 
-  const page = rows.slice(offset, offset + limit);
-  const nextCursor = rows.length > offset + limit ? String(offset + limit) : null;
+  const page = limit == null ? rows.slice(offset) : rows.slice(offset, offset + limit);
+  const nextCursor = limit != null && rows.length > offset + limit ? String(offset + limit) : null;
   return { data: page, nextCursor };
 }
 
@@ -353,7 +353,10 @@ export class CodexProvider extends BaseProvider {
       console.error(`codex app-server exited (${code}); restarting in 1s`);
 
       for (const [, p] of this.pendingRequests) {
-        p.reject(new Error("codex app-server exited"));
+        const uncertain = p.method === "turn/start" || p.method === "turn/steer";
+        p.reject(Object.assign(new Error("codex app-server exited"), uncertain
+          ? { status: 504, code: "delivery_uncertain" }
+          : {}));
       }
 
       this.pendingRequests.clear();
@@ -387,7 +390,7 @@ export class CodexProvider extends BaseProvider {
     this.child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
 
     return new Promise((resolve, reject) => {
-      this.pendingRequests.set(id, { resolve, reject });
+      this.pendingRequests.set(id, { resolve, reject, method });
       setTimeout(() => {
         if (this.pendingRequests.has(id)) {
           this.pendingRequests.delete(id);
@@ -454,13 +457,20 @@ export class CodexProvider extends BaseProvider {
     child.stdout.on("data", (data) => feed(data));
     child.stderr.on("data", (data) => process.stderr.write(`[codex:${client.threadId || "new"}] ${data}`));
     child.on("error", (error) => {
-      for (const [, pending] of client.pending) { clearTimeout(pending.timer); pending.reject(error); }
+      for (const [, pending] of client.pending) {
+        clearTimeout(pending.timer);
+        const uncertain = pending.method === "turn/start" || pending.method === "turn/steer";
+        pending.reject(Object.assign(error, uncertain ? { status: 504, code: "delivery_uncertain" } : {}));
+      }
       client.pending.clear();
     });
     child.on("exit", (code) => {
       for (const [, pending] of client.pending) {
         clearTimeout(pending.timer);
-        pending.reject(new Error(`codex thread app-server exited (${code})`));
+        const uncertain = pending.method === "turn/start" || pending.method === "turn/steer";
+        pending.reject(Object.assign(new Error(`codex thread app-server exited (${code})`), uncertain
+          ? { status: 504, code: "delivery_uncertain" }
+          : {}));
       }
       client.pending.clear();
 
@@ -515,7 +525,7 @@ export class CodexProvider extends BaseProvider {
             : {}));
         }
       }, this.rpcTimeoutMs);
-      client.pending.set(id, { resolve, reject, timer });
+      client.pending.set(id, { resolve, reject, timer, method });
     });
   }
 
@@ -734,10 +744,10 @@ export class CodexProvider extends BaseProvider {
   // transcript need no auth, no model cache and no MCP servers, but app-server
   // needs all three to start — so routing reads through it made the whole app
   // hang whenever one of them stalled. See codex-rollout.mjs.
-  async listThreads({ search, cursor } = {}) {
+  async listThreads({ search, cursor, limit } = {}) {
     const offset = Number(cursor) || 0;
     const summaries = rollout.listRolloutFiles().map((file) => rollout.summarize(file)).filter(Boolean);
-    return groupCodexSummaries(summaries, { search, offset });
+    return groupCodexSummaries(summaries, { search, offset, limit });
   }
 
   async readThread(id) {

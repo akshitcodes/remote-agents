@@ -4,6 +4,8 @@ import test from "node:test";
 
 const html = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
 const server = readFileSync(new URL("../server.mjs", import.meta.url), "utf8");
+const claudeProvider = readFileSync(new URL("../providers/claude.mjs", import.meta.url), "utf8");
+const codexProvider = readFileSync(new URL("../providers/codex.mjs", import.meta.url), "utf8");
 const onboarding = readFileSync(new URL("../onboarding.mjs", import.meta.url), "utf8");
 const sw = readFileSync(new URL("../public/sw.js", import.meta.url), "utf8");
 
@@ -26,7 +28,9 @@ test("image references survive queue, steer, send, retry, and reload paths", () 
 
 test("failed delivery recovery distinguishes pre-dispatch failures and remains actionable", () => {
   assert.match(html, /messageAttempted = false/);
-  assert.match(html, /messageAttempted && \(e\.code === "delivery_uncertain"/);
+  assert.match(html, /const deliveryMayBeAmbiguous = messageAttempted/);
+  assert.match(html, /const retryId = deliveryMayBeAmbiguous \? null : id/);
+  assert.match(html, /\|\| e\.status >= 500/);
   assert.match(html, /responseInvalid/);
   assert.match(html, /\/api\/send\/status/);
   assert.match(html, /Not sent — Retry, Edit, or Cancel/);
@@ -36,6 +40,14 @@ test("failed delivery recovery distinguishes pre-dispatch failures and remains a
   assert.match(html, /dismiss\.textContent = uncertain \? "Dismiss" : "Cancel"/);
   assert.match(html, /dropFailedSend\(f\.requestId\);\s*bubble\.remove\(\)/);
   assert.match(html, /dropFailedSend\(id\);\s*bubble\.remove\(\)/);
+  assert.match(html, /result\.state === "failed"/);
+  assert.doesNotMatch(html, /result\.state === "not_found" \|\| result\.state === "failed"/);
+  assert.match(html, /legacyRetryWithNewId/);
+  assert.match(html, /retryWithNewId = false/);
+  assert.match(html, /this app will not resend it and risk a duplicate/);
+  assert.match(claudeProvider, /code: "delivery_uncertain"/);
+  assert.match(codexProvider, /p\.method === "turn\/start" \|\| p\.method === "turn\/steer"/);
+  assert.match(codexProvider, /client\.pending\.set\(id, \{ resolve, reject, timer, method \}\)/);
   assert.match(html, /function canSteerPendingEntry\(entry\)/);
   assert.match(html, /entry\.nativeQueue\) \{ return false; \}/);
   assert.match(html, /state\.turnOwnership !== "bridge"/);
@@ -57,7 +69,7 @@ test("stop, draft adoption, and reconnect preserve queue truth", () => {
   assert.match(html, /migrateThreadLocalState\(activeProvider\(\), state\.active\.id, params\.sessionId\)/);
   assert.match(html, /await api\("\/api\/message"[\s\S]*?finishSendProgress\(\);\s*dropFailedSend\(id\)/);
   assert.match(html, /Completion could not be confirmed — check the thread, then tap Retry to try now/);
-  assert.match(html, /Delivery uncertain — check the latest messages, then tap Retry only if needed/);
+  assert.match(html, /Delivery uncertain — check status or dismiss; this app will not resend it/);
   assert.match(html, /p\.bubble\?\.remove\(\)/);
   assert.match(html, /function openPendingEditSheet\(entry\)/);
   assert.match(html, /function removePendingEntry\(entry, \{ flush = true, allowUncertain = false \} = \{\}\)/);
@@ -69,7 +81,7 @@ test("stop, draft adoption, and reconnect preserve queue truth", () => {
   assert.match(html, /awaitingOwnership: !!e\.awaitingOwnership/);
   assert.match(html, /if \(entry\.mayHaveDispatched\) \{/);
   assert.match(html, /state\.pending\.includes\(entry\) \|\| entry\.dispatching \|\| entry\.mayHaveDispatched/);
-  assert.match(html, /e\.code === "delivery_uncertain" \|\| !!e\.reach \|\| !!e\.responseInvalid \|\| !e\.status/);
+  assert.match(html, /e\.code === "delivery_uncertain" \|\| !!e\.reach \|\| !!e\.responseInvalid \|\| !e\.status \|\| e\.status >= 500/);
   assert.match(html, /const external = res\.runtime\?\.source !== "bridge"/);
   assert.match(html, /state\.activeTurnId = external \? null : \(res\.runtime\?\.turnId \?\? state\.activeTurnId\)/);
   assert.match(html, /Queued in Codex — sends automatically when the current turn finishes/);
@@ -121,11 +133,17 @@ test("install onboarding cannot flash before standalone detection finishes", () 
   assert.match(flow, /panel\.hidden = false;\s*panel\.classList\.add\("install-ready"\);/);
 });
 
-test("task list has compact provider-agnostic and provider-specific views", () => {
+test("task list has orthogonal grouping and provider filters", () => {
   assert.match(html, /data-view="recent"/);
-  assert.match(html, /data-view="provider"/);
+  assert.match(html, /data-view="projects"/);
+  assert.match(html, /data-provider="all"/);
+  assert.match(html, /aria-label="Codex"[^>]*><img/);
   assert.match(html, /\/api\/threads\/recent/);
+  assert.match(html, /\/api\/threads\/projects/);
   assert.match(html, /listView === "recent"/);
+  assert.match(html, /providerScope: "all"/);
+  assert.match(html, /function rebuildProjectGroups\(\)/);
+  assert.match(html, /className = "project-head"/);
   assert.match(html, /More sessions/);
   assert.match(html, /Load more sessions/);
   assert.doesNotMatch(html, /class="chip branch"/);
@@ -152,7 +170,7 @@ test("live run-state transitions re-rank Recent Work and reconcile canonical sta
   assert.match(html, /const runningNow = isThreadRunning\(t\)/);
   assert.match(html, /if \(had !== on && live\)[\s\S]*?touchLiveThread\(provider, tid\)[\s\S]*?rerankVisibleRows\(\{ revealRunning: on \}\)[\s\S]*?scheduleListReconcile\(\)/);
   assert.match(html, /function rerankVisibleRows\(\{ revealRunning = false \} = \{\}\)[\s\S]*?state\.threads = rankLiveThreads\(state\.threads, state\.running\)[\s\S]*?revealRunning \? 0 : scrollTop/);
-  assert.match(html, /state\.threads = rankLiveThreads\(state\.threads, state\.running\);[\s\S]*?renderRows\(listView === "provider" && append\)/);
+  assert.match(html, /if \(listView === "projects"\) \{ rebuildProjectGroups\(\); \}[\s\S]*?renderRows\(listView === "recent" && append\)/);
   assert.match(html, /const LIST_RECONCILE_MS = 600/);
   assert.match(html, /listReconcileTimer = setTimeout\([\s\S]*?loadThreads\(false\)\.catch/);
   assert.match(html, /markRunning\(threadProvider, t\.id, !!t\.running, \{ confidence: t\.runConfidence, live: false \}\)/);
@@ -175,11 +193,13 @@ test("quiet and vanished provider turns degrade visibly without unsafe queue dis
 
 test("usage sheet shows account limits for all providers and never thread usage", () => {
   assert.match(html, /data-usage-provider/);
-  assert.match(html, /loadUsageSheet\(button\.dataset\.usageProvider\)/);
-  assert.match(html, /\/api\/usage\?refresh=\$\{refresh \? "1" : "0"\}&provider=/);
+  assert.match(html, /showUsageProvider\(button\.dataset\.usageProvider\)/);
+  assert.match(html, /usageSheetCache = new Map\(\)/);
+  assert.match(html, /\/api\/usage\?refresh=1&provider=/);
+  assert.match(html, /\/api\/usage\/snapshot\?provider=/);
   assert.match(html, /cache: "no-store"/);
-  assert.match(html, /usageRequest\(true, 10000\)/);
-  assert.match(html, /usageRequest\(false, 3000\)/);
+  assert.match(html, /refreshUsageProvider\(provider\)/);
+  assert.match(html, /data-usage-refresh/);
   assert.match(html, /usage_refresh_timeout/);
   assert.match(html, /rateSource === "last-known" \|\| d\._meta\?\.refreshError/);
   assert.match(html, /function remainingPercentOf\(limit\)/);
@@ -195,6 +215,7 @@ test("usage sheet shows account limits for all providers and never thread usage"
   assert.match(html, /dataset\.sheetKind === "usage"/);
   assert.match(server, /const USAGE_REFRESH_TIMEOUT_MS = 10000/);
   assert.match(server, /boundedUsageRefresh\(p\.usage\(\{ refresh:/);
+  assert.match(server, /"GET \/api\/usage\/snapshot"/);
   assert.match(server, /fallback\._meta\.refreshError = true/);
   assert.doesNotMatch(html, /Latest local turn/);
   assert.doesNotMatch(html, /last input tokens/);
@@ -217,6 +238,7 @@ test("desktop workspace keeps session navigation visible and constrains the chat
   assert.match(html, /body\.thread-open #app[\s\S]*?grid-template-columns: clamp\(310px, 24vw, 380px\) minmax\(0, 1fr\)/);
   assert.match(html, /body\.thread-open #listView[\s\S]*?display: block !important/);
   assert.match(html, /body\.thread-open #transcript,[\s\S]*?width: min\(calc\(100% - 32px\), 70vw, 1100px\)/);
+  assert.match(html, /body\.thread-open header \.htext[\s\S]*?left: clamp\(310px, 24vw, 380px\)[\s\S]*?right: 0[\s\S]*?text-align: center/);
   assert.match(html, /body\.thread-open\.sidebar-collapsed #app \{ grid-template-columns: 0 minmax\(0, 1fr\); \}/);
   assert.match(html, /body\.thread-open\.sidebar-collapsed #listView[\s\S]*?visibility: hidden/);
   assert.match(html, /id="sidebarToggleBtn"[\s\S]*?aria-expanded="true"/);
@@ -225,8 +247,9 @@ test("desktop workspace keeps session navigation visible and constrains the chat
   assert.match(html, /border-left: 0;[\s\S]*?border-right: 0;/);
   assert.match(html, /body\.thread-open #backBtn \{ display: none !important; \}/);
   assert.match(html, /body\.thread-open #viewSeg,[\s\S]*?body\.thread-open #newBtn \{ display: flex !important; \}/);
-  assert.match(html, /id="sidebarTools"[\s\S]*?id="viewSeg"/);
+  assert.match(html, /id="sidebarHead"[\s\S]*?id="viewSeg"[\s\S]*?id="providerSeg"/);
   assert.match(html, /id="searchRow"[\s\S]*?id="search"[\s\S]*?id="newBtn"/);
+  assert.match(html, /id="newBtn"[^>]*aria-label="New chat"/);
   assert.match(html, /<aside id="listView" aria-label="Agent sessions">/);
   assert.match(html, /<main id="chatView" aria-label="Selected agent conversation">/);
   assert.match(html, /className = "row" \+ \(selected \? " active-thread" : ""\)/);
@@ -237,7 +260,7 @@ test("desktop workspace keeps session navigation visible and constrains the chat
   assert.match(html, /event\.key === "Escape"/);
   assert.match(server, /const body = renderIndexHtml\(req\.headers\["user-agent"\][\s\S]*?return res\.end\(body\)/);
   assert.match(onboarding, /const readIndexShell = createIndexShellReader\(indexHtmlPath\)/);
-  assert.match(sw, /const CACHE_VERSION = "remote-agents-v19"/);
+  assert.match(sw, /const CACHE_VERSION = "remote-agents-v20"/);
 });
 
 test("Codex write access stays provider-specific and retryable after a conflict", () => {
@@ -282,7 +305,7 @@ test("composer settings fail closed and distinguish confirmed values from next-t
   assert.match(html, /Keep provider-managed policy/);
   assert.match(html, /class="opt opt-button/);
   assert.match(html, /threadProvider !== state\.modelsProvider/);
-  assert.match(html, /if \(!state\.active\) \{ await initModels\(name\); \}/);
+  assert.match(html, /if \(!state\.active && name !== "all"\) \{ await initModels\(name\); \}/);
   assert.match(html, /function openUsageSheet\(\)[\s\S]*?const provider = activeProvider\(\)/);
   assert.match(server, /validateDispatchSettings\(provider\.name, body, listed, recorded, capabilities\)/);
   assert.match(server, /validateNewThreadModel\(p\.name, body\.model, listed\)/);

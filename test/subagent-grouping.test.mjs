@@ -59,6 +59,9 @@ test("group pagination counts parent tasks, not child rollouts", () => {
   assert.equal(first.data.length, 25);
   assert.equal(first.nextCursor, "25");
   assert.equal(groupCodexSummaries(rows, { offset: 25 }).data.length, 2);
+  const complete = groupCodexSummaries(rows, { limit: null });
+  assert.equal(complete.data.length, 27);
+  assert.equal(complete.nextCursor, null);
 });
 
 test("an omitted HTTP search parameter does not become the literal query null", () => {

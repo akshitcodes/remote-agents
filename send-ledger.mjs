@@ -147,7 +147,13 @@ export class SendLedger {
 
       return result;
     } catch (error) {
-      const uncertain = error?.code === "delivery_uncertain";
+      // Once `operation` has started, only an explicit client/provider refusal
+      // proves that no message was accepted. An untyped exception or 5xx can
+      // happen after stdin/RPC delivery but before our acknowledgement; making
+      // those retryable is how one user action becomes two provider prompts.
+      const uncertain = error?.code === "delivery_uncertain"
+        || error?.status == null
+        || error.status >= 500;
       this.entries.set(key, {
         key,
         provider: provider || "codex",

@@ -45,6 +45,9 @@
   .hbtn { background: none; border: none; color: var(--accent2); font-size: 15px; padding: 6px; cursor: pointer; display: flex; align-items: center; justify-content: center; border-radius: 8px; }
   .hbtn:active { background: var(--bg3); }
   #backBtn { font-size: 26px; padding: 0 4px; display: none; }
+  #sidebarHead { display: flex; align-items: center; gap: 7px; min-width: 0; flex: 1; }
+  body:not(.thread-open) header .htext { display: none; }
+  body.thread-open #sidebarHead { display: none; }
   #sidebarToggleBtn { display: none; color: var(--fg-dim); }
   #sidebarToggleBtn svg path:last-child { transform-origin: center; transition: transform .18s ease; }
   #sidebarToggleBtn.collapsed svg path:last-child { transform: rotate(180deg); }
@@ -54,11 +57,13 @@
   #tokCount { font-size: 11px; color: var(--fg-dim); white-space: nowrap; }
   #offlinePill { display: none; font-size: 10px; font-weight: 600; color: var(--warn); background: #d2992222; border: 1px solid var(--warn); border-radius: 20px; padding: 2px 8px; white-space: nowrap; }
   body.offline #offlinePill { display: inline-block; }
+  @media (max-width: 480px) {
+    body:not(.thread-open) #offlinePill { display: none; }
+  }
 
   /* list view */
   #listView { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; }
   #searchWrap { padding: 10px 12px 9px; position: sticky; top: 0; background: #0d1117f2; backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); z-index: 2; border-bottom: 1px solid #ffffff08; }
-  #sidebarTools { display: flex; align-items: center; justify-content: flex-start; margin-bottom: 9px; }
   #searchRow { display: flex; align-items: center; gap: 8px; }
   #search { flex: 1; min-width: 0; width: auto; padding: 9px 13px; border-radius: 11px; border: 1px solid var(--border); background: #161b22cc; color: var(--fg); font-size: 16px; outline: none; box-shadow: inset 0 1px 0 #ffffff08; }
   #search:focus { border-color: #58a6ff88; box-shadow: 0 0 0 3px #58a6ff16; }
@@ -70,7 +75,10 @@
   #viewSeg { display: flex; flex-shrink: 0; gap: 1px; margin: 0; padding: 2px; border: 1px solid var(--border); border-radius: 9px; background: #0d111788; }
   #viewSeg button { min-height: 24px; border: 0; border-radius: 7px; padding: 2px 7px; background: transparent; color: var(--fg-dim); font: inherit; font-size: 10.5px; font-weight: 650; white-space: nowrap; cursor: pointer; }
   #viewSeg button.on { background: var(--bg3); color: var(--fg); box-shadow: inset 0 1px 0 #ffffff0d; }
-  #providerSeg { display: none; }
+  #providerSeg { display: flex; flex-shrink: 0; width: auto; margin: 0; gap: 1px; padding: 2px; border-radius: 9px; }
+  #providerSeg button { flex: 0 0 28px; width: 28px; height: 28px; padding: 5px; border-radius: 7px; display: inline-flex; align-items: center; justify-content: center; }
+  #providerSeg button img, #providerSeg button svg { width: 17px; height: 17px; display: block; }
+  #providerSeg button img { object-fit: contain; }
   .chip.prov { width: 19px; height: 19px; flex: 0 0 19px; display: inline-flex; align-items: center; justify-content: center; padding: 2px; border-radius: 6px; background: var(--bg3); }
   .chip.prov img { width: 100%; height: 100%; display: block; object-fit: contain; border-radius: 4px; }
   .row { padding: 8px 12px; border-bottom: 1px solid #21262dcc; cursor: pointer; transition: background .12s ease; }
@@ -88,6 +96,13 @@
   .row-action.expanded .chevron { transform: rotate(90deg); }
   .section-divider { display: flex; align-items: center; gap: 9px; padding: 12px 12px 6px; color: var(--fg-faint); font-size: 10.5px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; }
   .section-divider::after { content: ""; height: 1px; flex: 1; background: var(--bg3); }
+  .project-head { width: 100%; border: 0; border-bottom: 1px solid #21262dcc; background: #0d1117; color: var(--fg); padding: 11px 12px 8px; display: flex; align-items: center; gap: 8px; text-align: left; cursor: pointer; position: sticky; top: 58px; z-index: 1; }
+  .project-head:hover { background: #131820; }
+  .project-head .project-chev { color: var(--fg-faint); transform: rotate(90deg); transition: transform .15s ease; }
+  .project-head.collapsed .project-chev { transform: rotate(0); }
+  .project-head .project-name { flex: 1; min-width: 0; font-size: 13px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .project-head .project-count { color: var(--fg-faint); font-size: 10.5px; white-space: nowrap; }
+  .project-head .project-running { color: var(--accent); }
   .subagents { display: none; margin: 10px 0 0 16px; border-left: 2px solid var(--border); padding-left: 9px; }
   .subagents.open { display: block; }
   .subagent-row { width: 100%; min-height: 44px; display: flex; align-items: center; gap: 8px; padding: 9px 8px; border: 0; border-radius: 9px; background: transparent; color: inherit; text-align: left; font: inherit; cursor: pointer; }
@@ -392,12 +407,39 @@
   .stat .k { font-size: 11.5px; color: var(--fg-dim); margin-top: 2px; }
   .credit { display: flex; gap: 9px; align-items: center; background: #2ea04314; border: 1px solid var(--accent); border-radius: 10px; padding: 10px 12px; margin-top: 6px; font-size: 13px; }
   .usage-seg { margin: 10px 0 14px; }
+  .usage-title-row { display: flex; align-items: center; gap: 8px; }
+  .usage-title-row h2 { flex: 1; margin: 0; }
+  .usage-refresh { width: 34px; height: 34px; border: 0; border-radius: 9px; background: var(--bg3); color: var(--fg-dim); display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+  .usage-refresh:hover { color: var(--fg); }
+  .usage-refresh svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; }
+  .usage-refresh.spinning svg { animation: spin .8s linear infinite; }
   .usage-note { background: #1f6feb12; border: 1px solid #388bfd55; border-radius: 10px; padding: 10px 12px; margin: 8px 0 12px; color: var(--fg-dim); font-size: 12.5px; line-height: 1.4; }
 
   /* Laptop workspace: keep navigation in view and bound the reading measure.
      Mobile still uses the original full-screen list -> chat navigation below
      this breakpoint, including its back button and safe-area spacing. */
   @media (min-width: 960px) {
+    body.thread-open header { gap: 0; position: relative; }
+    body.thread-open #sidebarHead {
+      display: flex;
+      width: calc(clamp(310px, 24vw, 380px) - 18px);
+      padding-right: 12px;
+      flex: 0 0 auto;
+      transition: width .2s ease;
+    }
+    body.thread-open.sidebar-collapsed #sidebarHead { width: 34px; padding-right: 0; }
+    body.thread-open.sidebar-collapsed #sidebarHead #viewSeg,
+    body.thread-open.sidebar-collapsed #sidebarHead #providerSeg { display: none !important; }
+    body.thread-open header .htext {
+      position: absolute;
+      left: clamp(310px, 24vw, 380px);
+      right: 0;
+      padding: 0 170px;
+      text-align: center;
+      pointer-events: none;
+    }
+    body.thread-open.sidebar-collapsed header .htext { left: 0; }
+    body.thread-open #notifyBtn { margin-left: auto; }
     body.thread-open #app {
       display: grid;
       grid-template-columns: clamp(310px, 24vw, 380px) minmax(0, 1fr);
@@ -410,6 +452,7 @@
     body.thread-open #backBtn { display: none !important; }
     body.thread-open #sidebarToggleBtn { display: flex; }
     body.thread-open #viewSeg,
+    body.thread-open #providerSeg,
     body.thread-open #usageBtn,
     body.thread-open #newBtn { display: flex !important; }
     body.thread-open #listView {
@@ -497,7 +540,19 @@
 <div id="app">
   <header>
     <button id="backBtn" class="hbtn" aria-label="Back">‹</button>
-    <button id="sidebarToggleBtn" class="hbtn icon" aria-label="Hide session sidebar" aria-expanded="true" title="Hide session sidebar"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM9 5v14"/><path d="M14 9l-3 3 3 3"/></svg></button>
+    <div id="sidebarHead">
+      <button id="sidebarToggleBtn" class="hbtn icon" aria-label="Hide session sidebar" aria-expanded="true" title="Hide session sidebar"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM9 5v14"/><path d="M14 9l-3 3 3 3"/></svg></button>
+      <div id="viewSeg" role="group" aria-label="Session grouping">
+        <button data-view="recent" class="on">Recent</button>
+        <button data-view="projects">Projects</button>
+      </div>
+      <div class="seg" id="providerSeg" role="group" aria-label="Agent filter">
+        <button data-provider="all" class="on" aria-label="All agents" title="All agents" aria-pressed="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="7" cy="7" r="2.5"/><circle cx="17" cy="7" r="2.5"/><circle cx="7" cy="17" r="2.5"/><circle cx="17" cy="17" r="2.5"/></svg></button>
+        <button data-provider="codex" aria-label="Codex" title="Codex" aria-pressed="false" style="display:none"><img src="/icons/provider-codex.svg" alt=""></button>
+        <button data-provider="claude" aria-label="Claude" title="Claude" aria-pressed="false" style="display:none"><img src="/icons/provider-claude.svg" alt=""></button>
+        <button data-provider="grok" aria-label="Grok" title="Grok" aria-pressed="false" style="display:none"><img src="/icons/provider-grok.svg" alt=""></button>
+      </div>
+    </div>
     <div class="htext">
       <div class="title" id="hTitle">Codex Sessions</div>
       <div class="sub" id="hSub"></div>
@@ -513,22 +568,12 @@
 
   <aside id="listView" aria-label="Agent sessions">
     <div id="searchWrap">
-      <div id="sidebarTools">
-        <div id="viewSeg" aria-label="Session view">
-          <button data-view="recent" class="on">Recent</button>
-          <button data-view="provider">Agents</button>
-        </div>
-      </div>
-      <div class="seg" id="providerSeg">
-        <button data-provider="codex" class="on" aria-pressed="true" style="display:none">Codex</button>
-        <button data-provider="claude" aria-pressed="false" style="display:none">Claude</button>
-        <button data-provider="grok" aria-pressed="false" style="display:none">Grok</button>
-      </div>
       <div id="searchRow">
         <input id="search" type="search" placeholder="Search sessions…" autocomplete="off">
-        <button id="newBtn" class="hbtn icon" aria-label="New session" title="New session"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+        <button id="newBtn" class="hbtn icon" aria-label="New chat" title="New chat"><svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L8 18l-4 1 1-4z"/></svg></button>
       </div>
     </div>
+    <div id="listNotice" class="usage-note" role="status" style="display:none;margin:8px 12px"></div>
     <div id="rows"></div>
     <button id="loadMore" style="display:none">Load more</button>
   </aside>
@@ -909,11 +954,14 @@ async function copyCodeBlock(button) {
 
 const state = {
   provider: "codex",         // codex | claude
-  listView: "recent",        // recent | provider
+  providerScope: "all",      // all | codex | claude | grok
+  listView: "recent",        // recent | projects
   sidebarCollapsed: false,
   listRequestSeq: 0,
   unavailableProviders: [],
   featuredCount: 0,
+  projectGroups: [],
+  collapsedProjects: new Set(),
   threads: [], nextCursor: null,
   active: null, activeTurnId: null,
   items: new Map(),          // itemId -> {kind, el, bodyEl}
@@ -1267,8 +1315,10 @@ function trimThreadForCache(thread) {
 
 function setOfflineNote(on, reach) {
   document.body.classList.toggle("offline", !!on);
-
-  if (on) { $("offlinePill").textContent = effectiveReach(reach) === "host" ? "Mac offline" : "Offline"; }
+  const label = on ? (effectiveReach(reach) === "host" ? "Mac offline" : "Offline") : "Connected";
+  if (on) { $("offlinePill").textContent = label; }
+  $("connDot").title = label;
+  $("connDot").setAttribute("aria-label", label);
 }
 
 // ---------- helpers ----------
@@ -1363,12 +1413,53 @@ function liveRunText(confidence) {
     : "Running — following live";
 }
 
+function rebuildProjectGroups() {
+  const byPath = new Map();
+
+  for (const thread of state.threads) {
+    const path = String(thread.cwd ?? "").trim();
+    const key = path || "__unknown_project__";
+    const name = path ? path.split(/[\\/]/).filter(Boolean).pop() || path : "Other sessions";
+    const group = byPath.get(key) ?? { key, path: path || null, name, threads: [], running: false, updatedAt: 0 };
+    group.threads.push(thread);
+    group.running ||= isThreadRunning(thread);
+    group.updatedAt = Math.max(group.updatedAt, Number(thread.updatedAt ?? 0));
+    byPath.set(key, group);
+  }
+
+  const groups = [...byPath.values()];
+  const nameCounts = new Map();
+  for (const group of groups) { nameCounts.set(group.name, (nameCounts.get(group.name) ?? 0) + 1); }
+  for (const group of groups) {
+    group.displayName = group.path && nameCounts.get(group.name) > 1
+      ? group.path.split(/[\\/]/).filter(Boolean).slice(-2).join("/")
+      : group.name;
+  }
+
+  state.projectGroups = groups
+    .map((group) => ({ ...group, threads: rankLiveThreads(group.threads, state.running) }))
+    .sort((a, b) => Number(a.key === "__unknown_project__") - Number(b.key === "__unknown_project__")
+      || Number(b.running) - Number(a.running) || b.updatedAt - a.updatedAt || a.name.localeCompare(b.name) || String(a.path ?? "").localeCompare(String(b.path ?? "")));
+  state.threads = state.projectGroups.flatMap((group) => group.threads);
+}
+
 function renderRows(append) {
   const rows = $("rows");
 
   if (!append) { rows.innerHTML = ""; }
 
-  const start = append ? rows.children.length : 0;
+  const start = append ? rows.querySelectorAll(".row").length : 0;
+  const projectStarts = new Map();
+  const projectByThread = new Map();
+
+  if (state.listView === "projects") {
+    let projectIndex = 0;
+    for (const group of state.projectGroups) {
+      projectStarts.set(projectIndex, group);
+      for (const thread of group.threads) { projectByThread.set(threadRuleKey(thread.provider, thread.id), group); }
+      projectIndex += group.threads.length;
+    }
+  }
 
   for (let index = start; index < state.threads.length; index += 1) {
     if (state.listView === "recent" && index === state.featuredCount && index > 0) {
@@ -1378,12 +1469,37 @@ function renderRows(append) {
       rows.appendChild(divider);
     }
 
+    const project = projectStarts.get(index);
+    if (project) {
+      const collapsed = state.collapsedProjects.has(project.key);
+      const runningCount = project.threads.filter((thread) => isThreadRunning(thread)).length;
+      const header = document.createElement("button");
+      header.type = "button";
+      header.className = "project-head" + (collapsed ? " collapsed" : "");
+      header.title = project.path || project.name;
+      header.innerHTML = `<span aria-hidden="true">📁</span><span class="project-chev" aria-hidden="true">›</span><span class="project-name"></span><span class="project-count ${runningCount ? "project-running" : ""}"></span>`;
+      header.querySelector(".project-name").textContent = project.displayName || project.name;
+      header.querySelector(".project-count").textContent = runningCount ? `${runningCount} running · ${project.threads.length}` : `${project.threads.length}`;
+      header.setAttribute("aria-expanded", String(!collapsed));
+      header.onclick = () => {
+        if (state.collapsedProjects.has(project.key)) { state.collapsedProjects.delete(project.key); }
+        else { state.collapsedProjects.add(project.key); }
+        renderRows(false);
+      };
+      rows.appendChild(header);
+    }
+
     const t = state.threads[index];
+    const threadProject = projectByThread.get(threadRuleKey(t.provider, t.id));
     const div = document.createElement("div");
     const selected = !!state.active && (state.active.parentThreadId || state.active.id) === t.id && activeProvider() === (t.provider || "codex");
     div.className = "row" + (selected ? " active-thread" : "");
     div.dataset.tid = t.id;
     div.dataset.provider = t.provider || "codex";
+    if (threadProject) {
+      div.dataset.project = threadProject.key;
+      div.hidden = state.collapsedProjects.has(threadProject.key);
+    }
     const dir = (t.cwd || "").split("/").pop() || "";
     const runningNow = isThreadRunning(t);
     const runState = runPresentation(runningNow, state.runConfidence.get(runKey(t.provider, t.id)) ?? t.runConfidence);
@@ -1410,7 +1526,7 @@ function renderRows(append) {
     providerMark.title = providerName;
     providerMark.setAttribute("role", "img");
     providerMark.setAttribute("aria-label", providerName);
-    providerMark.style.display = state.listView === "recent" ? "inline-flex" : "none";
+    providerMark.style.display = state.providerScope === "all" ? "inline-flex" : "none";
     div.querySelector(".dir").textContent = "📁 " + dir;
 
     div.querySelector(".time").textContent = relTime(t.updatedAt);
@@ -1472,25 +1588,26 @@ function renderRows(append) {
 
   if (!state.threads.length) { rows.innerHTML = '<div class="empty">No sessions found</div>'; }
 
-  $("loadMore").textContent = state.listView === "recent" ? "Load more sessions" : "Load more";
-  $("loadMore").style.display = state.nextCursor ? "block" : "none";
+  $("loadMore").textContent = "Load more sessions";
+  $("loadMore").style.display = state.listView === "recent" && state.nextCursor ? "block" : "none";
 }
 
 async function loadThreads(append) {
   const q = new URLSearchParams();
   const search = $("search").value.trim();
   const provider = state.provider;
+  const providerScope = state.providerScope;
   const listView = state.listView;
   const requestSeq = ++state.listRequestSeq;
 
-  if (listView === "provider") { q.set("provider", provider); }
+  q.set("provider", providerScope);
 
   if (append && state.nextCursor) { q.set("cursor", state.nextCursor); }
 
   if (search) { q.set("search", search); }
 
   try {
-    const path = listView === "recent" ? "/api/threads/recent?" : "/api/threads?";
+    const path = listView === "recent" ? "/api/threads/recent?" : "/api/threads/projects?";
     let res;
 
     try {
@@ -1500,50 +1617,68 @@ async function loadThreads(append) {
       // process is restarted (we never restart over active turns). Older
       // bridges do not have the aggregate endpoint yet, so fan out through the
       // existing provider endpoint until the process can be upgraded safely.
-      if (listView !== "recent" || error.status !== 404) { throw error; }
+      if (error.status !== 404) { throw error; }
+      if (listView === "projects") {
+        throw Object.assign(new Error("Projects needs the current bridge version. Running agents were left untouched; restart the bridge when they are idle."), { code: "bridge_update_required" });
+      }
 
-      const providerResults = await Promise.allSettled(Object.keys(PROVIDER_LABELS).map(async (name) => {
-        const providerQuery = new URLSearchParams(q);
+      const providerNames = providerScope === "all" ? Object.keys(PROVIDER_LABELS) : [providerScope];
+      const providerResults = await Promise.allSettled(providerNames.map(async (name) => {
+        const data = [];
+        let cursor = null;
+
+        const providerQuery = new URLSearchParams();
         providerQuery.set("provider", name);
-        return { name, result: await api("/api/threads?" + providerQuery) };
+        if (search) { providerQuery.set("search", search); }
+        const page = await api("/api/threads?" + providerQuery);
+        data.push(...(page.data ?? []));
+        cursor = page.nextCursor ?? null;
+
+        return { name, data, nextCursor: cursor };
       }));
       const groups = [];
       const unavailableProviders = [];
 
-      const providerNames = Object.keys(PROVIDER_LABELS);
-
       for (let index = 0; index < providerResults.length; index += 1) {
         const result = providerResults[index];
 
-        if (result.status === "fulfilled") { groups.push(result.value.result.data ?? []); }
+        if (result.status === "fulfilled") { groups.push(result.value.data); }
         else { unavailableProviders.push(providerNames[index]); }
       }
 
-      res = {
-        data: groups.flat().sort((a, b) => Number(!!b.running) - Number(!!a.running) || Number(b.updatedAt ?? 0) - Number(a.updatedAt ?? 0)),
-        featuredCount: Math.min(10, groups.flat().length),
-        nextCursor: null,
-        unavailableProviders,
-      };
+      let data = groups.flat().sort((a, b) => Number(!!b.running) - Number(!!a.running) || Number(b.updatedAt ?? 0) - Number(a.updatedAt ?? 0));
+      if (providerScope !== "all") { data = data.filter((thread) => (thread.provider || "codex") === providerScope); }
+      res = { data, featuredCount: Math.min(10, data.length), nextCursor: null, unavailableProviders };
+    }
+
+    // Bridges before provider scoping accepted this query parameter but ignored
+    // it. Filter again in the client so an upgraded shell never lies about its
+    // visible scope while a safe bridge restart is deferred.
+    if (listView === "recent" && providerScope !== "all") {
+      res = { ...res, data: (res.data ?? []).filter((thread) => (thread.provider || "codex") === providerScope) };
     }
 
     // A view/provider/search switch can finish requests out of order. Only the
     // newest request may update the list.
-    if (requestSeq !== state.listRequestSeq || state.listView !== listView || (listView === "provider" && state.provider !== provider)) { return; }
+    if (requestSeq !== state.listRequestSeq || state.listView !== listView || state.providerScope !== providerScope) { return; }
 
     if (append && listView === "recent") {
       const existing = new Set(state.threads.map((thread) => `${thread.provider}:${thread.id}`));
       state.threads = state.threads.concat((res.data ?? []).filter((thread) => !existing.has(`${thread.provider}:${thread.id}`)));
-    } else {
+    } else if (listView === "recent") {
       state.threads = append ? state.threads.concat(res.data) : res.data;
+      state.projectGroups = [];
+    } else {
+      state.threads = res.data ?? [];
+      state.projectGroups = [];
     }
-    state.nextCursor = res.nextCursor;
+    state.nextCursor = listView === "recent" ? res.nextCursor : null;
     if (!append) { state.featuredCount = listView === "recent" ? (res.featuredCount ?? Math.min(10, res.data?.length ?? 0)) : 0; }
     state.unavailableProviders = res.unavailableProviders ?? [];
 
     // The server read each thread's run state off disk, which is the only way to
     // know about turns that were already under way before this app connected.
-    for (const t of res.data ?? []) {
+    for (const t of (listView === "projects" ? state.threads : res.data ?? [])) {
       const ourTurn = state.active && t.id === state.active.id && state.busy && !state.externalTurn;
       const threadProvider = t.provider || provider;
 
@@ -1558,24 +1693,34 @@ async function loadThreads(append) {
     // running set immediately before painting so an older response can never
     // put a now-running task back in its previous position. This is an invariant
     // in both Recent Work and the provider-specific Agents view.
-    state.threads = rankLiveThreads(state.threads, state.running);
+    if (listView === "projects") { rebuildProjectGroups(); }
+    else { state.threads = rankLiveThreads(state.threads, state.running); }
 
     const previousListTop = $("listView").scrollTop;
-    renderRows(listView === "provider" && append);
+    renderRows(listView === "recent" && append);
     if (listView === "recent" && append) { $("listView").scrollTop = previousListTop; }
     updateListChrome();
     setOfflineNote(false);
 
     // Cache the first page (no search) so the list renders offline.
-    if (!append && !search) { idbSet(listCacheKey(listView === "recent" ? "recent" : provider), { data: res.data, nextCursor: res.nextCursor, featuredCount: state.featuredCount }); }
+    if (!append && !search) { idbSet(listCacheKey(`${listView}:${providerScope}`), { data: state.threads, groups: state.projectGroups, nextCursor: state.nextCursor, featuredCount: state.featuredCount }); }
   } catch (e) {
     // Offline / unreachable — fall back to the last cached copy of this view.
     if (append || search) { throw e; }
 
-    const cached = await idbGet(listCacheKey(listView === "recent" ? "recent" : provider));
+    if (e.code === "bridge_update_required") {
+      state.unavailableProviders = [];
+      $("listNotice").style.display = "block";
+      $("listNotice").textContent = e.message;
+      $("rows").innerHTML = '<div class="empty">Projects will be available after the safe bridge refresh.</div>';
+      return;
+    }
 
-    if (cached?.data && requestSeq === state.listRequestSeq && state.listView === listView && (listView === "recent" || state.provider === provider)) {
+    const cached = await idbGet(listCacheKey(`${listView}:${providerScope}`));
+
+    if (cached?.data && requestSeq === state.listRequestSeq && state.listView === listView && state.providerScope === providerScope) {
       state.threads = cached.data;
+      state.projectGroups = cached.groups ?? [];
       state.nextCursor = null;
       state.featuredCount = listView === "recent" ? (cached.featuredCount ?? Math.min(10, cached.data.length)) : 0;
       state.unavailableProviders = [];
@@ -1583,28 +1728,35 @@ async function loadThreads(append) {
       updateListChrome();
       setOfflineNote(true, e.reach);
     } else {
-      const label = listView === "recent" ? "recent work" : providerLabel();
-      $("rows").innerHTML = '<div class="empty">' + offlineWord(e.reach) + " — no saved sessions for " + esc(label) + ".</div>";
+      const label = listView === "recent" ? "recent work" : "projects";
+      $("rows").innerHTML = '<div class="empty">' + esc(offlineWord(e.reach) + " — no saved sessions for " + label + ".") + "</div>";
     }
   }
 }
 
 function updateListChrome() {
-  const recent = state.listView === "recent";
-  $("providerSeg").style.display = recent ? "none" : "flex";
-  $("search").placeholder = recent ? "Search all agents…" : "Search " + providerLabel() + "…";
+  const scopeLabel = state.providerScope === "all" ? "all agents" : (PROVIDER_LABELS[state.providerScope] || "agent");
+  $("providerSeg").style.display = "flex";
+  $("search").placeholder = state.listView === "projects"
+    ? state.providerScope === "all" ? "Search projects…" : `Search ${scopeLabel} projects…`
+    : `Search ${scopeLabel}…`;
   $("viewSeg").querySelectorAll("[data-view]").forEach((button) => {
     const selected = button.dataset.view === state.listView;
     button.classList.toggle("on", selected);
     button.setAttribute("aria-pressed", String(selected));
   });
+  const notice = $("listNotice");
+  notice.style.display = state.unavailableProviders.length ? "block" : "none";
+  notice.textContent = state.unavailableProviders.length
+    ? "Some sessions may be missing: " + state.unavailableProviders.map((p) => PROVIDER_LABELS[p] || p).join(", ") + " could not be refreshed."
+    : "";
 
   // On desktop the list remains a live sidebar while a conversation is open.
   // Keep its filters accurate without replacing the chat title in the header.
   if (state.active) { return; }
 
   $("viewSeg").style.display = "flex";
-  $("hTitle").textContent = recent ? "All Sessions" : providerLabel() + " Sessions";
+  $("hTitle").textContent = state.listView === "projects" ? "Projects" : "Recent Sessions";
   $("hSub").textContent = state.unavailableProviders.length
     ? "Partial sync · " + state.unavailableProviders.map((p) => PROVIDER_LABELS[p] || p).join(", ") + " unavailable"
     : "";
@@ -1627,17 +1779,18 @@ function toggleSidebar(forceExpanded = false) {
 
 function syncProviderSeg() {
   $("providerSeg").querySelectorAll("[data-provider]").forEach((button) => {
-    const selected = button.dataset.provider === state.provider;
+    const selected = button.dataset.provider === state.providerScope;
     button.classList.toggle("on", selected);
     button.setAttribute("aria-pressed", String(selected));
   });
 }
 
 async function switchListView(view) {
-  if (!['recent', 'provider'].includes(view) || view === state.listView) { return; }
+  if (!['recent', 'projects'].includes(view) || view === state.listView) { return; }
 
   state.listView = view;
   state.threads = [];
+  state.projectGroups = [];
   state.nextCursor = null;
   state.featuredCount = 0;
   state.unavailableProviders = [];
@@ -2978,20 +3131,22 @@ function backToList() {
 }
 
 async function switchProvider(name) {
-  if (!PROVIDER_LABELS[name] || name === state.provider) { return; }
+  if (name !== "all" && !PROVIDER_LABELS[name] || name === state.providerScope) { return; }
 
-  state.provider = name;
+  state.providerScope = name;
+  if (name !== "all") { state.provider = name; }
   persistPrefs();
   syncProviderSeg();
   updateListChrome();
   state.threads = [];
+  state.projectGroups = [];
   state.nextCursor = null;
   $("search").value = "";
   $("rows").innerHTML = '<div class="empty">Loading…</div>';
 
   // On desktop this is a sidebar filter while a task remains open. Do not let
   // browsing Claude/Grok sessions replace the active task's composer catalog.
-  if (!state.active) { await initModels(name); }
+  if (!state.active && name !== "all") { await initModels(name); }
   loadThreads(false);
 }
 
@@ -3201,7 +3356,7 @@ function savePending() {
       attachments: e.attachments ?? [],
       requestId: e.requestId || newRequestId(),
       retryRequired: !!e.retryRequired,
-      retryWithNewId: !!e.retryWithNewId,
+      retryWithNewId: false,
       retryAsSteer: !!e.retryAsSteer,
       awaitingOwnership: !!e.awaitingOwnership,
       intendedSendMode: e.intendedSendMode ?? null,
@@ -3425,14 +3580,18 @@ function restorePending() {
     const attachments = Array.isArray(raw?.attachments) ? raw.attachments : [];
     const requestId = raw?.requestId || newRequestId();
     const savedRetryRequired = !!raw?.retryRequired;
-    const retryWithNewId = !!raw?.retryWithNewId;
+    // Pre-0.4.4 clients used this flag to mint a fresh request id after an
+    // ambiguous response. Preserve only its meaning (delivery may have
+    // happened), never the unsafe retry behaviour itself.
+    const legacyRetryWithNewId = !!raw?.retryWithNewId;
+    const retryWithNewId = false;
     const retryAsSteer = !!raw?.retryAsSteer;
     const awaitingOwnership = !!raw?.awaitingOwnership;
     const intendedSendMode = raw?.intendedSendMode ?? null;
     const viaCodexQueue = !!raw?.viaCodexQueue;
     const nativeQueue = !!raw?.nativeQueue;
     const nativeQueueId = raw?.nativeQueueId ?? null;
-    const mayHaveDispatched = !!raw?.mayHaveDispatched || (savedRetryRequired && retryWithNewId);
+    const mayHaveDispatched = !!raw?.mayHaveDispatched || (savedRetryRequired && legacyRetryWithNewId);
     const retryRequired = savedRetryRequired || (mayHaveDispatched && !nativeQueue);
 
     if (!text && !attachments.length) { continue; }
@@ -3449,7 +3608,7 @@ function restorePending() {
     const c = chip(
       retryRequired ? "⚠️" : "⏳",
       uncertain
-        ? "Delivery uncertain — check the latest messages, then tap Retry only if needed"
+        ? "Delivery uncertain — check status or dismiss; this app will not resend it"
         : retryRequired
           ? "Not sent — tap Retry"
           : nativeQueue
@@ -3558,6 +3717,13 @@ async function reconcileNativeCodexQueue(target = state.active) {
 }
 
 async function retryPendingEntry(entry) {
+  if (entry.mayHaveDispatched || entry.retryWithNewId) {
+    entry.retryWithNewId = false;
+    entry.mayHaveDispatched = true;
+    savePending();
+    return checkPendingDelivery(entry);
+  }
+
   entry.retryRequired = false;
   entry.dispatching = false;
 
@@ -3576,8 +3742,6 @@ async function retryPendingEntry(entry) {
     savePending();
     return persistExternalCodexQueue(entry);
   }
-
-  if (entry.retryWithNewId) { entry.requestId = newRequestId(); }
 
   entry.retryWithNewId = false;
   entry.mayHaveDispatched = false;
@@ -3621,9 +3785,9 @@ async function checkPendingDelivery(entry) {
     entry.dispatching = false;
     entry.mayHaveDispatched = result.state === "uncertain" || result.state === "dispatching";
     entry.retryRequired = result.state !== "dispatching";
-    entry.retryWithNewId = result.state === "uncertain";
+    entry.retryWithNewId = false;
 
-    if (result.state === "not_found" || result.state === "failed") {
+    if (result.state === "failed") {
       entry.dispatching = false;
       entry.mayHaveDispatched = false;
       entry.retryRequired = true;
@@ -3636,8 +3800,12 @@ async function checkPendingDelivery(entry) {
       if (label) { label.textContent = "The bridge is still delivering this message"; }
       markSendFailed(entry.bubble, null);
     } else {
-      if (label) { label.textContent = "Delivery remains uncertain — retry only if it is absent from the thread"; }
-      markSendFailed(entry.bubble, () => retryPendingEntry(entry), {
+      if (label) {
+        label.textContent = result.state === "not_found"
+          ? "The bridge no longer has proof of delivery — this app will not resend it and risk a duplicate"
+          : "Delivery remains uncertain — this app will not resend it and risk a duplicate";
+      }
+      markSendFailed(entry.bubble, null, {
         uncertain: true,
         onDismiss: () => removePendingEntry(entry, { allowUncertain: true }),
       });
@@ -3791,17 +3959,17 @@ async function trySteer(entry) {
 
     const label = entry.chip?.querySelector("span");
 
-    const uncertain = e.code === "delivery_uncertain" || !!e.reach || !!e.responseInvalid || !e.status;
+    const uncertain = e.code === "delivery_uncertain" || !!e.reach || !!e.responseInvalid || !e.status || e.status >= 500;
 
     if (uncertain) {
       entry.dispatching = false;
       entry.retryRequired = true;
-      entry.retryWithNewId = e.code === "delivery_uncertain";
+      entry.retryWithNewId = false;
       entry.retryAsSteer = true;
       entry.mayHaveDispatched = true;
       savePending();
-      if (label) { label.textContent = "Steer delivery could not be confirmed — check the latest messages, then tap Retry if needed"; }
-      markSendFailed(entry.bubble, () => retryPendingEntry(entry), {
+      if (label) { label.textContent = "Steer delivery could not be confirmed — check status or dismiss; it will not be resent"; }
+      markSendFailed(entry.bubble, () => checkPendingDelivery(entry), {
         uncertain: true,
         onDismiss: () => removePendingEntry(entry, { allowUncertain: true }),
       });
@@ -3971,13 +4139,9 @@ function restoreFailedSends() {
 
     const attachments = Array.isArray(f.attachments) ? f.attachments : [];
     const bubble = addUser(f.text, { attachments });
-    markSendFailed(bubble, () => {
-      const requestId = f.retryWithNewId ? newRequestId() : f.requestId;
-
-      if (f.retryWithNewId) { dropFailedSend(f.requestId); }
-
-      doSend(f.text, { attachments, bubble, requestId });
-    }, {
+    markSendFailed(bubble, f.retryWithNewId
+      ? () => checkStandaloneDelivery(f, bubble)
+      : () => doSend(f.text, { attachments, bubble, requestId: f.requestId }), {
       uncertain: !!f.retryWithNewId,
       onDismiss: () => {
         dropFailedSend(f.requestId);
@@ -3985,6 +4149,38 @@ function restoreFailedSends() {
       },
     });
   }
+}
+
+async function checkStandaloneDelivery(failed, bubble) {
+  const query = new URLSearchParams({
+    provider: failed.provider || activeProvider(),
+    method: "send",
+    requestId: failed.requestId,
+    threadId: failed.threadId || state.active?.id || "",
+  });
+  const result = await api(`/api/send/status?${query}`);
+
+  if (result.state === "accepted") {
+    dropFailedSend(failed.requestId);
+    markSendFailed(bubble, null);
+    scheduleExternalRefresh();
+    return;
+  }
+
+  if (result.state === "failed") {
+    failed.retryWithNewId = false;
+    saveFailedSends();
+    markSendFailed(bubble, () => doSend(failed.text, {
+      attachments: failed.attachments ?? [],
+      bubble,
+      requestId: failed.requestId,
+    }), { onDismiss: () => { dropFailedSend(failed.requestId); bubble.remove(); } });
+    return;
+  }
+
+  chip("⚠️", result.state === "not_found"
+    ? "The bridge no longer has proof of delivery. It was not resent, so this app cannot create a duplicate."
+    : "Delivery is still uncertain. It was not resent, so this app cannot create a duplicate.");
 }
 
 function startSendProgress(requestId, threadId, text, bubble) {
@@ -4167,26 +4363,29 @@ async function doSend(text, { attachments = [], bubble, requestId, pendingEntry 
       }
     }
 
-    const retryId = e.code === "delivery_uncertain" ? null : id;
+    const deliveryMayBeAmbiguous = messageAttempted
+      && (e.code === "delivery_uncertain" || !!e.reach || !!e.responseInvalid || !e.status || e.status >= 500);
+    const retryId = deliveryMayBeAmbiguous ? null : id;
     const retry = () => {
+      if (!retryId) {
+        if (pendingEntry) {
+          pendingEntry.retryWithNewId = false;
+          pendingEntry.mayHaveDispatched = true;
+          savePending();
+          return checkPendingDelivery(pendingEntry);
+        }
+
+        const failed = state.failedSends.find((entry) => entry.requestId === id)
+          ?? { provider: dispatch.provider, threadId, text, requestId: id, attachments, retryWithNewId: true };
+        return checkStandaloneDelivery(failed, bubble);
+      }
+
       if (pendingEntry) {
         pendingEntry.retryRequired = false;
         pendingEntry.mayHaveDispatched = false;
         savePending();
       }
-
-      let nextId = retryId;
-
-      if (pendingEntry && !retryId) {
-        pendingEntry.requestId = newRequestId();
-        savePending();
-        nextId = pendingEntry.requestId;
-      } else if (!pendingEntry && !retryId) {
-        dropFailedSend(id);
-        nextId = newRequestId();
-      }
-
-      doSend(text, { attachments, bubble, requestId: nextId, pendingEntry });
+      doSend(text, { attachments, bubble, requestId: retryId, pendingEntry });
     };
 
     if ((e.code === "thread_locked_elsewhere" || e.code === "turn_in_progress") && !pendingEntry) {
@@ -4221,8 +4420,8 @@ async function doSend(text, { attachments = [], bubble, requestId, pendingEntry 
       } else {
         pendingEntry.dispatching = false;
         pendingEntry.retryRequired = true;
-        pendingEntry.retryWithNewId = messageAttempted && e.code === "delivery_uncertain";
-        pendingEntry.mayHaveDispatched = messageAttempted && (e.code === "delivery_uncertain" || !!e.reach || !!e.responseInvalid || !e.status);
+        pendingEntry.retryWithNewId = false;
+        pendingEntry.mayHaveDispatched = deliveryMayBeAmbiguous;
         savePending();
         if (label) { label.textContent = pendingEntry.mayHaveDispatched ? "Delivery could not be confirmed — check the thread, then retry if needed" : "Not sent — tap Retry"; }
         markSendFailed(bubble, retry, {
@@ -4232,7 +4431,7 @@ async function doSend(text, { attachments = [], bubble, requestId, pendingEntry 
         syncPendingActions(pendingEntry);
       }
     } else if (e.code !== "thread_locked_elsewhere") {
-      const uncertain = messageAttempted && (e.code === "delivery_uncertain" || !!e.reach || !!e.responseInvalid || !e.status);
+      const uncertain = deliveryMayBeAmbiguous;
       recordFailedSend(threadId, text, id, activeProvider(), attachments, uncertain);
       markSendFailed(bubble, retry, {
         uncertain,
@@ -4259,32 +4458,32 @@ function markSendFailed(bubble, onRetry, { uncertain = false, onDismiss = null }
 
   bubble.querySelector(".failed-actions")?.remove();
   bubble.querySelector(".retry")?.remove(); // remove controls from pre-0.4.4 DOM
-  bubble.classList.toggle("failed", !!onRetry);
+  bubble.classList.toggle("failed", !!onRetry || !!onDismiss);
 
-  if (!onRetry) { return; }
+  if (!onRetry && !onDismiss) { return; }
 
-  const btn = document.createElement("button");
-  btn.className = "retry";
-  btn.title = uncertain ? "Delivery uncertain — check the latest messages before retrying" : "Not sent — tap to retry";
-  btn.textContent = uncertain ? "⚠ Check, then retry" : "⟳ Retry";
-  const originalText = btn.textContent;
-  btn.onclick = async () => {
-    btn.disabled = true;
-    btn.textContent = "⟳ Sending…";
-    try {
-      await onRetry();
-    } finally {
-      // A successful/reclassified attempt removes or replaces this control. If
-      // it did neither, do not strand a permanently disabled Retry button.
-      if (btn.isConnected && btn.disabled) {
-        btn.disabled = false;
-        btn.textContent = originalText;
-      }
-    }
-  };
   const actions = document.createElement("div");
   actions.className = "failed-actions";
-  actions.appendChild(btn);
+  if (onRetry) {
+    const btn = document.createElement("button");
+    btn.className = "retry";
+    btn.title = uncertain ? "Check delivery without resending" : "Not sent — tap to retry";
+    btn.textContent = uncertain ? "Check delivery" : "⟳ Retry";
+    const originalText = btn.textContent;
+    btn.onclick = async () => {
+      btn.disabled = true;
+      btn.textContent = uncertain ? "Checking…" : "⟳ Sending…";
+      try {
+        await onRetry();
+      } finally {
+        if (btn.isConnected && btn.disabled) {
+          btn.disabled = false;
+          btn.textContent = originalText;
+        }
+      }
+    };
+    actions.appendChild(btn);
+  }
   if (onDismiss) {
     const dismiss = document.createElement("button");
     dismiss.type = "button";
@@ -5322,6 +5521,7 @@ function persistPrefs() {
   const saveComposerDefaults = !state.active;
   localStorage.setItem("cxp_prefs", JSON.stringify({
     provider: state.provider,
+    providerScope: state.providerScope,
     listView: state.listView,
     model: saveComposerDefaults ? state.model : previous.model,
     effort: saveComposerDefaults ? state.effort : previous.effort,
@@ -5407,7 +5607,7 @@ function openNewSession() {
     return;
   }
 
-  if (state.listView === "provider") {
+  if (state.providerScope !== "all") {
     openNewSheet();
     return;
   }
@@ -5803,6 +6003,11 @@ async function openLinkedThread() {
 }
 
 let usageSheetRequestSeq = 0;
+const usageSheetCache = new Map();
+
+function usageTitleHtml(refreshing = false) {
+  return `<div class="usage-title-row"><h2>Usage remaining</h2><button type="button" class="usage-refresh ${refreshing ? "spinning" : ""}" data-usage-refresh aria-label="Refresh usage" title="Refresh usage" ${refreshing ? "disabled" : ""}><svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0 2 5"/><path d="M20 4v7h-7"/></svg></button></div>`;
+}
 
 function usageTabsHtml(provider) {
   return `<div class="seg usage-seg" aria-label="Usage provider">${Object.entries(PROVIDER_LABELS).map(([id, label]) =>
@@ -5812,9 +6017,10 @@ function usageTabsHtml(provider) {
 
 function wireUsageSheet(provider) {
   $("sheetBody").querySelectorAll("[data-usage-provider]").forEach((button) => {
-    button.onclick = () => loadUsageSheet(button.dataset.usageProvider);
+    button.onclick = () => showUsageProvider(button.dataset.usageProvider);
   });
-  $("sheetBody").querySelector("[data-usage-retry]")?.addEventListener("click", () => loadUsageSheet(provider));
+  $("sheetBody").querySelector("[data-usage-refresh]")?.addEventListener("click", () => refreshUsageProvider(provider));
+  $("sheetBody").querySelector("[data-usage-retry]")?.addEventListener("click", () => refreshUsageProvider(provider));
 }
 
 function usageUnavailableText(provider) {
@@ -5823,11 +6029,11 @@ function usageUnavailableText(provider) {
   return "Codex did not return account-limit data. Tap Retry; the last successful snapshot is kept instead of being erased by a transient failure.";
 }
 
-function renderUsageSheet(provider, d, error = null) {
+function renderUsageSheet(provider, d, error = null, { refreshing = false } = {}) {
   const body = $("sheetBody");
 
   if (error) {
-    body.innerHTML = `<h2>Usage remaining</h2>${usageTabsHtml(provider)}<div class="usage-note">Could not refresh ${esc(PROVIDER_LABELS[provider])}: ${esc(error.message)}</div><button class="primary" data-usage-retry>Retry</button>`;
+    body.innerHTML = `${usageTitleHtml(false)}${usageTabsHtml(provider)}<div class="usage-note">Could not refresh ${esc(PROVIDER_LABELS[provider])}: ${esc(error.message)}</div><button class="primary" data-usage-retry>Retry</button>`;
     wireUsageSheet(provider);
     return;
   }
@@ -5847,7 +6053,7 @@ function renderUsageSheet(provider, d, error = null) {
   }
 
   const planText = acc.planType ? esc(acc.planType.toUpperCase()) + " plan" : "";
-  let html = `<h2>Usage remaining</h2>${usageTabsHtml(provider)}<div class="hint">${esc(acc.accountLabel || acc.email || PROVIDER_LABELS[provider] || "Agent")}${acc.accountLabel && acc.email ? " · " + esc(acc.email) : ""}${planText ? " · " + planText : ""}</div>`;
+  let html = `${usageTitleHtml(refreshing)}${usageTabsHtml(provider)}<div class="hint">${esc(acc.accountLabel || acc.email || PROVIDER_LABELS[provider] || "Agent")}${acc.accountLabel && acc.email ? " · " + esc(acc.email) : ""}${planText ? " · " + planText : ""}</div>`;
 
   if ((rateSource === "last-known" || d._meta?.refreshError) && rl) {
     const observed = d._meta?.observedAt?.rateLimits;
@@ -5886,49 +6092,88 @@ function renderUsageSheet(provider, d, error = null) {
   wireNotifications();
 }
 
-async function loadUsageSheet(provider) {
-  if (!PROVIDER_LABELS[provider]) { return; }
-  const requestSeq = ++usageSheetRequestSeq;
-  $("sheetBody").dataset.sheetKind = "usage";
-  $("sheetBody").innerHTML = `<h2>Usage remaining</h2>${usageTabsHtml(provider)}<div class="hint">Refreshing ${esc(PROVIDER_LABELS[provider])}…</div>`;
-  wireUsageSheet(provider);
-
-  const usageRequest = async (refresh, timeoutMs) => {
-    const controller = new AbortController();
-    let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
-
-    try {
-      return await api(`/api/usage?refresh=${refresh ? "1" : "0"}&provider=${encodeURIComponent(provider)}&_=${Date.now()}`, undefined, { signal: controller.signal, cache: "no-store" });
-    } catch (error) {
-      if (timedOut) { throw Object.assign(new Error("Usage refresh timed out"), { code: "usage_refresh_timeout" }); }
-      throw error;
-    } finally {
-      clearTimeout(timer);
-    }
-  };
+async function usageRequest(path, timeoutMs) {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
 
   try {
-    const data = await usageRequest(true, 10000);
-    if (requestSeq === usageSheetRequestSeq && $("sheet").classList.contains("show") && $("sheetBody").dataset.sheetKind === "usage") { renderUsageSheet(provider, data); }
+    return await api(`${path}&_=${Date.now()}`, undefined, { signal: controller.signal, cache: "no-store" });
   } catch (error) {
-    if (error.code === "usage_refresh_timeout") {
+    if (timedOut) { throw Object.assign(new Error("Usage refresh timed out"), { code: "usage_refresh_timeout" }); }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function usageSheetStillCurrent(requestSeq) {
+  return requestSeq === usageSheetRequestSeq && $("sheet").classList.contains("show") && $("sheetBody").dataset.sheetKind === "usage";
+}
+
+async function showUsageProvider(provider) {
+  if (!PROVIDER_LABELS[provider]) { return; }
+  const requestSeq = ++usageSheetRequestSeq;
+  const cached = usageSheetCache.get(provider);
+  $("sheetBody").dataset.sheetKind = "usage";
+
+  if (cached) {
+    renderUsageSheet(provider, cached.data);
+    return;
+  }
+
+  $("sheetBody").innerHTML = `${usageTitleHtml(false)}${usageTabsHtml(provider)}<div class="hint">Loading saved ${esc(PROVIDER_LABELS[provider])} usage…</div>`;
+  wireUsageSheet(provider);
+
+  try {
+    const data = await usageRequest(`/api/usage/snapshot?provider=${encodeURIComponent(provider)}`, 3000);
+    usageSheetCache.set(provider, { data, cachedAt: Date.now() });
+    if (usageSheetStillCurrent(requestSeq)) { renderUsageSheet(provider, data); }
+  } catch (error) {
+    if (usageSheetStillCurrent(requestSeq)) { renderUsageSheet(provider, null, error); }
+  }
+}
+
+async function refreshUsageProvider(provider) {
+  if (!PROVIDER_LABELS[provider]) { return; }
+  const requestSeq = ++usageSheetRequestSeq;
+  const cached = usageSheetCache.get(provider);
+  $("sheetBody").dataset.sheetKind = "usage";
+
+  if (cached) { renderUsageSheet(provider, cached.data, null, { refreshing: true }); }
+  else {
+    $("sheetBody").innerHTML = `${usageTitleHtml(true)}${usageTabsHtml(provider)}<div class="hint">Refreshing ${esc(PROVIDER_LABELS[provider])}…</div>`;
+    wireUsageSheet(provider);
+  }
+
+  try {
+    const data = await usageRequest(`/api/usage?refresh=1&provider=${encodeURIComponent(provider)}`, 10000);
+    usageSheetCache.set(provider, { data, cachedAt: Date.now() });
+    if (usageSheetStillCurrent(requestSeq)) { renderUsageSheet(provider, data); }
+  } catch (error) {
+    if (cached) {
+      const fallback = { ...cached.data, _meta: { ...(cached.data._meta ?? {}), refreshError: true } };
+      usageSheetCache.set(provider, { data: fallback, cachedAt: cached.cachedAt });
+      if (usageSheetStillCurrent(requestSeq)) { renderUsageSheet(provider, fallback); }
+    } else {
       try {
-        const fallback = await usageRequest(false, 3000);
-        fallback._meta = { ...(fallback._meta ?? {}), refreshError: true };
-        if (requestSeq === usageSheetRequestSeq && $("sheet").classList.contains("show") && $("sheetBody").dataset.sheetKind === "usage") { renderUsageSheet(provider, fallback); }
-        return;
-      } catch {}
+        const snapshot = await usageRequest(`/api/usage/snapshot?provider=${encodeURIComponent(provider)}`, 3000);
+        const fallback = { ...snapshot, _meta: { ...(snapshot._meta ?? {}), refreshError: true } };
+        usageSheetCache.set(provider, { data: fallback, cachedAt: Date.now() });
+        if (usageSheetStillCurrent(requestSeq)) { renderUsageSheet(provider, fallback); }
+      } catch {
+        if (usageSheetStillCurrent(requestSeq)) { renderUsageSheet(provider, null, error); }
+      }
     }
-    if (requestSeq === usageSheetRequestSeq && $("sheet").classList.contains("show") && $("sheetBody").dataset.sheetKind === "usage") { renderUsageSheet(provider, null, error); }
   }
 }
 
 function openUsageSheet() {
   const provider = activeProvider();
-  openSheet(`<h2>Usage remaining</h2>${usageTabsHtml(provider)}<div class="hint">Refreshing ${esc(PROVIDER_LABELS[provider])}…</div>`);
+  openSheet(`${usageTitleHtml(true)}${usageTabsHtml(provider)}<div class="hint">Refreshing ${esc(PROVIDER_LABELS[provider])}…</div>`);
+  $("sheetBody").dataset.sheetKind = "usage";
   wireUsageSheet(provider);
-  loadUsageSheet(provider);
+  refreshUsageProvider(provider);
 }
 
 // ---------- running-thread tracking ----------
@@ -6032,7 +6277,8 @@ function rerankVisibleRows({ revealRunning = false } = {}) {
   if (!state.threads.length) { return; }
 
   const scrollTop = $("listView").scrollTop;
-  state.threads = rankLiveThreads(state.threads, state.running);
+  if (state.listView === "projects") { rebuildProjectGroups(); }
+  else { state.threads = rankLiveThreads(state.threads, state.running); }
   renderRows(false);
   // Starting work is the highest-signal list transition: reveal its promoted
   // row immediately. Completion keeps the reader's position stable.
@@ -6510,14 +6756,17 @@ function initProvider() {
 
   state.provider = AVAILABLE_PROVIDER_NAMES[0] || null;
   if (prefs.provider && PROVIDER_LABELS[prefs.provider]) { state.provider = prefs.provider; }
-  if (["recent", "provider"].includes(prefs.listView)) { state.listView = prefs.listView; }
+  state.providerScope = prefs.providerScope === "all" || PROVIDER_LABELS[prefs.providerScope]
+    ? prefs.providerScope
+    : prefs.listView === "provider" && PROVIDER_LABELS[prefs.provider] ? prefs.provider : "all";
+  if (["recent", "projects"].includes(prefs.listView)) { state.listView = prefs.listView; }
   state.sidebarCollapsed = prefs.sidebarCollapsed === true;
 
   $("providerSeg").querySelectorAll("[data-provider]").forEach((button) => {
-    button.style.display = PROVIDER_LABELS[button.dataset.provider] ? "" : "none";
+    button.style.display = button.dataset.provider === "all" || PROVIDER_LABELS[button.dataset.provider] ? "" : "none";
   });
   $("newBtn").disabled = !AVAILABLE_PROVIDER_NAMES.length;
-  $("newBtn").title = AVAILABLE_PROVIDER_NAMES.length ? "New session" : "No signed-in provider is available";
+  $("newBtn").title = AVAILABLE_PROVIDER_NAMES.length ? "New chat" : "No signed-in provider is available";
 
   syncProviderSeg();
   syncSidebarToggle();

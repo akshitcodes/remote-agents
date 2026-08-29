@@ -7,7 +7,8 @@
 //
 // Interface (all async unless noted):
 //   init()                                     start any long-lived process
-//   listThreads({ search, cursor })            -> { data:[ThreadSummary], nextCursor }
+//   listThreads({ search, cursor, limit })     -> { data:[ThreadSummary], nextCursor }
+//                                                limit:null requests the complete local index
 //   readThread(id)                             -> { thread: { turns:[{ items:[Item] }] } }
 //   newThread({ cwd, model })                  -> { thread: { id, ... } }
 //   send(body)                                 stream events via this.emit()
