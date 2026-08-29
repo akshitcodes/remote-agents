@@ -17,6 +17,7 @@ test("Codex direct rate-limit responses normalize to the shared UI contract", ()
   });
 
   assert.equal(normalized.rateLimits.primary.usedPercent, 48);
+  assert.equal(normalized.rateLimits.primary.remainingPercent, 52);
   assert.equal(normalized.rateLimitResetCredits.balance, "5");
 });
 

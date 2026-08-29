@@ -1,15 +1,40 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
+function canonicalLimit(value) {
+  if (!value || typeof value !== "object") { return value ?? null; }
+  const used = typeof value.usedPercent === "number" ? value.usedPercent : NaN;
+  const remaining = typeof value.remainingPercent === "number" ? value.remainingPercent : NaN;
+  const usedPercent = Number.isFinite(used) ? Math.max(0, Math.min(100, used)) : null;
+  const remainingPercent = Number.isFinite(remaining)
+    ? Math.max(0, Math.min(100, remaining))
+    : usedPercent == null ? null : 100 - usedPercent;
+
+  return {
+    ...value,
+    ...(usedPercent == null ? {} : { usedPercent }),
+    ...(remainingPercent == null ? {} : { remainingPercent }),
+  };
+}
+
 function canonicalRateLimits(value) {
   if (!value || typeof value !== "object") { return null; }
-  if (value.rateLimits && typeof value.rateLimits === "object") { return value; }
+  if (value.rateLimits && typeof value.rateLimits === "object") {
+    return {
+      ...value,
+      rateLimits: {
+        ...value.rateLimits,
+        primary: canonicalLimit(value.rateLimits.primary),
+        secondary: canonicalLimit(value.rateLimits.secondary),
+      },
+    };
+  }
 
   if (value.primary || value.secondary) {
     const { primary = null, secondary = null, rateLimitResetCredits, credits, ...rest } = value;
     return {
       ...rest,
-      rateLimits: { primary, secondary },
+      rateLimits: { primary: canonicalLimit(primary), secondary: canonicalLimit(secondary) },
       rateLimitResetCredits: rateLimitResetCredits ?? credits ?? null,
     };
   }

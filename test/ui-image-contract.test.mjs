@@ -5,6 +5,7 @@ import test from "node:test";
 const html = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
 const server = readFileSync(new URL("../server.mjs", import.meta.url), "utf8");
 const onboarding = readFileSync(new URL("../onboarding.mjs", import.meta.url), "utf8");
+const sw = readFileSync(new URL("../public/sw.js", import.meta.url), "utf8");
 
 test("image references survive queue, steer, send, retry, and reload paths", () => {
   assert.match(html, /attachments: e\.attachments \?\? \[\]/);
@@ -176,12 +177,21 @@ test("usage sheet shows account limits for all providers and never thread usage"
   assert.match(html, /data-usage-provider/);
   assert.match(html, /loadUsageSheet\(button\.dataset\.usageProvider\)/);
   assert.match(html, /\/api\/usage\?refresh=1&provider=/);
+  assert.match(html, /&_=" \+ Date\.now\(\)/);
+  assert.match(html, /function remainingPercentOf\(limit\)/);
+  assert.match(html, /100 - used/);
+  assert.match(html, /% left/);
+  assert.match(html, /<h2>Usage remaining<\/h2>/);
+  assert.doesNotMatch(html, /normalized across providers/);
   assert.match(html, /const limitsEnvelope = d\.rateLimits\?\.rateLimits/);
   assert.match(html, /Showing the last successful quota check/);
   assert.match(html, /Grok’s native billing endpoint/);
   assert.match(html, /esc\(String\(credits\.availableCount \?\? credits\.balance\)\)/);
   assert.match(html, /provider === lastUsageProvider/);
   assert.match(html, /dataset\.sheetKind === "usage"/);
+  assert.match(server, /const USAGE_REFRESH_TIMEOUT_MS = 10000/);
+  assert.match(server, /boundedUsageRefresh\(p\.usage\(\{ refresh:/);
+  assert.match(server, /fallback\._meta\.refreshError = true/);
   assert.doesNotMatch(html, /Latest local turn/);
   assert.doesNotMatch(html, /last input tokens/);
   assert.doesNotMatch(html, /Models used \(last turn\)/);
@@ -211,6 +221,8 @@ test("desktop workspace keeps session navigation visible and constrains the chat
   assert.match(html, /border-left: 0;[\s\S]*?border-right: 0;/);
   assert.match(html, /body\.thread-open #backBtn \{ display: none !important; \}/);
   assert.match(html, /body\.thread-open #viewSeg,[\s\S]*?body\.thread-open #newBtn \{ display: flex !important; \}/);
+  assert.match(html, /id="sidebarTools"[\s\S]*?id="viewSeg"/);
+  assert.match(html, /id="searchRow"[\s\S]*?id="search"[\s\S]*?id="newBtn"/);
   assert.match(html, /<aside id="listView" aria-label="Agent sessions">/);
   assert.match(html, /<main id="chatView" aria-label="Selected agent conversation">/);
   assert.match(html, /className = "row" \+ \(selected \? " active-thread" : ""\)/);
@@ -221,6 +233,7 @@ test("desktop workspace keeps session navigation visible and constrains the chat
   assert.match(html, /event\.key === "Escape"/);
   assert.match(server, /const body = renderIndexHtml\(req\.headers\["user-agent"\][\s\S]*?return res\.end\(body\)/);
   assert.match(onboarding, /const readIndexShell = createIndexShellReader\(indexHtmlPath\)/);
+  assert.match(sw, /const CACHE_VERSION = "remote-agents-v18"/);
 });
 
 test("Codex write access stays provider-specific and retryable after a conflict", () => {

@@ -884,8 +884,20 @@ function tokenMatches(candidate) {
 
 function json(res, status, body) {
   const data = JSON.stringify(body);
-  res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(data) });
+  res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(data), "cache-control": "no-store" });
   res.end(data);
+}
+
+const USAGE_REFRESH_TIMEOUT_MS = 10000;
+
+function boundedUsageRefresh(operation) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error("Usage refresh timed out")), USAGE_REFRESH_TIMEOUT_MS);
+    timer.unref?.();
+  });
+
+  return Promise.race([operation, timeout]).finally(() => clearTimeout(timer));
 }
 
 function readBody(req, maxBytes = 12 * 1024 * 1024) {
@@ -1404,7 +1416,7 @@ const routes = {
     }
 
     try {
-      const live = await p.usage({ refresh: url.searchParams.get("refresh") === "1" });
+      const live = await boundedUsageRefresh(p.usage({ refresh: url.searchParams.get("refresh") === "1" }));
       json(res, 200, usageState.merge(p.name, live));
     } catch (error) {
       const fallback = usageState.merge(p.name, {});
