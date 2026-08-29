@@ -542,8 +542,8 @@
     </div>
     <div id="composerWrap">
       <div id="controls">
-        <button class="ctl" id="modelCtl"><span id="modelLabel">Model</span> <b id="modelName">—</b> <span class="ck">▾</span></button>
-        <button class="ctl" id="effortCtl"><span id="effortLabel">Effort</span> <b id="effortName">—</b> <span class="ck">▾</span></button>
+        <button class="ctl" id="modelCtl" aria-label="Select model"><b id="modelName">—</b> <span class="ck">▾</span></button>
+        <button class="ctl" id="effortCtl" aria-label="Select reasoning effort"><b id="effortName">—</b> <span class="ck">▾</span></button>
         <button class="ctl" id="modeCtl"><span id="modeName">Agent</span> <span class="ck">▾</span></button>
         <button class="ctl" id="steerCtl"><span>Send</span> <b id="steerName">Queue</b> <span class="ck">▾</span></button>
         <button class="ctl" id="lockCtl" style="display:none"><span>Lock</span> <b id="lockName">Not held here</b> <span class="ck">▾</span></button>
@@ -5107,8 +5107,6 @@ function syncControls() {
   const truth = state.settingsTruth;
   $("modelName").textContent = m?.displayName || state.model || "—";
   $("effortName").textContent = state.effort === "provider-default" ? "Provider default" : state.effort || "—";
-  $("modelLabel").textContent = truth.sources?.model === "bridge_override" ? "Next model" : "Model";
-  $("effortLabel").textContent = truth.sources?.effort === "bridge_override" ? "Next effort" : "Effort";
   $("modeName").textContent = currentMode().name;
   const sendBehavior = effectiveSendBehavior();
   $("steerName").textContent = sendBehavior.name;

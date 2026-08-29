@@ -246,7 +246,9 @@ test("composer settings fail closed and distinguish confirmed values from next-t
   assert.match(html, /saveThreadSettings\(recoverPair, \{ pending: false \}\)/);
   assert.match(html, /!materializedMode\.unknown && !materializedMode\.providerExact/);
   assert.match(html, /if \(selection\) \{[\s\S]*?syncControls\(\);[\s\S]*?if \(flush\) \{ flushPending\(\); \}/);
-  assert.match(html, /Next model/);
+  assert.match(html, /id="modelCtl" aria-label="Select model"><b id="modelName"/);
+  assert.match(html, /id="effortCtl" aria-label="Select reasoning effort"><b id="effortName"/);
+  assert.doesNotMatch(html, /id="modelLabel"|id="effortLabel"/);
   assert.match(html, /Requested settings accepted by provider/);
   assert.match(html, /awaiting recorded confirmation/);
   assert.match(html, /const accepted = await api\("\/api\/message"/);
