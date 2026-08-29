@@ -183,6 +183,16 @@ function isInternalUserEnvelope(text) {
   return /^<(environment_context|recommended_plugins)>[\s\S]*<\/\1>$/.test(trimmed);
 }
 
+// Codex can append private transport metadata to the current-schema assistant
+// record while its legacy mirror contains only the visible answer. That
+// metadata is neither chat content nor stable across the two schemas: leaving
+// it in both leaks an internal envelope and defeats mixed-schema deduplication.
+function visibleAssistantText(text) {
+  return String(text ?? "")
+    .replace(/\n*<oai-mem-citation>[\s\S]*?<\/oai-mem-citation>\s*/g, "")
+    .trim();
+}
+
 // A tool call and its output are separate records, often far apart, so calls are
 // kept by call_id until their output shows up.
 function commandLabel(payload) {
@@ -299,8 +309,12 @@ export function feedLines(st, lines) {
           break;
 
         case "agent_message":
-          if (String(p.message ?? "").trim()) {
-            pushMessage({ id: id(), type: "agentMessage", text: String(p.message) }, "legacy-event");
+          {
+            const text = visibleAssistantText(p.message);
+
+            if (text) {
+              pushMessage({ id: id(), type: "agentMessage", text }, "legacy-event");
+            }
           }
 
           break;
@@ -360,8 +374,12 @@ export function feedLines(st, lines) {
         if (content.length) {
           pushMessage({ id: p.id ?? id(), type: "userMessage", content }, "response-item");
         }
-      } else if (p.role === "assistant" && text) {
-        pushMessage({ id: p.id ?? id(), type: "agentMessage", text }, "response-item");
+      } else if (p.role === "assistant") {
+        const visibleText = visibleAssistantText(text);
+
+        if (visibleText) {
+          pushMessage({ id: p.id ?? id(), type: "agentMessage", text: visibleText }, "response-item");
+        }
       }
 
       continue;

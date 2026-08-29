@@ -71,3 +71,36 @@ test("Codex rollout replay deduplicates mixed legacy and response-item messages"
   assert.equal(state.turns[0].items.filter((item) => item.type === "userMessage").length, 1);
   assert.equal(state.turns[0].items.filter((item) => item.type === "agentMessage").length, 1);
 });
+
+test("Codex strips private memory metadata before mixed-schema deduplication", () => {
+  const state = newParseState();
+  const answer = "Everything is committed and pushed. Run the restart command.";
+  const privateMetadata = `
+
+<oai-mem-citation>
+<citation_entries>
+MEMORY.md:321-330|note=[internal lifecycle context]
+</citation_entries>
+<rollout_ids>
+019feceb-74d0-76e2-8ddb-34e20970cd04
+</rollout_ids>
+</oai-mem-citation>`;
+
+  feedLines(state, [
+    JSON.stringify({ type: "event_msg", payload: { type: "task_started" } }),
+    JSON.stringify({ type: "event_msg", payload: { type: "agent_message", message: answer, phase: "final_answer" } }),
+    JSON.stringify({
+      type: "response_item",
+      payload: {
+        type: "message",
+        id: "agent-with-private-metadata",
+        role: "assistant",
+        phase: "final_answer",
+        content: [{ type: "output_text", text: answer + privateMetadata }],
+      },
+    }),
+  ]);
+
+  const messages = state.turns[0].items.filter((item) => item.type === "agentMessage");
+  assert.deepEqual(messages.map((item) => item.text), [answer]);
+});
