@@ -296,6 +296,9 @@ test("usage-limit auto-resume is explicit, durable, cancellable, and defaults of
   assert.match(server, /usage-retry-policy\.json/);
   assert.match(server, /setInterval\(\(\) => usageRetryRunner\.tick/);
   assert.match(server, /_capacityFresh: live\?\._fresh\?\.rateLimits === true/);
+  assert.match(html, /USAGE_LIMIT_CODES\.has\(code\)/);
+  assert.match(html, /out\\s\+of\|no[\s\S]*credits\?/);
+  assert.match(html, /decorateUsageLimitError\(el, item\)/);
 });
 
 test("Codex write access stays provider-specific and retryable after a conflict", () => {

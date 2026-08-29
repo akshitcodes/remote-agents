@@ -265,4 +265,5 @@ test("Claude replay keeps split records distinct and renders provider errors onc
     { type: "agentMessage", id: "text-row:0", terminalId: undefined },
     { type: "turnError", id: undefined, terminalId: "claude:rate-limit-row" },
   ]);
+  assert.equal(items.at(-1).code, "rate_limit");
 });

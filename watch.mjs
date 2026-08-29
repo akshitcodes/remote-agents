@@ -273,6 +273,17 @@ function codexObservation(lines) {
 function claudeObservation(lines) {
   return parseFromEnd(lines, (r, line) => {
     if (r?.type === "assistant") {
+      if (r.isApiErrorMessage === true) {
+        const text = contentText(r.message?.content) || "Claude ended this turn with a provider error";
+        return {
+          running: false,
+          terminalId: recordId("claude", r, line),
+          terminalOutcome: "failed",
+          terminalText: text,
+          terminalError: terminalError({ message: text, code: r.error ?? null }),
+        };
+      }
+
       const reason = r?.message?.stop_reason;
 
       if (reason && reason !== "tool_use") {

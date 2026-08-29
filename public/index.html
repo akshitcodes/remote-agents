@@ -2379,7 +2379,7 @@ function renderItem(item, opts = {}) {
       const el = chip("⚠️", detail);
       el.classList.add("turn-error");
       if (item.terminalId) { el.dataset.terminalId = item.terminalId; }
-      decorateUsageLimitError(el, detail);
+      decorateUsageLimitError(el, item);
       return [el];
     }
     default: break;
@@ -2614,12 +2614,22 @@ function showTurnFailure(error, terminalId = null) {
   const el = chip("⚠️", message);
   el.classList.add("turn-error");
   if (terminalId) { el.dataset.terminalId = terminalId; }
-  decorateUsageLimitError(el, message);
+  decorateUsageLimitError(el, typeof error === "string" ? { message: error } : error);
   return el;
 }
 
-function isUsageLimitMessage(message) {
-  return /(?:usage|spend|rate)[\s_-]*(?:limit|exhausted)|(?:limit|credits?)\s+(?:was\s+)?(?:reached|exhausted)|monthly\s+spend/i.test(String(message || ""));
+const USAGE_LIMIT_CODES = new Set([
+  "credit_balance_exhausted", "credits_exhausted", "insufficient_quota", "monthly_spend_limit",
+  "quota_exceeded", "rate_limit", "rate_limit_exceeded", "usage_exhausted", "usage_limit_exceeded",
+]);
+
+function isUsageLimitError(error) {
+  if (error?.status === 429) { return true; }
+  const rawCode = error?.code ?? error?.error ?? error?.codex_error_info;
+  const code = String(rawCode ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (USAGE_LIMIT_CODES.has(code)) { return true; }
+  const message = typeof error === "string" ? error : error?.message;
+  return /(?:usage|spend|rate|quota|credits?)[\s_-]*(?:limit|exhausted|exceeded|depleted)|(?:limit|quota|credits?)[\s_-]+(?:was\s+)?(?:reached|exhausted|exceeded|depleted)|monthly\s+spend|(?:out\s+of|no)\s+(?:usage|credits?|quota)|(?:usage|credits?|quota)\s+(?:is\s+|are\s+)?(?:not\s+left|unavailable|depleted)/i.test(String(message || ""));
 }
 
 function usageRetryForOpenThread() {
@@ -2728,8 +2738,8 @@ async function queueUsageResume() {
   return result.entry;
 }
 
-function decorateUsageLimitError(el, message) {
-  if (!isUsageLimitMessage(message) || !state.active || el.querySelector("[data-queue-usage-resume]")) { return; }
+function decorateUsageLimitError(el, error) {
+  if (!isUsageLimitError(error) || !state.active || el.querySelector("[data-queue-usage-resume]")) { return; }
   const actions = document.createElement("div");
   actions.className = "pending-actions";
   const button = document.createElement("button");

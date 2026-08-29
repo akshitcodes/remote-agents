@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { usageRetryTrigger, UsageRetryPolicyStore, UsageRetryRunner, UsageRetryStore, usageAvailability } from "../usage-retry.mjs";
+import { isUsageLimitError, usageRetryTrigger, UsageRetryPolicyStore, UsageRetryRunner, UsageRetryStore, usageAvailability } from "../usage-retry.mjs";
 
 function fixture(t, name = "retries.json") {
   const dir = mkdtempSync(join(tmpdir(), "remote-agents-usage-retry-"));
@@ -50,9 +50,21 @@ test("only a terminal provider usage error with stable identity triggers auto-re
     provider: "claude", threadId: "thread-2", terminalId: "terminal-2", terminalOutcome: "failed",
     terminalError: { message: "You've hit your monthly spend limit" }, observedChange: true,
   }), { provider: "claude", threadId: "thread-2", triggerId: "terminal-2" });
+  assert.deepEqual(usageRetryTrigger("external", {
+    provider: "codex", threadId: "thread-3", terminalId: "terminal-3", terminalOutcome: "failed",
+    terminalError: { code: "usage_limit_exceeded", message: "Your workspace is out of credits. Add credits to continue." }, observedChange: true,
+  }), { provider: "codex", threadId: "thread-3", triggerId: "terminal-3" });
   assert.equal(usageRetryTrigger("notify", { provider: "codex", method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1" } } }), null);
   assert.equal(usageRetryTrigger("external", { provider: "claude", threadId: "thread-2", terminalOutcome: "failed", terminalError: { message: "usage limit reached" } }), null);
   assert.equal(usageRetryTrigger("external", { provider: "claude", threadId: "thread-2", terminalId: "old", terminalOutcome: "failed", terminalError: { message: "usage limit reached" }, observedChange: false }), null);
+});
+
+test("usage exhaustion prefers provider codes and supports legacy provider wording", () => {
+  assert.equal(isUsageLimitError({ code: "usage_limit_exceeded", message: "localized provider message" }), true);
+  assert.equal(isUsageLimitError({ error: "rate_limit", message: "localized provider message" }), true);
+  assert.equal(isUsageLimitError({ message: "Your workspace is out of credits. Add credits to continue." }), true);
+  assert.equal(isUsageLimitError({ message: "No usage left for this account." }), true);
+  assert.equal(isUsageLimitError({ code: "authentication_error", message: "Please sign in again." }), false);
 });
 
 test("global policy defaults off and a chat can override or inherit it", (t) => {

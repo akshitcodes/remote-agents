@@ -10,6 +10,18 @@ import { dirname } from "node:path";
 
 const CHECKABLE_STATES = new Set(["waiting_usage", "waiting_thread", "checking"]);
 const PENDING_STATES = new Set([...CHECKABLE_STATES, "dispatching"]);
+const USAGE_LIMIT_CODES = new Set([
+  "credit_balance_exhausted",
+  "credits_exhausted",
+  "insufficient_quota",
+  "monthly_spend_limit",
+  "quota_exceeded",
+  "rate_limit",
+  "rate_limit_exceeded",
+  "usage_exhausted",
+  "usage_limit_exceeded",
+]);
+const USAGE_LIMIT_TEXT = /(?:usage|spend|rate|quota|credits?)[\s_-]*(?:limit|exhausted|exceeded|depleted)|(?:limit|quota|credits?)[\s_-]+(?:was\s+)?(?:reached|exhausted|exceeded|depleted)|monthly\s+spend|(?:out\s+of|no)\s+(?:usage|credits?|quota)|(?:usage|credits?|quota)\s+(?:is\s+|are\s+)?(?:not\s+left|unavailable|depleted)/i;
 
 function retryError(message, code = "invalid_usage_retry", status = 400) {
   return Object.assign(new Error(message), { code, status });
@@ -72,8 +84,11 @@ export function usageAvailability(snapshot) {
 
 export function isUsageLimitError(error) {
   if (error?.status === 429) { return true; }
+  const rawCode = error?.code ?? error?.error ?? error?.codex_error_info;
+  const code = String(rawCode ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (USAGE_LIMIT_CODES.has(code)) { return true; }
   const text = String(error?.message ?? error ?? "");
-  return /(?:usage|spend|rate)[\s_-]*(?:limit|exhausted)|(?:limit|credits?)\s+(?:was\s+)?(?:reached|exhausted)|monthly\s+spend/i.test(text);
+  return USAGE_LIMIT_TEXT.test(text);
 }
 
 export function usageRetryTrigger(event, data) {

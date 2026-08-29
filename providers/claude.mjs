@@ -969,6 +969,7 @@ export class ClaudeProvider extends BaseProvider {
           turn.items.push({
             type: "turnError",
             message,
+            code: obj.error ?? null,
             terminalId: `claude:${obj.uuid ?? obj.message?.id ?? "provider-error"}`,
           });
         }

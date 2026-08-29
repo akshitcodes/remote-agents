@@ -68,11 +68,24 @@ test("provider terminal errors retain their exact message and machine code", () 
   const claude = observeProviderTail("claude", [JSON.stringify({
     type: "assistant",
     uuid: "message-limit",
-    message: { stop_reason: "max_tokens", content: [{ type: "text", text: "Maximum output reached" }] },
+    isApiErrorMessage: true,
+    error: "rate_limit",
+    message: { stop_reason: "stop_sequence", content: [{ type: "text", text: "Your workspace is out of credits. Add credits to continue." }] },
   })]);
 
   assert.equal(codex.terminalOutcome, "failed");
   assert.deepEqual(codex.terminalError, { message: "Your workspace is out of credits. Add credits to continue.", code: "usage_limit_exceeded" });
+  assert.equal(claude.terminalOutcome, "failed");
+  assert.deepEqual(claude.terminalError, { message: "Your workspace is out of credits. Add credits to continue.", code: "rate_limit" });
+});
+
+test("non-usage Claude stop reasons remain terminal errors without invented codes", () => {
+  const claude = observeProviderTail("claude", [JSON.stringify({
+    type: "assistant",
+    uuid: "message-max-tokens",
+    message: { stop_reason: "max_tokens", content: [{ type: "text", text: "Maximum output reached" }] },
+  })]);
+
   assert.equal(claude.terminalOutcome, "failed");
   assert.deepEqual(claude.terminalError, { message: "Maximum output reached", code: null });
 });
