@@ -5,7 +5,7 @@
 // This module exports startServer(); the runnable entry point is bin/codex-phone.mjs.
 
 import { execFileSync } from "node:child_process";
-import { timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import { readFileSync, existsSync, statSync, realpathSync } from "node:fs";
 import { basename, dirname, extname, join, resolve, sep, isAbsolute } from "node:path";
@@ -26,6 +26,7 @@ import { SendLedger } from "./send-ledger.mjs";
 import { ThreadSubscriptions } from "./thread-subscriptions.mjs";
 import { pruneAttachments, readAttachment, resolveAttachmentIds, storeAttachment } from "./attachments.mjs";
 import { UsageStateStore } from "./usage-state.mjs";
+import { usageRetryTrigger, UsageRetryPolicyStore, UsageRetryRunner, UsageRetryStore } from "./usage-retry.mjs";
 import { captureReplyStart, notificationBody, notificationTitle } from "./notification-content.mjs";
 import { localBridgeProof, validLocalProofNonce } from "./local-proof.mjs";
 import { TerminalRunner } from "./terminal-runner.mjs";
@@ -55,7 +56,10 @@ const authFailures = new Map();
 const threadSubscriptions = new ThreadSubscriptions({ file: join(APP_HOME, "thread-subscriptions.json") });
 const threadSettingsStore = new ThreadSettingsStore({ file: join(APP_HOME, "thread-settings.json") });
 const usageState = new UsageStateStore({ file: join(APP_HOME, "usage-state.json") });
+const usageRetryStore = new UsageRetryStore({ file: join(APP_HOME, "usage-retries.json") });
+const usageRetryPolicies = new UsageRetryPolicyStore({ file: join(APP_HOME, "usage-retry-policy.json") });
 const terminalRunner = new TerminalRunner();
+const globalUsageInterests = new Map();
 const PROJECT_RUN_CANDIDATE_LIMIT = 30;
 let threadSettings = null;
 
@@ -195,6 +199,8 @@ function broadcast(event, data) {
   for (const res of sseClients) {
     res.write(frame);
   }
+
+  maybeAutoQueueUsageResume(event, data);
 }
 
 // ---------- "agent finished" push ----------
@@ -352,7 +358,7 @@ const trailing = new Map();
 
 async function emitExternal({ provider, threadId, running, runConfidence, terminalId, terminalOutcome, terminalText, terminalError, changed }) {
   const key = metaKey(provider, threadId);
-  const terminal = { terminalId, terminalOutcome, terminalError };
+  const terminal = { terminalId, terminalOutcome, terminalError, observedChange: changed === true };
 
   if (!shouldEmitExternalUpdate(provider, threadId)) { return; }
 
@@ -448,25 +454,7 @@ async function sendOnce(provider, body, method = "send") {
   const patch = {};
   let dispatch = null;
 
-  if (method === "send") {
-    let listed;
-    let capabilities;
-    try {
-      const catalog = await provider.models();
-      listed = catalog?.data ?? [];
-      capabilities = catalog?.capabilities ?? null;
-    } catch (error) {
-      throw Object.assign(new Error(`Could not verify ${provider.name} models before sending: ${error?.message ?? error}`), {
-        status: 503,
-        code: "model_verification_failed",
-      });
-    }
-
-    const recorded = body?.threadId
-      ? await threadSettings.resolve(provider.name, body.threadId)
-      : null;
-    dispatch = validateDispatchSettings(provider.name, body, listed, recorded, capabilities);
-  }
+  if (method === "send") { dispatch = await validateSendDispatch(provider, body); }
 
   for (const key of ["model", "effort", "mode"]) {
     if (key === "mode" && body?.mode === "provider-exact") { continue; }
@@ -515,12 +503,32 @@ async function sendOnce(provider, body, method = "send") {
   });
 }
 
+async function validateSendDispatch(provider, body) {
+  let listed;
+  let capabilities;
+  try {
+    const catalog = await provider.models();
+    listed = catalog?.data ?? [];
+    capabilities = catalog?.capabilities ?? null;
+  } catch (error) {
+    throw Object.assign(new Error(`Could not verify ${provider.name} models before sending: ${error?.message ?? error}`), {
+      status: 503,
+      code: "model_verification_failed",
+    });
+  }
+
+  const recorded = body?.threadId
+    ? await threadSettings.resolve(provider.name, body.threadId)
+    : null;
+  return validateDispatchSettings(provider.name, body, listed, recorded, capabilities);
+}
+
 // The session-file watcher follows only what someone actually has open — the
 // same reports that drive unread-only push, reused so nothing extra is polled.
 function refreshInterest() {
   const now = Date.now();
   threadSubscriptions.pruneEndpoints((endpoint) => push.has(endpoint));
-  const wanted = threadSubscriptions.interests();
+  const wanted = [...threadSubscriptions.interests(), ...usageRetryPolicies.interests(), ...globalUsageInterests.values()];
 
   for (const [clientId, p] of presence) {
     if (now - p.at > PRESENCE_TTL_MS) {
@@ -792,6 +800,167 @@ threadSettings = new ThreadSettingsService({
 function pickProvider(name) {
   const selected = name || "codex";
   return USABLE_PROVIDER_NAMES.has(selected) ? providers[selected] ?? null : null;
+}
+
+function publicUsageRetry(entry) {
+  if (!entry) { return null; }
+  const { dispatch, ...publicEntry } = entry;
+  return publicEntry;
+}
+
+function publishUsageRetry(entry) {
+  broadcast("usage-retry", { entry: publicUsageRetry(entry) });
+}
+
+function maybeAutoQueueUsageResume(event, data) {
+  // Do not recursively inspect the status events emitted by the retry runner.
+  if (event === "usage-retry") { return; }
+  const threadId = data?.params?.threadId ?? data?.threadId;
+  const provider = data?.provider;
+  if (usageRetryPolicies.isGlobalEnabled() && provider && threadId) {
+    const key = metaKey(provider, threadId);
+    if (event === "notify" && data.method === "turn/started") {
+      globalUsageInterests.set(key, { provider, id: threadId });
+      refreshInterest();
+    } else if ((event === "notify" && ["turn/completed", "turn/failed", "turn/aborted"].includes(data.method))
+        || (event === "external" && data.terminalId && !data.running)) {
+      globalUsageInterests.delete(key);
+      refreshInterest();
+    }
+  }
+  const trigger = usageRetryTrigger(event, data);
+  if (!trigger || !usageRetryPolicies.get(trigger.provider, trigger.threadId).enabled) { return; }
+  queueMicrotask(() => autoQueueUsageResume(trigger).catch((error) => {
+    console.error("could not queue usage resume:", error);
+  }));
+}
+
+async function refreshGlobalUsageInterests() {
+  if (!usageRetryPolicies.isGlobalEnabled()) {
+    if (globalUsageInterests.size) { globalUsageInterests.clear(); refreshInterest(); }
+    return;
+  }
+
+  for (const [, provider] of usableProviderEntries()) {
+    try {
+      const listed = await provider.listThreads({ limit: PROJECT_RUN_CANDIDATE_LIMIT });
+      const ids = (listed.data ?? []).flatMap((thread) => [thread.id, ...(thread.subagents ?? []).map((child) => child.id)]).filter(Boolean);
+      const states = watch.runningDetails(provider.name, ids);
+      for (const id of ids) {
+        if (states[id]?.running) { globalUsageInterests.set(metaKey(provider.name, id), { provider: provider.name, id }); }
+      }
+    } catch (error) {
+      console.error(`could not refresh ${provider.name} global auto-resume interests:`, error?.message ?? error);
+    }
+  }
+  refreshInterest();
+}
+
+async function exactThreadDispatch(provider, threadId) {
+  const resolved = await threadSettings.resolve(provider.name, threadId);
+  const body = {
+    provider: provider.name,
+    threadId,
+    model: resolved.model,
+    effort: resolved.effort,
+    mode: resolved.mode,
+  };
+  if (provider.name === "codex" && resolved.modeKnown === false) {
+    body.mode = "provider-exact";
+    body.approvalPolicy = resolved.approvalPolicy;
+    body.sandbox = resolved.sandboxPolicy;
+  } else if (provider.name === "codex") {
+    const presets = {
+      "read-only": { approvalPolicy: "untrusted", sandbox: "read-only" },
+      auto: { approvalPolicy: "on-request", sandbox: "workspace-write" },
+      full: { approvalPolicy: "never", sandbox: "danger-full-access" },
+    };
+    Object.assign(body, presets[resolved.mode] ?? {});
+  }
+  const dispatch = await validateSendDispatch(provider, body);
+  return { ...body, ...dispatch };
+}
+
+async function autoQueueUsageResume({ provider: providerName, threadId, triggerId }) {
+  if (!usageRetryPolicies.get(providerName, threadId).enabled) { return null; }
+  if (usageRetryStore.list({ provider: providerName, threadId, activeOnly: true }).length) { return null; }
+  if (usageRetryStore.list({ provider: providerName, threadId }).some((entry) => entry.triggerId === triggerId)) { return null; }
+  const provider = pickProvider(providerName);
+  if (!provider) { return null; }
+  let body;
+  try {
+    body = await exactThreadDispatch(provider, threadId);
+  } catch (error) {
+    const failed = usageRetryStore.create({
+      id: randomUUID(), provider: provider.name, threadId, triggerId,
+      requestId: `usage-resume:${randomUUID()}`, text: "Continue.", dispatch: {},
+    });
+    const terminal = usageRetryStore.update(failed.id, {
+      state: "failed",
+      nextCheckAt: null,
+      error: { message: `Could not verify exact thread settings: ${error?.message ?? error}`, code: error?.code ?? "settings_unavailable", status: error?.status ?? null },
+    });
+    publishUsageRetry(terminal);
+    return terminal;
+  }
+  const entry = createUsageRetry(provider, body, { triggerId });
+  publishUsageRetry(entry);
+  scheduleUsageRetryCheck(entry.id);
+  return entry;
+}
+
+function createUsageRetry(provider, body, { triggerId = null } = {}) {
+  const dispatch = {
+    model: body.model,
+    effort: body.effort,
+    mode: body.mode,
+    approvalPolicy: body.approvalPolicy ?? null,
+    sandbox: body.sandbox ?? null,
+    cwd: body.cwd ?? null,
+    draft: false,
+  };
+  return usageRetryStore.create({
+    id: randomUUID(),
+    provider: provider.name,
+    threadId: body.threadId,
+    requestId: `usage-resume:${randomUUID()}`,
+    text: body.text || "Continue.",
+    dispatch,
+    triggerId,
+  });
+}
+
+const usageRetryRunner = new UsageRetryRunner({
+  store: usageRetryStore,
+  readUsage: async (providerName) => {
+    const provider = pickProvider(providerName);
+    if (!provider) { throw Object.assign(new Error("provider is unavailable"), { status: 409, code: "provider_unavailable" }); }
+    const live = await boundedUsageRefresh(provider.usage({ refresh: true }));
+    return { ...usageState.merge(provider.name, live), _capacityFresh: live?._fresh?.rateLimits === true };
+  },
+  readRuntime: async (providerName, threadId) => {
+    const provider = pickProvider(providerName);
+    if (!provider) { throw Object.assign(new Error("provider is unavailable"), { status: 409, code: "provider_unavailable" }); }
+    return threadRuntime(provider, threadId);
+  },
+  send: async (entry) => {
+    const provider = pickProvider(entry.provider);
+    if (!provider) { throw Object.assign(new Error("provider is unavailable"), { status: 409, code: "provider_unavailable" }); }
+    return sendOnce(provider, {
+      provider: entry.provider,
+      threadId: entry.threadId,
+      text: entry.text,
+      requestId: entry.requestId,
+      ...(entry.dispatch ?? {}),
+    });
+  },
+  onUpdate: publishUsageRetry,
+});
+
+function scheduleUsageRetryCheck(id) {
+  queueMicrotask(() => {
+    usageRetryRunner.check(id).catch((error) => console.error("usage retry check failed:", error));
+  });
 }
 
 // ---------- http helpers ----------
@@ -1504,6 +1673,71 @@ const routes = {
     json(res, 200, usageState.merge(p.name, {}));
   },
 
+  "GET /api/usage-retries": async (_req, res, url) => {
+    const provider = url.searchParams.get("provider") || undefined;
+    const threadId = url.searchParams.get("threadId") || undefined;
+    json(res, 200, { data: usageRetryStore.list({ provider, threadId }).map(publicUsageRetry) });
+  },
+
+  "POST /api/usage-retries": async (req, res) => {
+    const body = await readBody(req);
+    const provider = providerFromBody(res, body);
+    if (!provider) { return; }
+    if (!body?.threadId || !body?.text) {
+      return json(res, 400, { error: "threadId and text are required", code: "invalid_usage_retry" });
+    }
+
+    const existing = usageRetryStore.list({ provider: provider.name, threadId: body.threadId, activeOnly: true })[0];
+    if (existing) { return json(res, 200, { entry: publicUsageRetry(existing), existing: true }); }
+
+    // Capture exactly the currently selected turn settings, then re-validate
+    // them at dispatch time. A delayed resume must fail closed rather than let
+    // any provider silently choose a newer default model or permission mode.
+    const dispatch = await validateSendDispatch(provider, body);
+    const entry = createUsageRetry(provider, { ...body, ...dispatch });
+    publishUsageRetry(entry);
+    scheduleUsageRetryCheck(entry.id);
+    json(res, 201, { entry: publicUsageRetry(entry) });
+  },
+
+  "POST /api/usage-retries/cancel": async (req, res) => {
+    const body = await readBody(req);
+    const entry = usageRetryStore.cancel(body?.id);
+    publishUsageRetry(entry);
+    json(res, 200, { entry: publicUsageRetry(entry) });
+  },
+
+  "POST /api/usage-retries/check": async (req, res) => {
+    const body = await readBody(req);
+    const entry = await usageRetryRunner.check(body?.id);
+    if (!entry) { return json(res, 404, { error: "usage resume request not found", code: "usage_retry_not_found" }); }
+    json(res, 200, { entry: publicUsageRetry(entry) });
+  },
+
+  "GET /api/usage-retry-policy": async (_req, res, url) => {
+    const provider = url.searchParams.get("provider");
+    const threadId = url.searchParams.get("threadId");
+    if (!provider || !threadId) { return json(res, 400, { error: "provider and threadId are required", code: "invalid_usage_retry" }); }
+    if (!pickProvider(provider)) { return json(res, 400, { error: `unknown provider: ${provider}`, code: "invalid_usage_retry" }); }
+    json(res, 200, usageRetryPolicies.get(provider, threadId));
+  },
+
+  "POST /api/usage-retry-policy": async (req, res) => {
+    const body = await readBody(req);
+    if (body?.scope === "global") {
+      usageRetryPolicies.setGlobal(body.enabled);
+      queueMicrotask(() => refreshGlobalUsageInterests());
+      return json(res, 200, body.provider && body.threadId
+        ? usageRetryPolicies.get(body.provider, body.threadId)
+        : { globalEnabled: body.enabled });
+    }
+    if (body?.scope !== "thread") { return json(res, 400, { error: "scope must be global or thread", code: "invalid_usage_retry" }); }
+    if (!pickProvider(body.provider)) { return json(res, 400, { error: `unknown provider: ${body.provider}`, code: "invalid_usage_retry" }); }
+    const policy = usageRetryPolicies.setThread(body.provider, body.threadId, body.enabled);
+    refreshInterest();
+    json(res, 200, policy);
+  },
+
   "POST /api/terminal/run": async (req, res) => {
     const body = await readBody(req);
     json(res, 202, terminalRunner.start({ cwd: body?.cwd, command: body?.command }));
@@ -1923,6 +2157,10 @@ export function startServer(options = {}) {
   // can follow along instead of showing a snapshot.
   watch.start(emitExternal);
   setInterval(refreshInterest, 30000).unref?.();
+  setInterval(() => usageRetryRunner.tick().catch((error) => console.error("usage retry tick failed:", error)), 10000).unref?.();
+  queueMicrotask(() => usageRetryRunner.tick().catch((error) => console.error("initial usage retry tick failed:", error)));
+  setInterval(() => refreshGlobalUsageInterests(), 60000).unref?.();
+  queueMicrotask(() => refreshGlobalUsageInterests());
 
   for (const [, p] of usableProviderEntries()) {
     Promise.resolve(p.init()).catch((e) => console.error(`provider ${p.name} init failed:`, e));

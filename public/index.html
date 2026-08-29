@@ -347,6 +347,16 @@
   .opt.sel .radio { border-color: var(--accent); background: radial-gradient(circle, var(--accent) 42%, transparent 46%); }
   .opt .on { font-weight: 600; font-size: 14.5px; }
   .opt .od { font-size: 12.5px; color: var(--fg-dim); margin-top: 2px; }
+  .toggle-row { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--border); }
+  .toggle-row .toggle-copy { flex: 1; min-width: 0; }
+  .toggle-row .toggle-title { font-size: 14px; font-weight: 650; }
+  .toggle-row .toggle-desc { margin-top: 3px; color: var(--fg-dim); font-size: 12.5px; line-height: 1.35; }
+  .toggle { position: relative; width: 44px; height: 26px; flex: 0 0 44px; border: 0; border-radius: 999px; background: var(--bg3); cursor: pointer; transition: background .15s; }
+  .toggle::after { content: ""; position: absolute; width: 20px; height: 20px; left: 3px; top: 3px; border-radius: 50%; background: var(--fg-dim); transition: transform .15s, background .15s; }
+  .toggle.on { background: #238636; }
+  .toggle.on::after { transform: translateX(18px); background: #fff; }
+  .usage-resume { width: min(100%, 760px); color: var(--warn); border-color: #9e6a0366; border-style: dashed; }
+  .usage-resume span { white-space: normal; overflow: visible; text-overflow: clip; }
   .sheet .seclabel { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--fg-faint); margin: 16px 0 8px; font-family: ui-monospace, Menlo, monospace; }
   .primary-btn { width: 100%; background: var(--accent); color: #04260f; border: none; border-radius: 11px; padding: 13px; font-size: 15px; font-weight: 600; cursor: pointer; margin-top: 14px; }
   .primary-btn:disabled { opacity: .4; }
@@ -572,6 +582,7 @@
     <button id="filesBtn" class="hbtn icon" aria-label="Files" style="display:none"><svg viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg></button>
     <button id="terminalBtn" class="hbtn icon" aria-label="Project terminal" title="Project terminal" style="display:none"><svg viewBox="0 0 24 24"><path d="M4 17l6-5-6-5"/><path d="M12 19h8"/></svg></button>
     <button id="notifyBtn" class="hbtn icon" aria-label="Task notifications" aria-haspopup="dialog" style="display:none"><svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg></button>
+    <button id="settingsBtn" class="hbtn icon" aria-label="Task settings" aria-haspopup="dialog" title="Task settings" style="display:none"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21h-4v-.1A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3v-4h.1A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3h4v.1A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.2.37.54.73 1 .92.34.15.72.2 1.1.18H21v4h-.1a1.7 1.7 0 0 0-1.5.9z"/></svg></button>
     <button id="usageBtn" class="hbtn icon" aria-label="Usage"><svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 18 0 9 9 0 0 0-18 0z"/><path d="M12 12l4-2"/><path d="M12 7v0"/></svg></button>
     <div id="connDot" title="event stream"></div>
   </header>
@@ -1002,6 +1013,8 @@ const state = {
   lastDiff: "",
   threadFiles: new Map(), // path -> { path, edited } for the open thread
   terminalJobs: new Map(), // provider:thread -> last project terminal command
+  usageRetries: new Map(), // durable bridge-side resume requests by id
+  usageRetryPolicy: { globalEnabled: false, threadOverride: null, enabled: false },
   activityGroup: null,    // newest contiguous Codex activity run
   lock: { state: "unknown", label: "Checking…" },
   sendStage: null,        // { requestId, threadId, text, bubble, chip }
@@ -2362,9 +2375,11 @@ function renderItem(item, opts = {}) {
     }
     case "turnError": {
       const detail = item.message || "The provider ended this turn with an error.";
+      if (item.terminalId && box().querySelector(`[data-terminal-id="${CSS.escape(String(item.terminalId))}"]`)) { return []; }
       const el = chip("⚠️", detail);
       el.classList.add("turn-error");
       if (item.terminalId) { el.dataset.terminalId = item.terminalId; }
+      decorateUsageLimitError(el, detail);
       return [el];
     }
     default: break;
@@ -2599,7 +2614,137 @@ function showTurnFailure(error, terminalId = null) {
   const el = chip("⚠️", message);
   el.classList.add("turn-error");
   if (terminalId) { el.dataset.terminalId = terminalId; }
+  decorateUsageLimitError(el, message);
   return el;
+}
+
+function isUsageLimitMessage(message) {
+  return /(?:usage|spend|rate)[\s_-]*(?:limit|exhausted)|(?:limit|credits?)\s+(?:was\s+)?(?:reached|exhausted)|monthly\s+spend/i.test(String(message || ""));
+}
+
+function usageRetryForOpenThread() {
+  if (!state.active) { return null; }
+  const pending = new Set(["waiting_usage", "waiting_thread", "checking", "dispatching"]);
+  return [...state.usageRetries.values()]
+    .filter((entry) => entry.provider === activeProvider() && entry.threadId === state.active.id && pending.has(entry.state))
+    .sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))[0] || null;
+}
+
+function formatRetryTime(value) {
+  const raw = Number(value);
+  if (!raw) { return null; }
+  const at = raw < 1e12 ? raw * 1000 : raw;
+  return new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(new Date(at));
+}
+
+function usageRetryText(entry) {
+  const reset = formatRetryTime(entry.resetAt);
+  const nextCheck = formatRetryTime(entry.nextCheckAt);
+  const account = entry.account?.email || entry.account?.accountLabel || entry.account?.planType || null;
+  const suffix = [account, reset ? `provider reset ${reset}` : null, nextCheck ? `next check ${nextCheck}` : null].filter(Boolean).join(" · ");
+  const labels = {
+    waiting_usage: "Auto-resume queued — checking current account every minute",
+    checking: "Checking current account usage…",
+    waiting_thread: "Usage is available — waiting for this turn to be idle",
+    dispatching: "Sending Continue…",
+    uncertain: "Continue delivery is uncertain — it will not be sent again",
+    failed: "Auto-resume could not send Continue",
+  };
+  const failure = ["uncertain", "failed"].includes(entry.state) && entry.error?.message ? ` · ${entry.error.message}` : "";
+  return `${labels[entry.state] || "Auto-resume queued"}${suffix ? ` · ${suffix}` : ""}${failure}`;
+}
+
+function renderUsageRetry(entry) {
+  if (!entry || !state.active || entry.provider !== activeProvider() || entry.threadId !== state.active.id) { return; }
+  box().querySelectorAll("[data-usage-resume-id]").forEach((node) => node.remove());
+  if (["accepted", "cancelled"].includes(entry.state)) { return; }
+  const el = chip(entry.state === "uncertain" || entry.state === "failed" ? "⚠️" : "⏳", usageRetryText(entry));
+  el.classList.add("usage-resume");
+  el.dataset.usageResumeId = entry.id;
+  const actions = document.createElement("div");
+  actions.className = "pending-actions";
+  if (["waiting_usage", "waiting_thread", "checking"].includes(entry.state)) {
+    const check = document.createElement("button");
+    check.className = "pending-action";
+    check.textContent = "Check now";
+    check.onclick = async () => {
+      check.disabled = true;
+      try { updateUsageRetry(await api("/api/usage-retries/check", { id: entry.id }).then((result) => result.entry)); }
+      catch (error) { chip("⚠️", "Could not check usage: " + error.message); }
+      finally { if (check.isConnected) { check.disabled = false; } }
+    };
+    actions.appendChild(check);
+    const cancel = document.createElement("button");
+    cancel.className = "pending-action cancel";
+    cancel.textContent = "Cancel";
+    cancel.onclick = async () => {
+      cancel.disabled = true;
+      try { updateUsageRetry(await api("/api/usage-retries/cancel", { id: entry.id }).then((result) => result.entry)); }
+      catch (error) { chip("⚠️", "Could not cancel auto-resume: " + error.message); }
+    };
+    actions.appendChild(cancel);
+  }
+  if (actions.childElementCount) { el.appendChild(actions); }
+}
+
+function updateUsageRetry(entry) {
+  if (!entry?.id) { return; }
+  state.usageRetries.set(entry.id, entry);
+  const active = usageRetryForOpenThread();
+  box().querySelectorAll("[data-queue-usage-resume]").forEach((button) => {
+    button.disabled = !!active;
+    button.textContent = active ? "Resume queued" : "Resume when usage returns";
+  });
+  renderUsageRetry(entry);
+}
+
+async function loadUsageRetryState(thread = state.active) {
+  if (!thread || thread.draft) { return; }
+  const provider = thread.provider || "codex";
+  try {
+    const [retries, policy] = await Promise.all([
+      api(`/api/usage-retries?provider=${encodeURIComponent(provider)}&threadId=${encodeURIComponent(thread.id)}`),
+      api(`/api/usage-retry-policy?provider=${encodeURIComponent(provider)}&threadId=${encodeURIComponent(thread.id)}`),
+    ]);
+    if (state.active !== thread) { return; }
+    for (const entry of retries.data || []) { state.usageRetries.set(entry.id, entry); }
+    state.usageRetryPolicy = policy;
+    const latest = usageRetryForOpenThread() || (retries.data || []).find((entry) => ["uncertain", "failed"].includes(entry.state));
+    if (latest) { renderUsageRetry(latest); }
+  } catch {}
+}
+
+async function queueUsageResume() {
+  const target = state.active;
+  const readiness = dispatchReadiness();
+  const mode = currentMode();
+  if (!target || !readiness.ready || mode.unknown) { throw new Error(readiness.reason || "Exact thread settings are unavailable"); }
+  const result = await api("/api/usage-retries", {
+    provider: activeProvider(), threadId: target.id, text: "Continue.", cwd: target.cwd,
+    model: state.model, effort: state.effort, mode: mode.key,
+    approvalPolicy: mode.approvalPolicy, sandbox: mode.sandbox,
+  });
+  updateUsageRetry(result.entry);
+  return result.entry;
+}
+
+function decorateUsageLimitError(el, message) {
+  if (!isUsageLimitMessage(message) || !state.active || el.querySelector("[data-queue-usage-resume]")) { return; }
+  const actions = document.createElement("div");
+  actions.className = "pending-actions";
+  const button = document.createElement("button");
+  button.className = "pending-action";
+  button.dataset.queueUsageResume = "";
+  button.textContent = usageRetryForOpenThread() ? "Resume queued" : "Resume when usage returns";
+  button.disabled = !!usageRetryForOpenThread();
+  button.onclick = async () => {
+    button.disabled = true;
+    button.textContent = "Queuing…";
+    try { await queueUsageResume(); button.textContent = "Resume queued"; }
+    catch (error) { button.disabled = false; button.textContent = "Resume when usage returns"; chip("⚠️", "Could not queue auto-resume: " + error.message); }
+  };
+  actions.appendChild(button);
+  el.appendChild(actions);
 }
 
 // Changes to a thread someone else is driving, as operations rather than "here
@@ -2783,7 +2928,7 @@ function onNotify(method, params, provider) {
         liveItem(id, () => {
           const el = makeBlock("reasoning", "🧠", "Thinking…", { open: false });
           el.querySelector(".lbl").classList.add("shimmer");
-          return { el, body: el.querySelector(".body") };
+          return { el, body: el.querySelector(".body"), kind: "reasoning" };
         });
       } else if (item.type === "fileChange") {
         // wait for completed to know the changes
@@ -2797,7 +2942,7 @@ function onNotify(method, params, provider) {
     }
 
     case "item/agentMessage/delta": {
-      const rec = liveItem(params.itemId, () => ({ el: addAgent("", true, params.itemId) }));
+      const rec = liveItem(params.itemId, () => ({ el: addAgent("", true, params.itemId), kind: "agentMessage" }));
       appendAgent(rec.el, params.delta ?? "");
       scrollDown();
       break;
@@ -2811,11 +2956,11 @@ function onNotify(method, params, provider) {
         // happening at all.
         if (activeProvider() === "codex") {
           const [el] = renderActivityItem({ type: "reasoning", content: "" }, { live: true, started: true });
-          return { el, body: el.querySelector(".body"), summaryText: "" };
+          return { el, body: el.querySelector(".body"), summaryText: "", kind: "reasoning" };
         }
 
         const el = makeBlock("reasoning", "🧠", "Thinking…", { open: false });
-        return { el, body: el.querySelector(".body"), summaryText: "" };
+        return { el, body: el.querySelector(".body"), summaryText: "", kind: "reasoning" };
       });
       rec.body.textContent += params.delta ?? "";
 
@@ -2847,7 +2992,7 @@ function onNotify(method, params, provider) {
       const item = params.item ?? {};
       const rec = state.items.get(item.id);
 
-      if (item.type === "agentMessage" && rec) {
+      if (item.type === "agentMessage" && rec?.kind === "agentMessage") {
         rec.el.classList.remove("streaming");
         rec.el._raw = item.text ?? rec.el._raw;
         renderFinalMarkdownInto(rec.el, rec.el._raw);
@@ -2871,7 +3016,7 @@ function onNotify(method, params, provider) {
         if (item.aggregatedOutput && rec.pre && !rec.pre.textContent) { rec.pre.textContent = item.aggregatedOutput; }
 
         updateActivityRow(rec.el, item, { live: true });
-      } else if (item.type === "reasoning" && rec) {
+      } else if (item.type === "reasoning" && rec?.kind === "reasoning") {
         // Keep the summary as the heading — it says more than "Thought process"
         // — but stop it shimmering now that nothing further is coming.
         const done = Array.isArray(item.summary) ? item.summary.join("\n\n") : (rec.summaryText || "");
@@ -2978,6 +3123,7 @@ async function openThread(t) {
   $("filesBtn").style.display = "none";
   $("terminalBtn").style.display = t.cwd ? "flex" : "none";
   $("notifyBtn").style.display = "flex";
+  $("settingsBtn").style.display = t.draft ? "none" : "flex";
   sendPresence();
   setBusy(false);
   syncControls();
@@ -3048,6 +3194,7 @@ async function openThread(t) {
 
     renderHistory(res.thread, res.itemWindow);
     scrollDown({ force: true });
+    loadUsageRetryState(t);
     state.fetching = false;
     setCursor(res);
     if (res.runtime) {
@@ -3138,6 +3285,7 @@ function backToList() {
   $("filesBtn").style.display = "none";
   $("terminalBtn").style.display = "none";
   $("notifyBtn").style.display = "none";
+  $("settingsBtn").style.display = "none";
   updateListChrome();
   $("tokCount").textContent = "";
   loadThreads(false);
@@ -5979,6 +6127,61 @@ async function openTaskNotificationSheet(thread) {
   });
 }
 
+async function openTaskSettingsSheet() {
+  const thread = state.active;
+  if (!thread) { return; }
+  const provider = thread.provider || "codex";
+  openSheet('<h2>Task settings</h2><div class="hint">Loading settings…</div>');
+
+  try {
+    state.usageRetryPolicy = await api(`/api/usage-retry-policy?provider=${encodeURIComponent(provider)}&threadId=${encodeURIComponent(thread.id)}`);
+  } catch (error) {
+    if (state.active === thread) { $("sheetBody").innerHTML = `<h2 id="sheetTitle">Task settings</h2><div class="hint">Could not load settings: ${esc(error.message)}</div>`; }
+    return;
+  }
+  if (state.active !== thread || !$("sheet").classList.contains("show")) { return; }
+
+  const render = () => {
+    const policy = state.usageRetryPolicy;
+    const inherited = policy.threadOverride == null;
+    $("sheetBody").innerHTML = `<h2 id="sheetTitle">Task settings</h2>
+      <div class="toggle-row">
+        <div class="toggle-copy"><div class="toggle-title">Auto-continue after usage resets</div><div class="toggle-desc">For this chat, queue one <b>Continue.</b> after a confirmed usage-limit stop. The bridge checks the currently signed-in account every minute.</div></div>
+        <button type="button" class="toggle ${policy.enabled ? "on" : ""}" data-retry-scope="thread" role="switch" aria-checked="${policy.enabled}"></button>
+      </div>
+      <div class="toggle-row">
+        <div class="toggle-copy"><div class="toggle-title">Enable for all chats</div><div class="toggle-desc">Global default for Codex, Claude, and Grok chats on this bridge. New installs start with this off.</div></div>
+        <button type="button" class="toggle ${policy.globalEnabled ? "on" : ""}" data-retry-scope="global" role="switch" aria-checked="${policy.globalEnabled}"></button>
+      </div>
+      <div class="hint" style="margin-top:12px">${inherited ? `This chat currently follows the global default (${policy.globalEnabled ? "on" : "off"}).` : `This chat has its own ${policy.threadOverride ? "on" : "off"} override.`}</div>
+      ${inherited ? "" : '<button type="button" class="pending-action" data-retry-inherit>Use global default</button>'}`;
+
+    $("sheetBody").querySelectorAll("[data-retry-scope]").forEach((button) => {
+      button.onclick = async () => {
+        $("sheetBody").querySelectorAll("button").forEach((candidate) => candidate.disabled = true);
+        try {
+          const scope = button.dataset.retryScope;
+          const enabled = scope === "global" ? !policy.globalEnabled : !policy.enabled;
+          state.usageRetryPolicy = await api("/api/usage-retry-policy", {
+            scope, enabled, provider, threadId: thread.id,
+          });
+          render();
+        } catch (error) {
+          chip("⚠️", "Could not save auto-resume setting: " + error.message);
+          render();
+        }
+      };
+    });
+    $("sheetBody").querySelector("[data-retry-inherit]")?.addEventListener("click", async () => {
+      try {
+        state.usageRetryPolicy = await api("/api/usage-retry-policy", { scope: "thread", enabled: null, provider, threadId: thread.id });
+        render();
+      } catch (error) { chip("⚠️", "Could not save auto-resume setting: " + error.message); }
+    });
+  };
+  render();
+}
+
 async function wireNotifications() {
   const btn = $("pushBtn");
   const hint = $("pushHint");
@@ -6687,6 +6890,7 @@ function connectEvents() {
 
     if (frame.provider === activeProvider()) { updateSendProgress(frame); }
   });
+  es.addEventListener("usage-retry", (e) => updateUsageRetry(JSON.parse(e.data).entry));
   es.addEventListener("lock", (e) => {
     const frame = JSON.parse(e.data);
     const open = state.active && frame.provider === "codex" && frame.threadId === state.active.id;
@@ -6830,6 +7034,7 @@ $("lockCtl").onclick = openLockSheet;
 $("newBtn").onclick = openNewSession;
 $("usageBtn").onclick = openUsageSheet;
 $("notifyBtn").onclick = () => state.active && openTaskNotificationSheet(state.active);
+$("settingsBtn").onclick = openTaskSettingsSheet;
 $("diffBtn").onclick = () => openDiffSheet(state.lastDiff || "No diff");
 $("filesBtn").onclick = openFilesSheet;
 $("terminalBtn").onclick = openTerminalSheet;

@@ -1082,16 +1082,18 @@ export class GrokProvider extends BaseProvider {
   }
 
   async usage({ refresh } = {}) {
-    if (!refresh && this.billingCache && Date.now() - this.billingCache.at < 30000) { return this.billingCache.data; }
+    if (!refresh && this.billingCache && Date.now() - this.billingCache.at < 30000) {
+      return { ...this.billingCache.data, _fresh: { account: false, rateLimits: false } };
+    }
     if (this.billingInFlight) { return this.billingInFlight; }
 
     this.billingInFlight = Promise.resolve().then(this.billingFetcher).then((payload) => {
       const data = grokBillingUsage(payload);
       if (!data) { throw new Error("Grok returned no billing usage"); }
       this.billingCache = { at: Date.now(), data };
-      return data;
+      return { ...data, _fresh: { account: true, rateLimits: true } };
     }).catch((error) => {
-      if (this.billingCache?.data) { return this.billingCache.data; }
+      if (this.billingCache?.data) { return { ...this.billingCache.data, _fresh: { account: false, rateLimits: false } }; }
       throw error;
     })
       .finally(() => { this.billingInFlight = null; });

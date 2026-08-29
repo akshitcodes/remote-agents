@@ -30,6 +30,7 @@
     "config.mjs",
     "onboarding.mjs",
     "usage-state.mjs",
+    "usage-retry.mjs",
     "notification-content.mjs",
     "local-proof.mjs",
     "terminal-runner.mjs",

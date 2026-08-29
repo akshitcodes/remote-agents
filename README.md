@@ -159,6 +159,8 @@ The existing configuration home is reused:
 ```text
 ~/.codex-phone/config.json       token, port, public URL, VAPID keypair, options
 ~/.codex-phone/push.json         browser Web Push subscriptions
+~/.codex-phone/usage-retry-policy.json  global/per-task auto-resume choices
+~/.codex-phone/usage-retries.json       durable pending usage-limit resumes
 ~/.codex-phone/logs/             background-service logs
 ```
 
@@ -181,6 +183,21 @@ Supported optional config fields include:
 working directory and sibling Git worktrees. `anywhere` removes that viewer
 check. The token is still the real security boundary because a paired client can
 drive an agent.
+
+### Continue after a usage limit
+
+Auto-resume is off by default. Open a task, tap the settings gear, and enable
+**Auto-continue after usage resets** for that task, or enable it for all tasks.
+After a provider reports a terminal usage-limit failure, the bridge durably
+queues one `Continue.` message. It refreshes the currently signed-in account's
+usage every minute, waits for the task to be idle, and revalidates the exact
+model, effort, and permission settings before sending. Switching provider
+accounts is picked up by the next check.
+
+The queued status, provider reset hint, next check, **Check now**, and **Cancel**
+remain available after closing the PWA or restarting the bridge. A bridge
+restart during the actual send is marked uncertain and is never retried
+automatically, because sending twice is worse than requiring a manual check.
 
 ## When a provider is not detected
 

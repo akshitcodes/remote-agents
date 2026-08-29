@@ -959,19 +959,37 @@ export class ClaudeProvider extends BaseProvider {
       // assistant
       const turn = ensureTurn();
 
-      // One message can carry several text/thinking blocks, so the block index
-      // is part of an item's identity. The live stream ids these as
-      // `${message.id}:${index}` — match that exactly, or the client cannot tell
-      // that a file-rendered item and a streamed one are the same item and draws
-      // both.
+      // Claude persists provider failures as synthetic assistant records. They
+      // are terminal state, not an assistant answer: rendering both this text
+      // and the terminal failure draws the same error twice.
+      if (obj.isApiErrorMessage === true) {
+        const message = blocks.filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n").trim();
+
+        if (message) {
+          turn.items.push({
+            type: "turnError",
+            message,
+            terminalId: `claude:${obj.uuid ?? obj.message?.id ?? "provider-error"}`,
+          });
+        }
+
+        continue;
+      }
+
+      // Claude 2.1.250 writes one logical assistant message as several JSONL
+      // records that share message.id but have distinct record UUIDs. The
+      // record UUID is the stable replay identity; reusing each record's local
+      // block index makes unrelated thinking and text records collide at :0.
       for (const [blockIndex, block] of blocks.entries()) {
+        const replayId = `${obj.uuid ?? obj.message?.id ?? "assistant"}:${blockIndex}`;
+
         if (block.type === "text") {
           if ((block.text ?? "").trim()) {
-            turn.items.push({ type: "agentMessage", id: `${obj.message?.id}:${blockIndex}`, text: block.text });
+            turn.items.push({ type: "agentMessage", id: replayId, text: block.text });
           }
         } else if (block.type === "thinking") {
           if ((block.thinking ?? "").trim()) {
-            turn.items.push({ type: "reasoning", id: `${obj.message?.id}:${blockIndex}`, summary: [block.thinking] });
+            turn.items.push({ type: "reasoning", id: replayId, summary: [block.thinking] });
           }
         } else if (block.type === "tool_use") {
           const item = toolUseToItem(block);
@@ -1055,7 +1073,7 @@ export class ClaudeProvider extends BaseProvider {
         env: { ...process.env, PATH: augmentedPath() },
       });
       const fromSwap = claudeSwapUsage(JSON.parse(stdout));
-      if (fromSwap) { return fromSwap; }
+      if (fromSwap) { return { ...fromSwap, _fresh: { account: true, rateLimits: true } }; }
     } catch (error) {
       commandError = error;
       // claude-swap is optional. Fall back to the last native rate-limit event
@@ -1083,6 +1101,7 @@ export class ClaudeProvider extends BaseProvider {
       account: { type: "claude", email: null, planType: "Claude" },
       rateLimits: primary ? { rateLimits: { primary } } : null,
       usage: null,
+      _fresh: { account: false, rateLimits: false },
     };
   }
 
@@ -1145,6 +1164,9 @@ export class ClaudeProvider extends BaseProvider {
       turnId: null,
       streamMsgId: null,
       blockKinds: new Map(), // block index -> "text" | "thinking" | "tool_use"
+      blockTexts: new Map(), // block index -> text assembled from native deltas
+      completedBlocks: new Set(),
+      assistantEnvelopeSeq: 0,
       toolKinds: new Map(), // tool_use_id -> "cmd" | "file" | "mcp"
       toolCommands: new Map(), // tool_use_id -> command string
       // tool_use_id -> the model's own one-line account of the call, needed
@@ -1160,6 +1182,9 @@ export class ClaudeProvider extends BaseProvider {
     ctx.turnId = null;
     ctx.streamMsgId = null;
     ctx.blockKinds = new Map();
+    ctx.blockTexts = new Map();
+    ctx.completedBlocks = new Set();
+    ctx.assistantEnvelopeSeq = 0;
     ctx.toolKinds = new Map();
     ctx.toolCommands = new Map();
     ctx.toolDescriptions = new Map();
@@ -1499,7 +1524,11 @@ export class ClaudeProvider extends BaseProvider {
     }
 
     if (obj.type === "assistant") {
-      this.handleAssistantMessage(obj.message ?? {}, ctx);
+      // Synthetic API errors are reported once by the result/exit path. They
+      // must never also masquerade as normal assistant content in the live UI.
+      if (obj.isApiErrorMessage !== true) {
+        this.handleAssistantMessage(obj.message ?? {}, ctx);
+      }
       return;
     }
 
@@ -1596,12 +1625,17 @@ export class ClaudeProvider extends BaseProvider {
         }
 
         ctx.blockKinds = new Map();
+        ctx.blockTexts = new Map();
+        ctx.completedBlocks = new Set();
+        ctx.assistantEnvelopeSeq = 0;
         break;
       }
 
       case "content_block_start": {
         const kind = event.content_block?.type;
         ctx.blockKinds.set(event.index, kind);
+        const initial = kind === "text" ? event.content_block?.text : kind === "thinking" ? event.content_block?.thinking : null;
+        if (typeof initial === "string") { ctx.blockTexts.set(event.index, initial); }
         if (["text", "thinking", "tool_use"].includes(kind)) { ctx.sawAssistantOutput = true; }
         break;
       }
@@ -1612,8 +1646,10 @@ export class ClaudeProvider extends BaseProvider {
         const delta = event.delta ?? {};
 
         if (delta.type === "text_delta" && kind === "text") {
+          ctx.blockTexts.set(event.index, (ctx.blockTexts.get(event.index) ?? "") + (delta.text ?? ""));
           this.notify("item/agentMessage/delta", { threadId: tid, itemId, delta: delta.text ?? "" });
         } else if (delta.type === "thinking_delta" && kind === "thinking") {
+          ctx.blockTexts.set(event.index, (ctx.blockTexts.get(event.index) ?? "") + (delta.thinking ?? ""));
           this.notify("item/reasoning/summaryTextDelta", { threadId: tid, itemId, delta: delta.thinking ?? "" });
         }
 
@@ -1630,13 +1666,29 @@ export class ClaudeProvider extends BaseProvider {
   handleAssistantMessage(message, ctx) {
     const tid = ctx.emitThreadId;
     const content = Array.isArray(message.content) ? message.content : [];
+    const envelopeSeq = ctx.assistantEnvelopeSeq++;
 
     if (content.some((block) => ["text", "thinking", "tool_use"].includes(block?.type))) {
       ctx.sawAssistantOutput = true;
     }
 
     content.forEach((block, i) => {
-      const itemId = `${message.id}:${i}`;
+      const kind = block?.type;
+      const candidates = message.id && message.id === ctx.streamMsgId
+        ? [...ctx.blockKinds.entries()].filter(([, candidateKind]) => candidateKind === kind).map(([index]) => index)
+        : [];
+      const value = kind === "text" ? block.text : kind === "thinking" ? block.thinking : null;
+      const exact = typeof value === "string"
+        ? candidates.find((index) => ctx.blockTexts.get(index) === value)
+        : undefined;
+      const unused = candidates.find((index) => !ctx.completedBlocks.has(index));
+      const typeOrdinal = content.slice(0, i).filter((candidate) => candidate?.type === kind).length;
+      const streamIndex = exact ?? unused ?? candidates[typeOrdinal];
+      const itemId = streamIndex != null
+        ? `${message.id}:${streamIndex}`
+        : `${message.id ?? "assistant"}:assembled:${envelopeSeq}:${i}`;
+
+      if (streamIndex != null) { ctx.completedBlocks.add(streamIndex); }
 
       if (block.type === "text") {
         if ((block.text ?? "").trim()) {

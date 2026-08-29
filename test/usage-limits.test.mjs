@@ -166,7 +166,9 @@ test("Grok billing checks deduplicate, cache, and honor explicit refresh", async
   assert.equal(calls, 2);
   assert.equal(first.rateLimits.rateLimits.primary.usedPercent, 12);
   assert.deepEqual(second, first);
-  assert.deepEqual(cached, first);
+  assert.deepEqual(cached.rateLimits, first.rateLimits);
+  assert.equal(cached._fresh.rateLimits, false);
+  assert.equal(first._fresh.rateLimits, true);
   assert.deepEqual(refreshed, first);
   clearInterval(provider.reaper);
 });

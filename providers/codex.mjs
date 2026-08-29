@@ -808,6 +808,10 @@ export class CodexProvider extends BaseProvider {
         account: account.status === "fulfilled" ? account.value.account : previous.account ?? null,
         rateLimits: rateLimits.status === "fulfilled" ? rateLimits.value : previous.rateLimits ?? null,
         usage: null,
+        _fresh: {
+          account: account.status === "fulfilled",
+          rateLimits: rateLimits.status === "fulfilled",
+        },
       };
     }
 

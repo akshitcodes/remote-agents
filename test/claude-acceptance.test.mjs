@@ -132,6 +132,46 @@ test("a streamed Claude response remains a successful terminal result", () => {
   assert.ok(!events.some(({ data }) => data?.method === "turn/failed"));
 });
 
+test("Claude partial assistant envelopes keep the native logical block identity", () => {
+  const events = [];
+  const provider = new ClaudeProvider((event, data) => events.push({ event, data }));
+  const session = fakeSession(provider, () => {});
+
+  provider.handleAnthropicEvent({ type: "message_start", message: { id: "msg-split" } }, session.ctx, session);
+  provider.handleAnthropicEvent({ type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } }, session.ctx, session);
+  provider.handleAnthropicEvent({ type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "considering" } }, session.ctx, session);
+  provider.handleAnthropicEvent({ type: "content_block_start", index: 1, content_block: { type: "text", text: "" } }, session.ctx, session);
+  provider.handleAnthropicEvent({ type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "Answer" } }, session.ctx, session);
+  provider.handleStreamLine(JSON.stringify({
+    type: "assistant",
+    message: { id: "msg-split", content: [{ type: "text", text: "Answer" }] },
+  }), session);
+
+  const completed = events.filter(({ data }) => data?.method === "item/completed").map(({ data }) => data.params.item);
+  assert.deepEqual(completed, [{ type: "agentMessage", id: "msg-split:1", text: "Answer" }]);
+  assert.ok(!completed.some((item) => item.id === "msg-split:0"));
+});
+
+test("Claude synthetic API errors are not emitted as assistant answers", () => {
+  const events = [];
+  const provider = new ClaudeProvider((event, data) => events.push({ event, data }));
+  const session = fakeSession(provider, () => {});
+
+  provider.handleStreamLine(JSON.stringify({
+    type: "assistant",
+    uuid: "rate-limit-row",
+    isApiErrorMessage: true,
+    error: "rate_limit",
+    message: {
+      id: "synthetic-message",
+      content: [{ type: "text", text: "You've hit your monthly spend limit." }],
+    },
+  }), session);
+
+  assert.ok(!events.some(({ data }) => data?.method === "item/completed"));
+  assert.equal(session.ctx.sawAssistantOutput, false);
+});
+
 test("Claude acknowledgement timeout is uncertain without killing the live turn", async () => {
   const provider = new ClaudeProvider(() => {}, { acceptTimeoutMs: 10 });
   let killed = false;
@@ -194,5 +234,35 @@ test("Claude transcript images retain a bridge attachment reference", async () =
   assert.deepEqual(result.thread.turns[0].items[0].content, [
     { type: "text", text: "inspect" },
     { type: "image", attachment: { id: "stored.png", mimeType: "image/png" } },
+  ]);
+});
+
+test("Claude replay keeps split records distinct and renders provider errors once", async () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-phone-claude-split-history-"));
+  const project = join(root, "project");
+  mkdirSync(project);
+  const rows = [
+    { type: "user", uuid: "user-1", message: { content: [{ type: "text", text: "review" }] } },
+    { type: "assistant", uuid: "thinking-row", message: { id: "shared-message", content: [{ type: "thinking", thinking: "analysis" }] } },
+    { type: "assistant", uuid: "text-row", message: { id: "shared-message", content: [{ type: "text", text: "answer" }] } },
+    {
+      type: "assistant",
+      uuid: "rate-limit-row",
+      isApiErrorMessage: true,
+      error: "rate_limit",
+      message: { id: "synthetic", content: [{ type: "text", text: "You've hit your monthly spend limit." }] },
+    },
+  ];
+  writeFileSync(join(project, "thread-split.jsonl"), rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+  const provider = new ClaudeProvider(() => {}, { projectsDir: root });
+
+  const result = await provider.readThread("thread-split");
+  const items = result.thread.turns.flatMap((turn) => turn.items);
+
+  assert.deepEqual(items.map((item) => ({ type: item.type, id: item.id, terminalId: item.terminalId })), [
+    { type: "userMessage", id: undefined, terminalId: undefined },
+    { type: "reasoning", id: "thinking-row:0", terminalId: undefined },
+    { type: "agentMessage", id: "text-row:0", terminalId: undefined },
+    { type: "turnError", id: undefined, terminalId: "claude:rate-limit-row" },
   ]);
 });

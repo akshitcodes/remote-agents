@@ -464,6 +464,7 @@ test("the published package allowlist includes current and portable runtime modu
   const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   const required = [
     "usage-state.mjs",
+    "usage-retry.mjs",
     "notification-content.mjs",
     "local-proof.mjs",
     "provider-detect.mjs",

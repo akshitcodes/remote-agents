@@ -233,6 +233,13 @@ test("provider terminal errors stay visible live and after transcript reload", (
   assert.match(server, /notificationBody\(reply, \{ failed, errorText: terminalError\?\.message \}\)/);
 });
 
+test("completed Claude text cannot overwrite a reasoning record with a colliding id", () => {
+  assert.match(html, /kind: "agentMessage"/);
+  assert.match(html, /kind: "reasoning"/);
+  assert.match(html, /item\.type === "agentMessage" && rec\?\.kind === "agentMessage"/);
+  assert.match(html, /item\.type === "reasoning" && rec\?\.kind === "reasoning"/);
+});
+
 test("desktop workspace keeps session navigation visible and constrains the chat", () => {
   assert.match(html, /@media \(min-width: 960px\)/);
   assert.match(html, /body\.thread-open #app[\s\S]*?grid-template-columns: clamp\(310px, 24vw, 380px\) minmax\(0, 1fr\)/);
@@ -260,7 +267,7 @@ test("desktop workspace keeps session navigation visible and constrains the chat
   assert.match(html, /event\.key === "Escape"/);
   assert.match(server, /const body = renderIndexHtml\(req\.headers\["user-agent"\][\s\S]*?return res\.end\(body\)/);
   assert.match(onboarding, /const readIndexShell = createIndexShellReader\(indexHtmlPath\)/);
-  assert.match(sw, /const CACHE_VERSION = "remote-agents-v21"/);
+  assert.match(sw, /const CACHE_VERSION = "remote-agents-v22"/);
 });
 
 test("project terminal is authenticated, cwd-scoped, bounded, and never auto-retries commands", () => {
@@ -275,6 +282,20 @@ test("project terminal is authenticated, cwd-scoped, bounded, and never auto-ret
   assert.match(server, /"POST \/api\/terminal\/run"/);
   assert.match(server, /"GET \/api\/terminal\/status"/);
   assert.match(server, /"POST \/api\/terminal\/stop"/);
+});
+
+test("usage-limit auto-resume is explicit, durable, cancellable, and defaults off", () => {
+  assert.match(html, /id="settingsBtn"[^>]*aria-label="Task settings"/);
+  assert.match(html, /Auto-continue after usage resets/);
+  assert.match(html, /Enable for all chats/);
+  assert.match(html, /Resume when usage returns/);
+  assert.match(html, /api\("\/api\/usage-retries"/);
+  assert.match(html, /api\("\/api\/usage-retries\/cancel"/);
+  assert.match(html, /api\("\/api\/usage-retries\/check"/);
+  assert.match(html, /es\.addEventListener\("usage-retry"/);
+  assert.match(server, /usage-retry-policy\.json/);
+  assert.match(server, /setInterval\(\(\) => usageRetryRunner\.tick/);
+  assert.match(server, /_capacityFresh: live\?\._fresh\?\.rateLimits === true/);
 });
 
 test("Codex write access stays provider-specific and retryable after a conflict", () => {
