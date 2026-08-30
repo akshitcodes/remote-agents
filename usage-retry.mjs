@@ -10,6 +10,7 @@ import { dirname } from "node:path";
 
 const CHECKABLE_STATES = new Set(["waiting_usage", "waiting_thread", "checking"]);
 const PENDING_STATES = new Set([...CHECKABLE_STATES, "dispatching"]);
+const BLOCKING_STATES = new Set([...PENDING_STATES, "uncertain"]);
 const USAGE_LIMIT_CODES = new Set([
   "credit_balance_exhausted",
   "credits_exhausted",
@@ -150,7 +151,7 @@ export class UsageRetryStore {
 
   list({ provider, threadId, activeOnly = false } = {}) {
     return [...this.entries.values()]
-      .filter((entry) => (!provider || entry.provider === provider) && (!threadId || entry.threadId === threadId) && (!activeOnly || PENDING_STATES.has(entry.state)))
+      .filter((entry) => (!provider || entry.provider === provider) && (!threadId || entry.threadId === threadId) && (!activeOnly || BLOCKING_STATES.has(entry.state)))
       .sort((a, b) => b.updatedAt - a.updatedAt)
       .map((entry) => structuredClone(entry));
   }
@@ -168,7 +169,7 @@ export class UsageRetryStore {
     const triggerId = clip(input.triggerId, 300);
     const duplicate = [...this.entries.values()].find((entry) =>
       entry.provider === provider && entry.threadId === threadId
-      && ((triggerId && entry.triggerId === triggerId) || (!triggerId && PENDING_STATES.has(entry.state)))
+      && ((triggerId && entry.triggerId === triggerId) || BLOCKING_STATES.has(entry.state))
     );
     if (duplicate) { return structuredClone(duplicate); }
 
@@ -214,6 +215,21 @@ export class UsageRetryStore {
       throw retryError("Continue is already being sent and can no longer be cancelled", "usage_retry_dispatching", 409);
     }
     return this.update(id, { state: "cancelled", nextCheckAt: null, error: null });
+  }
+
+  supersedeThread(provider, threadId, { turnId = null } = {}) {
+    const changed = [];
+    for (const entry of this.entries.values()) {
+      if (entry.provider !== provider || entry.threadId !== threadId || !CHECKABLE_STATES.has(entry.state)) { continue; }
+      entry.state = "superseded";
+      entry.nextCheckAt = null;
+      entry.error = null;
+      entry.supersededByTurnId = clip(turnId, 300);
+      entry.updatedAt = this.now();
+      changed.push(structuredClone(entry));
+    }
+    if (changed.length) { this.persist(); }
+    return changed;
   }
 
   due() {
@@ -338,7 +354,18 @@ export class UsageRetryRunner {
             error: publicError(error),
           }));
         }
-        if (["turn_in_progress", "thread_locked_elsewhere", "not_our_turn"].includes(error?.code)) {
+        // A turn that appeared after the idle check has already resumed the
+        // thread. Re-arming this fallback would send an extra Continue after
+        // that newer work ends. This also closes the race where turn/started
+        // arrived while this entry was briefly `dispatching`.
+        if (error?.code === "turn_in_progress") {
+          return this.publish(this.store.update(id, {
+            state: "superseded",
+            nextCheckAt: null,
+            error: null,
+          }));
+        }
+        if (["thread_locked_elsewhere", "not_our_turn"].includes(error?.code)) {
           return this.publish(this.store.update(id, {
             state: "waiting_thread",
             nextCheckAt: this.now() + this.pollMs,

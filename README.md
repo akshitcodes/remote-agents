@@ -112,6 +112,10 @@ remote-agents tailscale --transport funnel|serve
 remote-agents tunnel --name NAME --hostname HOST --access-protected
 remote-agents url                     print pairing QR again
 remote-agents status                  show service status and pairing URLs
+remote-agents terminal enable         create a 5-minute device enrollment QR/code
+remote-agents terminal devices        list trusted terminal devices
+remote-agents terminal revoke ID      revoke one device and stop its shell sessions
+remote-agents terminal disable        revoke every device and disable shell access
 remote-agents start|stop              control the installed service
 remote-agents uninstall               remove only the remote-agents service
 ```
@@ -161,6 +165,7 @@ The existing configuration home is reused:
 ~/.codex-phone/push.json         browser Web Push subscriptions
 ~/.codex-phone/usage-retry-policy.json  global/per-task auto-resume choices
 ~/.codex-phone/usage-retries.json       durable pending usage-limit resumes
+~/.codex-phone/terminal-security.json   public passkey credentials and trusted devices
 ~/.codex-phone/logs/             background-service logs
 ```
 
@@ -198,6 +203,28 @@ The queued status, provider reset hint, next check, **Check now**, and **Cancel*
 remain available after closing the PWA or restarting the bridge. A bridge
 restart during the actual send is marked uncertain and is never retried
 automatically, because sending twice is worse than requiring a manual check.
+
+### Project terminal security
+
+Shell access is disabled by default and is deliberately stronger than ordinary
+app pairing. On the bridge computer, run `remote-agents terminal enable`, scan
+the five-minute QR (or enter its one-time code), and create a passkey using Face
+ID, Touch ID, Windows Hello, or the device PIN. Each browser is enrolled
+separately. Opening a terminal later requires a fresh passkey assertion; the
+short unlock expires after inactivity.
+
+The terminal starts in the selected task's provider-reported project folder,
+which the server resolves again before every new session. That folder is a
+starting directory, not a filesystem sandbox: the shell has the same OS access
+as the bridge user. Interactive PTYs run in a separate worker so a native
+terminal-addon failure cannot stop the bridge or provider agents. If the native
+PTY is unavailable, the page offers passkey-protected one-shot command mode and
+never automatically repeats a command whose result is uncertain.
+
+Revoking a device or disabling terminal access invalidates its unlocks and
+tickets and stops both its interactive and one-shot shell processes. Terminal
+administration is accepted only from the bridge machine through an
+authenticated loopback control endpoint; it is not exposed in the web app.
 
 ## When a provider is not detected
 

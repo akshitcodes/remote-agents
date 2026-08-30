@@ -2634,10 +2634,26 @@ function isUsageLimitError(error) {
 
 function usageRetryForOpenThread() {
   if (!state.active) { return null; }
-  const pending = new Set(["waiting_usage", "waiting_thread", "checking", "dispatching"]);
+  const pending = new Set(["waiting_usage", "waiting_thread", "checking", "dispatching", "uncertain"]);
   return [...state.usageRetries.values()]
     .filter((entry) => entry.provider === activeProvider() && entry.threadId === state.active.id && pending.has(entry.state))
     .sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))[0] || null;
+}
+
+function usageRetryPolicyAppliesToOpenThread() {
+  if (!state.active) { return false; }
+  return state.usageRetryPolicy?.provider === activeProvider()
+    && state.usageRetryPolicy?.threadId === state.active.id
+    && state.usageRetryPolicy?.enabled === true;
+}
+
+function syncUsageRetryButtons() {
+  const active = usageRetryForOpenThread();
+  const enabled = usageRetryPolicyAppliesToOpenThread();
+  box().querySelectorAll("[data-queue-usage-resume]").forEach((button) => {
+    button.disabled = !!active || enabled;
+    button.textContent = active ? "Resume queued" : enabled ? "Auto-resume enabled" : "Resume when usage returns";
+  });
 }
 
 function formatRetryTime(value) {
@@ -2667,7 +2683,7 @@ function usageRetryText(entry) {
 function renderUsageRetry(entry) {
   if (!entry || !state.active || entry.provider !== activeProvider() || entry.threadId !== state.active.id) { return; }
   box().querySelectorAll("[data-usage-resume-id]").forEach((node) => node.remove());
-  if (["accepted", "cancelled"].includes(entry.state)) { return; }
+  if (["accepted", "cancelled", "superseded"].includes(entry.state)) { return; }
   const el = chip(entry.state === "uncertain" || entry.state === "failed" ? "⚠️" : "⏳", usageRetryText(entry));
   el.classList.add("usage-resume");
   el.dataset.usageResumeId = entry.id;
@@ -2693,6 +2709,17 @@ function renderUsageRetry(entry) {
       catch (error) { chip("⚠️", "Could not cancel auto-resume: " + error.message); }
     };
     actions.appendChild(cancel);
+  } else if (entry.state === "uncertain") {
+    const dismiss = document.createElement("button");
+    dismiss.className = "pending-action cancel";
+    dismiss.textContent = "Dismiss after checking";
+    dismiss.title = "Remove this saved retry only after checking the thread; this cannot recall a Continue that may already have reached the agent";
+    dismiss.onclick = async () => {
+      dismiss.disabled = true;
+      try { updateUsageRetry(await api("/api/usage-retries/cancel", { id: entry.id }).then((result) => result.entry)); }
+      catch (error) { chip("⚠️", "Could not dismiss auto-resume: " + error.message); }
+    };
+    actions.appendChild(dismiss);
   }
   if (actions.childElementCount) { el.appendChild(actions); }
 }
@@ -2700,11 +2727,7 @@ function renderUsageRetry(entry) {
 function updateUsageRetry(entry) {
   if (!entry?.id) { return; }
   state.usageRetries.set(entry.id, entry);
-  const active = usageRetryForOpenThread();
-  box().querySelectorAll("[data-queue-usage-resume]").forEach((button) => {
-    button.disabled = !!active;
-    button.textContent = active ? "Resume queued" : "Resume when usage returns";
-  });
+  syncUsageRetryButtons();
   renderUsageRetry(entry);
 }
 
@@ -2718,7 +2741,8 @@ async function loadUsageRetryState(thread = state.active) {
     ]);
     if (state.active !== thread) { return; }
     for (const entry of retries.data || []) { state.usageRetries.set(entry.id, entry); }
-    state.usageRetryPolicy = policy;
+    state.usageRetryPolicy = { ...policy, provider, threadId: thread.id };
+    syncUsageRetryButtons();
     const latest = usageRetryForOpenThread() || (retries.data || []).find((entry) => ["uncertain", "failed"].includes(entry.state));
     if (latest) { renderUsageRetry(latest); }
   } catch {}
@@ -2745,8 +2769,10 @@ function decorateUsageLimitError(el, error) {
   const button = document.createElement("button");
   button.className = "pending-action";
   button.dataset.queueUsageResume = "";
-  button.textContent = usageRetryForOpenThread() ? "Resume queued" : "Resume when usage returns";
-  button.disabled = !!usageRetryForOpenThread();
+  const active = usageRetryForOpenThread();
+  const policyEnabled = usageRetryPolicyAppliesToOpenThread();
+  button.textContent = active ? "Resume queued" : policyEnabled ? "Auto-resume enabled" : "Resume when usage returns";
+  button.disabled = !!active || policyEnabled;
   button.onclick = async () => {
     button.disabled = true;
     button.textContent = "Queuing…";
@@ -3117,6 +3143,7 @@ async function openThread(t) {
   state.threadModeUnknown = false;
   state.threadApprovalPolicy = null;
   state.threadSandboxPolicy = null;
+  state.usageRetryPolicy = { globalEnabled: false, threadOverride: null, enabled: false, provider: null, threadId: null };
   state.settingsTruth = { state: "loading", sources: {}, message: "Checking settings…" };
   const threadProvider = t.provider || state.provider || "codex";
   const providerChanged = threadProvider !== state.modelsProvider;
@@ -3249,10 +3276,13 @@ async function openThread(t) {
       if (confidence === "provider" || confidence === "bridge" || confidence === "marker") {
         queueMicrotask(flushPending);
       } else if (state.pending.length) {
+        await reconcilePendingDeliveryProof();
+        if (state.active !== t) { return; }
         for (const entry of state.pending) {
+          if (entry.deliveryProofChecked || entry.retryRequired || entry.mayHaveDispatched) { continue; }
           const label = entry.chip?.querySelector("span");
 
-          if (label) { label.textContent = "Completion could not be confirmed — check the thread, then tap Retry to try now"; }
+          if (label) { label.textContent = "Turn state could not be confirmed — this message remains unsent"; }
           entry.retryRequired = true;
           markSendFailed(entry.bubble, () => retryPendingEntry(entry), {
             onDismiss: () => removePendingEntry(entry, { allowUncertain: true }),
@@ -3951,6 +3981,7 @@ async function checkPendingDelivery(entry) {
       threadId: entry.threadId || state.active?.id || "",
     });
     const result = await api(`/api/send/status?${query}`);
+    entry.deliveryProofChecked = true;
 
     if (result.state === "accepted") {
       const at = state.pending.indexOf(entry);
@@ -3965,7 +3996,7 @@ async function checkPendingDelivery(entry) {
     // The status request itself is finished. Keep Check status available even
     // while the original provider operation is still in flight.
     entry.dispatching = false;
-    entry.mayHaveDispatched = result.state === "uncertain" || result.state === "dispatching";
+    entry.mayHaveDispatched = result.state === "uncertain" || result.state === "dispatching" || result.state === "not_found";
     entry.retryRequired = result.state !== "dispatching";
     entry.retryWithNewId = false;
 
@@ -4002,6 +4033,13 @@ async function checkPendingDelivery(entry) {
     syncPendingActions(entry);
     throw error;
   }
+}
+
+async function reconcilePendingDeliveryProof() {
+  const candidates = state.pending.filter((entry) =>
+    entry.requestId && entry.mayHaveDispatched
+  );
+  await Promise.allSettled(candidates.map((entry) => checkPendingDelivery(entry)));
 }
 
 function enqueue(text, attachments = []) {
@@ -5303,6 +5341,21 @@ function openTerminalSheet() {
   if (["running", "stopping", "starting"].includes(session.state)) { pollTerminalJob(thread, session); }
 }
 
+function openNativeTerminal() {
+  const thread = state.active;
+  if (!thread?.id || !thread?.cwd) {
+    openSheet('<h2>Project terminal</h2><div class="hint">This session does not report a project folder, so the bridge cannot choose a terminal starting directory.</div>');
+    return;
+  }
+  const query = new URLSearchParams({ provider: thread.provider || "codex", threadId: thread.id });
+  const url = `/terminal?${query}`;
+  if (matchMedia("(min-width: 760px)").matches) {
+    window.open(url, "_blank", "noopener");
+  } else {
+    location.assign(url);
+  }
+}
+
 function renderFileInto(el, name, d, staleAt) {
   if (d.binary) {
     el.innerHTML = `<div class="hint">Binary file (${fmtBytes(d.size)}) — not viewable.</div>`;
@@ -6155,7 +6208,11 @@ async function openTaskSettingsSheet() {
   openSheet('<h2>Task settings</h2><div class="hint">Loading settings…</div>');
 
   try {
-    state.usageRetryPolicy = await api(`/api/usage-retry-policy?provider=${encodeURIComponent(provider)}&threadId=${encodeURIComponent(thread.id)}`);
+    state.usageRetryPolicy = {
+      ...await api(`/api/usage-retry-policy?provider=${encodeURIComponent(provider)}&threadId=${encodeURIComponent(thread.id)}`),
+      provider,
+      threadId: thread.id,
+    };
   } catch (error) {
     if (state.active === thread) { $("sheetBody").innerHTML = `<h2 id="sheetTitle">Task settings</h2><div class="hint">Could not load settings: ${esc(error.message)}</div>`; }
     return;
@@ -6183,9 +6240,12 @@ async function openTaskSettingsSheet() {
         try {
           const scope = button.dataset.retryScope;
           const enabled = scope === "global" ? !policy.globalEnabled : !policy.enabled;
-          state.usageRetryPolicy = await api("/api/usage-retry-policy", {
-            scope, enabled, provider, threadId: thread.id,
-          });
+          state.usageRetryPolicy = {
+            ...await api("/api/usage-retry-policy", { scope, enabled, provider, threadId: thread.id }),
+            provider,
+            threadId: thread.id,
+          };
+          syncUsageRetryButtons();
           render();
         } catch (error) {
           chip("⚠️", "Could not save auto-resume setting: " + error.message);
@@ -6195,7 +6255,12 @@ async function openTaskSettingsSheet() {
     });
     $("sheetBody").querySelector("[data-retry-inherit]")?.addEventListener("click", async () => {
       try {
-        state.usageRetryPolicy = await api("/api/usage-retry-policy", { scope: "thread", enabled: null, provider, threadId: thread.id });
+        state.usageRetryPolicy = {
+          ...await api("/api/usage-retry-policy", { scope: "thread", enabled: null, provider, threadId: thread.id }),
+          provider,
+          threadId: thread.id,
+        };
+        syncUsageRetryButtons();
         render();
       } catch (error) { chip("⚠️", "Could not save auto-resume setting: " + error.message); }
     });
@@ -6734,17 +6799,22 @@ function markRunning(provider, tid, on, { confidence = "unknown", live = true } 
   }
 
   if (activeMatch && !on && state.pending.length && !confirmedEnd) {
-    for (const entry of state.pending) {
-      const label = entry.chip?.querySelector("span");
+    queueMicrotask(async () => {
+      await reconcilePendingDeliveryProof();
+      if (!state.active || provider !== activeProvider() || (tid !== state.active.id && tid !== state.active.draftId) || isRunning(provider, tid)) { return; }
+      for (const entry of state.pending) {
+        if (entry.deliveryProofChecked || entry.retryRequired || entry.mayHaveDispatched) { continue; }
+        const label = entry.chip?.querySelector("span");
 
-      if (label) { label.textContent = "Completion could not be confirmed — check the thread, then tap Retry to try now"; }
-      entry.retryRequired = true;
-      markSendFailed(entry.bubble, () => retryPendingEntry(entry), {
-        onDismiss: () => removePendingEntry(entry, { allowUncertain: true }),
-      });
-    }
+        if (label) { label.textContent = "Turn state could not be confirmed — this message remains unsent"; }
+        entry.retryRequired = true;
+        markSendFailed(entry.bubble, () => retryPendingEntry(entry), {
+          onDismiss: () => removePendingEntry(entry, { allowUncertain: true }),
+        });
+      }
 
-    savePending();
+      savePending();
+    });
   }
 }
 
@@ -7058,7 +7128,7 @@ $("notifyBtn").onclick = () => state.active && openTaskNotificationSheet(state.a
 $("settingsBtn").onclick = openTaskSettingsSheet;
 $("diffBtn").onclick = () => openDiffSheet(state.lastDiff || "No diff");
 $("filesBtn").onclick = openFilesSheet;
-$("terminalBtn").onclick = openTerminalSheet;
+$("terminalBtn").onclick = openNativeTerminal;
 $("providerSeg").querySelectorAll("[data-provider]").forEach((b) => {
   b.onclick = () => switchProvider(b.dataset.provider);
 });

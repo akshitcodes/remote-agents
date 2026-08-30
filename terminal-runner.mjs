@@ -73,7 +73,7 @@ export class TerminalRunner {
     }
   }
 
-  start({ cwd: requestedCwd, command } = {}) {
+  start({ cwd: requestedCwd, command, owner = null } = {}) {
     const cwd = resolveWorkingDirectory(requestedCwd);
     const text = String(command ?? "").trim();
 
@@ -92,6 +92,7 @@ export class TerminalRunner {
       id,
       cwd,
       command: text,
+      owner,
       child,
       output: "",
       baseOffset: 0,
@@ -139,21 +140,40 @@ export class TerminalRunner {
     job.finishedAt = Date.now();
   }
 
-  get(id, offset = 0) {
+  ownedJob(id, owner) {
     const job = this.jobs.get(String(id ?? ""));
     if (!job) { throw terminalError("terminal command not found", "terminal_job_not_found", 404); }
+    if (owner != null && job.owner !== owner) { throw terminalError("terminal command belongs to another device", "terminal_job_not_found", 404); }
+    return job;
+  }
+
+  get(id, offset = 0, owner = null) {
+    const job = this.ownedJob(id, owner);
     return this.publicJob(job, offset);
   }
 
-  stop(id) {
-    const job = this.jobs.get(String(id ?? ""));
-    if (!job) { throw terminalError("terminal command not found", "terminal_job_not_found", 404); }
+  stop(id, owner = null) {
+    const job = this.ownedJob(id, owner);
     if (job.state !== "running") { return this.publicJob(job, job.baseOffset + job.output.length); }
     job.state = "stopping";
     this.append(job, "\n[stopping]\n");
     job.child.kill("SIGTERM");
     setTimeout(() => job.child.exitCode == null && job.child.kill("SIGKILL"), 2000).unref?.();
     return this.publicJob(job, job.baseOffset + job.output.length);
+  }
+
+  revokeOwners(deviceIds = [], { all = false } = {}) {
+    const ids = new Set(deviceIds);
+    for (const job of this.jobs.values()) {
+      if (job.state !== "running" || (!all && !ids.has(job.owner))) { continue; }
+      job.state = "stopping";
+      this.append(job, "\n[terminal access revoked; stopping]\n");
+      job.child.kill("SIGTERM");
+      const timer = setTimeout(() => {
+        if (job.state === "stopping") { job.child.kill("SIGKILL"); }
+      }, 2000);
+      timer.unref?.();
+    }
   }
 
   publicJob(job, requestedOffset = 0) {
@@ -174,4 +194,3 @@ export class TerminalRunner {
     };
   }
 }
-

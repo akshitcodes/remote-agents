@@ -470,6 +470,9 @@ test("the published package allowlist includes current and portable runtime modu
     "provider-detect.mjs",
     "config.mjs",
     "onboarding.mjs",
+    "terminal-security.mjs",
+    "terminal-worker.mjs",
+    "pty-terminal.mjs",
   ];
 
   for (const file of required) {

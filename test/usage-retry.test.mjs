@@ -94,6 +94,22 @@ test("duplicate terminal events and concurrent manual scheduling cannot create t
   assert.equal(store.list({ provider: "codex", threadId: "thread-1" }).length, 1);
 });
 
+test("different provider observations and uncertain delivery still block a second Continue", (t) => {
+  const store = new UsageRetryStore({ file: fixture(t) });
+  const first = create(store, { id: "notify", requestId: "notify-request", triggerId: "codex:turn-1" });
+  const externalRace = create(store, { id: "external", requestId: "external-request", triggerId: "rollout-terminal-1" });
+  assert.equal(externalRace.id, first.id, "different observations of one stop collapse while intent is pending");
+
+  store.update(first.id, { state: "uncertain", nextCheckAt: null });
+  const manual = create(store, { id: "manual", requestId: "manual-request", triggerId: null });
+  assert.equal(manual.id, first.id, "uncertain delivery blocks a second automatic or manual Continue");
+  assert.equal(store.list({ provider: "codex", threadId: "thread-1", activeOnly: true })[0].state, "uncertain");
+
+  store.cancel(first.id);
+  const afterDismiss = create(store, { id: "after-dismiss", requestId: "after-dismiss-request", triggerId: null });
+  assert.equal(afterDismiss.id, "after-dismiss", "explicit dismissal permits a new retry after the user checks the thread");
+});
+
 test("an account change wakes only pending retries for that provider", (t) => {
   let now = 1000;
   const store = new UsageRetryStore({ file: fixture(t), now: () => now });
@@ -108,6 +124,24 @@ test("an account change wakes only pending retries for that provider", (t) => {
   assert.deepEqual(changed.map((entry) => entry.id), ["codex-pending"]);
   assert.equal(store.get("codex-pending").nextCheckAt, 2000);
   assert.equal(store.get("claude-pending").nextCheckAt, 99_000);
+});
+
+test("a newer turn supersedes an older pending usage resume but not one already dispatching", (t) => {
+  const store = new UsageRetryStore({ file: fixture(t) });
+  create(store, { id: "waiting", requestId: "waiting-request" });
+  create(store, { id: "other-thread", threadId: "thread-2", requestId: "other-request", triggerId: "terminal-2" });
+
+  const changed = store.supersedeThread("codex", "thread-1", { turnId: "newer-turn" });
+  assert.deepEqual(changed.map((entry) => entry.id), ["waiting"]);
+  assert.equal(store.get("waiting").state, "superseded");
+  assert.equal(store.get("waiting").supersededByTurnId, "newer-turn");
+  assert.equal(store.get("waiting").nextCheckAt, null);
+  assert.equal(store.get("other-thread").state, "waiting_usage");
+
+  const dispatching = create(store, { id: "dispatching", requestId: "dispatch-request", triggerId: "terminal-3" });
+  store.update(dispatching.id, { state: "dispatching", nextCheckAt: null });
+  assert.deepEqual(store.supersedeThread("codex", "thread-1", { turnId: "own-turn" }), []);
+  assert.equal(store.get(dispatching.id).state, "dispatching");
 });
 
 test("runner rechecks the active account, waits for idle, and sends exactly once", async (t) => {
@@ -197,4 +231,23 @@ test("a confirmed usage rejection returns to the queue but an ambiguous send nev
   sendError = Object.assign(new Error("response lost"), { status: 504, code: "delivery_uncertain" });
   assert.equal((await runner.check("resume-1")).state, "uncertain");
   assert.equal(store.get("resume-1").attempts, 2);
+});
+
+test("a turn that wins the post-idle dispatch race supersedes auto-resume", async (t) => {
+  const store = new UsageRetryStore({ file: fixture(t) });
+  create(store);
+  let sends = 0;
+  const runner = new UsageRetryRunner({
+    store,
+    readUsage: async () => ({ _capacityFresh: true, rateLimits: { primary: { usedPercent: 1 } } }),
+    readRuntime: async () => ({ running: false }),
+    send: async () => {
+      sends += 1;
+      throw Object.assign(new Error("a turn is already in progress"), { status: 409, code: "turn_in_progress" });
+    },
+  });
+
+  assert.equal((await runner.check("resume-1")).state, "superseded");
+  assert.equal((await runner.check("resume-1")).state, "superseded");
+  assert.equal(sends, 1);
 });

@@ -35,6 +35,9 @@
     "notification-content.mjs",
     "local-proof.mjs",
     "terminal-runner.mjs",
+    "terminal-security.mjs",
+    "terminal-worker.mjs",
+    "pty-terminal.mjs",
     "providers/",
     "public/",
     "README.md"
@@ -44,9 +47,11 @@
   },
   "dependencies": {
     "@inquirer/select": "^5.2.2",
+    "@simplewebauthn/server": "13.3.3",
     "@zed-industries/agent-client-protocol": "^0.4.5",
     "qrcode-terminal": "^0.12.0",
     "web-push": "^3.6.7",
+    "ws": "8.21.3",
     "zod": "^4.4.3"
   },
   "keywords": [
@@ -63,5 +68,13 @@
   },
   "homepage": "https://github.com/akshitcodes/remote-agents#readme",
   "bugs": "https://github.com/akshitcodes/remote-agents/issues",
-  "license": "MIT"
+  "license": "MIT",
+  "devDependencies": {
+    "@simplewebauthn/browser": "13.3.0",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/xterm": "6.0.0"
+  },
+  "optionalDependencies": {
+    "node-pty": "1.1.0"
+  }
 }

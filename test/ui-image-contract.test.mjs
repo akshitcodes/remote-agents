@@ -8,6 +8,8 @@ const claudeProvider = readFileSync(new URL("../providers/claude.mjs", import.me
 const codexProvider = readFileSync(new URL("../providers/codex.mjs", import.meta.url), "utf8");
 const onboarding = readFileSync(new URL("../onboarding.mjs", import.meta.url), "utf8");
 const sw = readFileSync(new URL("../public/sw.js", import.meta.url), "utf8");
+const terminalHtml = readFileSync(new URL("../public/terminal.html", import.meta.url), "utf8");
+const terminalJs = readFileSync(new URL("../public/terminal.js", import.meta.url), "utf8");
 
 test("image references survive queue, steer, send, retry, and reload paths", () => {
   assert.match(html, /attachments: e\.attachments \?\? \[\]/);
@@ -68,7 +70,11 @@ test("stop, draft adoption, and reconnect preserve queue truth", () => {
   assert.match(html, /const stopped = await interruptApi\(\);[\s\S]*?if \(!stopped\) \{ return; \}[\s\S]*?await removePendingEntry\(p, \{ flush: false \}\)/);
   assert.match(html, /migrateThreadLocalState\(activeProvider\(\), state\.active\.id, params\.sessionId\)/);
   assert.match(html, /await api\("\/api\/message"[\s\S]*?finishSendProgress\(\);\s*dropFailedSend\(id\)/);
-  assert.match(html, /Completion could not be confirmed — check the thread, then tap Retry to try now/);
+  assert.match(html, /Turn state could not be confirmed — this message remains unsent/);
+  assert.match(html, /await reconcilePendingDeliveryProof\(\)/);
+  assert.match(html, /entry\.deliveryProofChecked = true/);
+  assert.match(html, /result\.state === "not_found"/);
+  assert.match(html, /if \(entry\.deliveryProofChecked \|\| entry\.retryRequired \|\| entry\.mayHaveDispatched\) \{ continue; \}/);
   assert.match(html, /Delivery uncertain — check status or dismiss; this app will not resend it/);
   assert.match(html, /p\.bubble\?\.remove\(\)/);
   assert.match(html, /function openPendingEditSheet\(entry\)/);
@@ -96,6 +102,14 @@ test("stop, draft adoption, and reconnect preserve queue truth", () => {
   assert.match(server, /"GET \/api\/thread\/runtime"/);
   assert.match(html, /setLockStatus\(\{ state: "unknown", label: "Check failed" \}\)/);
   assert.match(html, /refreshApprovals\(\);\s*refreshLockStatus\(\);/);
+});
+
+test("usage retry controls distinguish enabled policy from a queued retry", () => {
+  assert.match(html, /function usageRetryPolicyAppliesToOpenThread\(\)/);
+  assert.match(html, /enabled \? "Auto-resume enabled" : "Resume when usage returns"/);
+  assert.match(html, /\["accepted", "cancelled", "superseded"\]/);
+  assert.match(server, /usageRetryStore\.supersedeThread\(provider, threadId/);
+  assert.match(server, /\["marker", "stalled"\]\.includes\(data\.runConfidence\)/);
 });
 
 test("a bridge-owned live stream cannot be replayed by a forced transcript refresh", () => {
@@ -267,21 +281,32 @@ test("desktop workspace keeps session navigation visible and constrains the chat
   assert.match(html, /event\.key === "Escape"/);
   assert.match(server, /const body = renderIndexHtml\(req\.headers\["user-agent"\][\s\S]*?return res\.end\(body\)/);
   assert.match(onboarding, /const readIndexShell = createIndexShellReader\(indexHtmlPath\)/);
-  assert.match(sw, /const CACHE_VERSION = "remote-agents-v22"/);
+  assert.match(sw, /const CACHE_VERSION = "remote-agents-v23"/);
 });
 
-test("project terminal is authenticated, cwd-scoped, bounded, and never auto-retries commands", () => {
+test("project terminal uses passkey step-up, a server-derived cwd, and an isolated interactive transport", () => {
   assert.match(html, /id="terminalBtn"[^>]*aria-label="Project terminal"/);
-  assert.match(html, /function openTerminalSheet\(\)/);
-  assert.match(html, /api\("\/api\/terminal\/run", \{ cwd, command \}\)/);
-  assert.match(html, /\/api\/terminal\/status\?id=/);
-  assert.match(html, /api\("\/api\/terminal\/stop", \{ id: session\.id \}\)/);
-  assert.match(html, /Start unconfirmed — check the project before running it again/);
-  assert.match(html, /Never repeat a[\s\S]*shell command automatically/);
-  assert.match(html, /const staleRunning = result\.state === "running"/);
+  assert.match(html, /function openNativeTerminal\(\)/);
+  assert.match(html, /\/terminal\?\$\{query\}/);
+  assert.match(terminalHtml, /simplewebauthn\.min\.js/);
+  assert.match(terminalHtml, /xterm\.css/);
+  assert.match(terminalJs, /startRegistration\(\{ optionsJSON: ceremony\.options \}\)/);
+  assert.match(terminalJs, /startAuthentication\(\{ optionsJSON: ceremony\.options \}\)/);
+  assert.match(terminalJs, /\/api\/terminal\/ticket/);
+  assert.match(terminalJs, /new WebSocket/);
+  assert.match(terminalJs, /const connection = new WebSocket/);
+  assert.match(terminalJs, /if \(socket !== connection\) \{ return; \}/);
+  assert.match(terminalJs, /command status may be uncertain/);
   assert.match(server, /"POST \/api\/terminal\/run"/);
   assert.match(server, /"GET \/api\/terminal\/status"/);
   assert.match(server, /"POST \/api\/terminal\/stop"/);
+  assert.match(server, /resolveTerminalContext\(body\?\.provider, body\?\.threadId\)/);
+  assert.match(server, /new WebSocketServer\(\{ noServer: true/);
+  assert.match(server, /"\/terminal\.js": \{ file: "terminal\.js"/);
+  assert.match(server, /"\/terminal\.css": \{ file: "terminal\.css"/);
+  assert.match(server, /decodeURIComponent\(part\.slice\(index \+ 1\)\);[\s\S]*?catch \{[\s\S]*?return null;/);
+  assert.match(server, /server\.on\("upgrade"[\s\S]*?try \{[\s\S]*?terminalWebSockets\.handleUpgrade[\s\S]*?catch \{/);
+  assert.match(sw, /url\.pathname === "\/terminal"/);
 });
 
 test("usage-limit auto-resume is explicit, durable, cancellable, and defaults off", () => {

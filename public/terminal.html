@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <title>Project terminal · Remote Agents</title>
+  <link rel="stylesheet" href="/vendor/xterm.css">
+  <link rel="stylesheet" href="/terminal.css">
+  <script src="/vendor/simplewebauthn.min.js" defer></script>
+  <script type="module" src="/terminal.js"></script>
+</head>
+<body>
+  <header>
+    <a class="back" href="/" aria-label="Back to agents">←</a>
+    <div class="heading">
+      <h1>Project terminal</h1>
+      <div id="context" class="context">Checking access…</div>
+    </div>
+    <span id="connection" class="connection">Locked</span>
+  </header>
+
+  <main>
+    <section id="gate" class="gate" aria-live="polite">
+      <div class="gate-card">
+        <div class="shield">›_</div>
+        <h2 id="gateTitle">Checking terminal access…</h2>
+        <p id="gateCopy">Shell access requires a passkey even on an already paired device.</p>
+        <label id="codeField" class="field hidden">
+          <span>Enrollment code</span>
+          <input id="enrollmentCode" inputmode="numeric" autocomplete="one-time-code" placeholder="1234-5678">
+        </label>
+        <label id="labelField" class="field hidden">
+          <span>Device name</span>
+          <input id="deviceLabel" autocomplete="off" maxlength="80">
+        </label>
+        <button id="gateAction" class="primary" type="button" disabled>Please wait…</button>
+        <p id="gateError" class="error hidden"></p>
+        <p class="warning">This is a full shell as the bridge’s OS user. The project path is the starting folder, not a sandbox.</p>
+      </div>
+    </section>
+
+    <section id="terminalShell" class="terminal-shell hidden">
+      <div id="terminal" aria-label="Interactive project terminal"></div>
+      <div class="terminal-footer">
+        <span id="terminalStatus">Connecting…</span>
+        <button id="reconnect" class="secondary hidden" type="button">Reconnect</button>
+      </div>
+    </section>
+
+    <section id="fallback" class="fallback hidden">
+      <div class="fallback-head">
+        <strong>Command mode</strong>
+        <span id="fallbackReason">Interactive PTY is unavailable on this machine.</span>
+      </div>
+      <pre id="commandOutput">Ready.</pre>
+      <form id="commandForm">
+        <span>$</span>
+        <input id="commandInput" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Run one command">
+        <button class="primary" type="submit">Run</button>
+      </form>
+    </section>
+  </main>
+</body>
+</html>

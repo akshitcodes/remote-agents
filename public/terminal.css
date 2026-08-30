@@ -1,0 +1,74 @@
+:root {
+  color-scheme: dark;
+  --bg: #090c11;
+  --panel: #11161e;
+  --panel-2: #171d27;
+  --border: #29313e;
+  --text: #edf1f7;
+  --muted: #929dac;
+  --accent: #69c66b;
+  --danger: #ff8585;
+  font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text); }
+body { min-height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
+button, input { font: inherit; }
+.hidden { display: none !important; }
+
+header {
+  min-height: 68px;
+  padding: calc(10px + env(safe-area-inset-top)) max(14px, env(safe-area-inset-right)) 10px max(14px, env(safe-area-inset-left));
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid var(--border);
+  background: #0d1118;
+}
+
+.back { color: var(--muted); text-decoration: none; font-size: 28px; line-height: 36px; text-align: center; border-radius: 9px; }
+.back:hover { background: var(--panel-2); color: var(--text); }
+.heading { min-width: 0; }
+h1 { margin: 0; font-size: 16px; }
+.context { margin-top: 4px; color: var(--muted); font: 12px/1.3 ui-monospace, "SF Mono", Menlo, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.connection { color: var(--muted); font-size: 12px; padding: 6px 9px; border: 1px solid var(--border); border-radius: 999px; }
+.connection.live { color: #93e795; border-color: #2c6933; background: #14321a; }
+
+main { min-height: 0; flex: 1; display: flex; }
+.gate { flex: 1; display: grid; place-items: center; padding: 24px; overflow: auto; }
+.gate-card { width: min(100%, 480px); padding: 28px; border: 1px solid var(--border); border-radius: 20px; background: var(--panel); box-shadow: 0 20px 70px #0008; }
+.shield { width: 52px; height: 52px; display: grid; place-items: center; border-radius: 15px; background: #17311c; color: var(--accent); font: 700 21px ui-monospace, monospace; }
+h2 { margin: 20px 0 8px; font-size: 22px; }
+p { color: var(--muted); line-height: 1.55; }
+.field { display: grid; gap: 7px; margin: 16px 0; color: var(--muted); font-size: 13px; }
+.field input, #commandInput { width: 100%; border: 1px solid var(--border); border-radius: 10px; background: #0b0f15; color: var(--text); padding: 12px 13px; outline: none; }
+.field input:focus, #commandInput:focus { border-color: #5aa95d; box-shadow: 0 0 0 3px #4ca45122; }
+.primary, .secondary { border: 0; border-radius: 10px; padding: 11px 15px; font-weight: 700; cursor: pointer; }
+.primary { background: var(--accent); color: #071009; }
+.primary:disabled { opacity: .45; cursor: default; }
+.secondary { border: 1px solid var(--border); background: var(--panel-2); color: var(--text); }
+.gate-card > .primary { width: 100%; margin-top: 6px; }
+.warning { margin: 18px 0 0; font-size: 12px; }
+.error { color: var(--danger); font-size: 13px; }
+
+.terminal-shell { min-width: 0; min-height: 0; flex: 1; display: flex; flex-direction: column; padding: 10px max(10px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(10px, env(safe-area-inset-left)); }
+#terminal { min-width: 0; min-height: 0; flex: 1; padding: 8px; border: 1px solid var(--border); border-radius: 13px; background: #070a0e; overflow: hidden; }
+.xterm { height: 100%; padding: 4px; }
+.xterm-viewport { border-radius: 8px; }
+.terminal-footer { min-height: 36px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 4px 0; color: var(--muted); font-size: 12px; }
+
+.fallback { flex: 1; min-width: 0; min-height: 0; display: grid; grid-template-rows: auto 1fr auto; gap: 10px; padding: 14px; }
+.fallback-head { display: flex; gap: 10px; flex-wrap: wrap; align-items: baseline; color: var(--muted); font-size: 13px; }
+.fallback-head strong { color: var(--text); }
+#commandOutput { min-height: 0; margin: 0; padding: 14px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid var(--border); border-radius: 13px; background: #070a0e; color: #d7deea; font: 13px/1.5 ui-monospace, "SF Mono", Menlo, monospace; }
+#commandForm { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: center; color: var(--accent); }
+
+@media (max-width: 600px) {
+  header { min-height: 60px; grid-template-columns: 34px minmax(0, 1fr) auto; gap: 8px; }
+  .gate { align-items: start; padding: 16px; }
+  .gate-card { padding: 22px; margin-top: 8vh; }
+  .connection { max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #terminal { padding: 4px; border-radius: 9px; }
+}

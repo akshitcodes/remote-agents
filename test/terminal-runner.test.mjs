@@ -66,3 +66,15 @@ test("terminal Stop terminates only the selected command", async () => {
   assert.equal(runner.get(first.id).state, "stopped");
   assert.equal(runner.get(second.id).state, "running");
 });
+
+test("revoking a terminal device stops only that device's fallback commands", async () => {
+  const runner = new TerminalRunner({ spawnImpl: () => fakeSpawn() });
+  const revoked = runner.start({ cwd: process.cwd(), command: "sleep 10", owner: "device-1" });
+  const retained = runner.start({ cwd: process.cwd(), command: "sleep 10", owner: "device-2" });
+
+  runner.revokeOwners(["device-1"]);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(runner.get(revoked.id, 0, "device-1").state, "stopped");
+  assert.equal(runner.get(retained.id, 0, "device-2").state, "running");
+  assert.throws(() => runner.get(retained.id, 0, "device-1"), (error) => error.code === "terminal_job_not_found");
+});

@@ -11,7 +11,7 @@
 //
 // Bump CACHE_VERSION to force a refresh of the precached shell.
 
-const CACHE_VERSION = "remote-agents-v22";
+const CACHE_VERSION = "remote-agents-v23";
 
 // A reverse proxy in front of us (Cloudflare, a tunnel, nginx) answers with a
 // real HTTP response when the machine behind it is down — 502, or Cloudflare's
@@ -131,6 +131,13 @@ self.addEventListener("fetch", (event) => {
 
   // Dynamic + streamed + authenticated — always hit the network.
   if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/internal/")) {
+    return;
+  }
+
+  // A terminal is a live privileged document, never an offline app shell. If
+  // navigationCacheFirst handled this path it would substitute the cached chat
+  // UI for /terminal and could preserve stale security state.
+  if (url.pathname === "/terminal" || url.pathname === "/terminal.html") {
     return;
   }
 

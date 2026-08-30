@@ -17,3 +17,18 @@ export function localBridgeProofMatches(token, nonce, candidate) {
   const supplied = Buffer.from(candidate);
   return expected.length === supplied.length && timingSafeEqual(expected, supplied);
 }
+
+export function localControlProof(token, nonce, body) {
+  if (!validLocalProofNonce(nonce)) { throw new Error("invalid local control nonce"); }
+  return createHmac("sha256", String(token))
+    .update(`remote-agents-local-control:${nonce}:`)
+    .update(String(body ?? ""))
+    .digest("base64url");
+}
+
+export function localControlProofMatches(token, nonce, body, candidate) {
+  if (!validLocalProofNonce(nonce) || typeof candidate !== "string") { return false; }
+  const expected = Buffer.from(localControlProof(token, nonce, body));
+  const supplied = Buffer.from(candidate);
+  return expected.length === supplied.length && timingSafeEqual(expected, supplied);
+}

@@ -5,11 +5,12 @@
 // This module exports startServer(); the runnable entry point is bin/codex-phone.mjs.
 
 import { execFileSync } from "node:child_process";
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import { readFileSync, existsSync, statSync, realpathSync } from "node:fs";
 import { basename, dirname, extname, join, resolve, sep, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
+import { WebSocketServer } from "ws";
 
 import { readConfig } from "./config.mjs";
 import { renderIndexHtml } from "./onboarding.mjs";
@@ -28,8 +29,10 @@ import { pruneAttachments, readAttachment, resolveAttachmentIds, storeAttachment
 import { UsageStateStore } from "./usage-state.mjs";
 import { usageRetryTrigger, UsageRetryPolicyStore, UsageRetryRunner, UsageRetryStore } from "./usage-retry.mjs";
 import { captureReplyStart, notificationBody, notificationTitle } from "./notification-content.mjs";
-import { localBridgeProof, validLocalProofNonce } from "./local-proof.mjs";
+import { localBridgeProof, localControlProofMatches, validLocalProofNonce } from "./local-proof.mjs";
 import { TerminalRunner } from "./terminal-runner.mjs";
+import { TerminalSecurity } from "./terminal-security.mjs";
+import { PtyTerminalManager } from "./pty-terminal.mjs";
 import {
   readClaudeTranscriptThreadSettings,
   readCodexDbThreadSettings,
@@ -46,8 +49,11 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 let HOST = "127.0.0.1";
 let PORT = 0;
 let TOKEN = "";
+let PUBLIC_ORIGIN = null;
 let USABLE_PROVIDER_NAMES = new Set(["codex", "claude", "grok"]);
 const COOKIE_NAME = "cxp_session";
+const BROWSER_COOKIE_NAME = "cxp_browser";
+const TERMINAL_UNLOCK_COOKIE_NAME = "cxp_terminal";
 const APP_HOME = remoteAgentsHome();
 const AUTH_WINDOW_MS = 60_000;
 const AUTH_FAILURE_LIMIT = 5;
@@ -59,6 +65,15 @@ const usageState = new UsageStateStore({ file: join(APP_HOME, "usage-state.json"
 const usageRetryStore = new UsageRetryStore({ file: join(APP_HOME, "usage-retries.json") });
 const usageRetryPolicies = new UsageRetryPolicyStore({ file: join(APP_HOME, "usage-retry-policy.json") });
 const terminalRunner = new TerminalRunner();
+const ptyTerminals = new PtyTerminalManager();
+const terminalSecurity = new TerminalSecurity({
+  file: join(APP_HOME, "terminal-security.json"),
+  onInvalidate: (event) => {
+    ptyTerminals.revoke(event);
+    terminalRunner.revokeOwners(event.deviceIds, { all: event.all });
+  },
+});
+const localTerminalAdminNonces = new Map();
 const globalUsageInterests = new Map();
 const PROJECT_RUN_CANDIDATE_LIMIT = 30;
 let threadSettings = null;
@@ -71,6 +86,8 @@ const PWA_FILES = {
   "/icons/provider-codex.svg": { file: "icons/provider-codex.svg", type: "image/svg+xml" },
   "/icons/provider-claude.svg": { file: "icons/provider-claude.svg", type: "image/svg+xml" },
   "/icons/provider-grok.svg": { file: "icons/provider-grok.svg", type: "image/svg+xml" },
+  "/terminal.js": { file: "terminal.js", type: "application/javascript; charset=utf-8", noCache: true },
+  "/terminal.css": { file: "terminal.css", type: "text/css; charset=utf-8", noCache: true },
 };
 
 // ---------- SSE fan-out ----------
@@ -834,6 +851,24 @@ function maybeAutoQueueUsageResume(event, data) {
   if (event === "usage-retry") { return; }
   const threadId = data?.params?.threadId ?? data?.threadId;
   const provider = data?.provider;
+
+  // A usage-limit retry is only a fallback for a stopped turn. If any newer
+  // turn starts manually, from another client, or through a provider-native
+  // queue, that newer work has already resumed the thread and the old
+  // "Continue." must never fire after it. A retry dispatched by this runner is
+  // already in `dispatching`, so the store deliberately does not supersede it
+  // when its own turn/started event arrives.
+  const newerTurnStarted = provider && threadId && (
+    (event === "notify" && data.method === "turn/started")
+    || (event === "external" && data.running === true && ["marker", "stalled"].includes(data.runConfidence))
+  );
+  if (newerTurnStarted) {
+    const turnId = data?.params?.turn?.id ?? data?.params?.turnId ?? data?.activeMarkerId ?? null;
+    for (const entry of usageRetryStore.supersedeThread(provider, threadId, { turnId })) {
+      publishUsageRetry(entry);
+    }
+  }
+
   if (usageRetryPolicies.isGlobalEnabled() && provider && threadId) {
     const key = metaKey(provider, threadId);
     if (event === "notify" && data.method === "turn/started") {
@@ -993,6 +1028,73 @@ function isAuthed(req) {
   return auth.startsWith("Bearer ") && tokenMatches(auth.slice("Bearer ".length));
 }
 
+function cookieValue(req, name) {
+  for (const part of String(req.headers.cookie ?? "").split(/;\s*/)) {
+    const index = part.indexOf("=");
+    if (index > 0 && part.slice(0, index) === name) {
+      try {
+        return decodeURIComponent(part.slice(index + 1));
+      } catch {
+        // A public request can contain arbitrary cookie bytes. Treat malformed
+        // percent encoding as a missing identity instead of throwing out of an
+        // HTTP or WebSocket event callback and terminating the bridge.
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
+function secureRequest(req) {
+  return req.socket.encrypted || String(req.headers["x-forwarded-proto"] ?? "").split(",")[0].trim() === "https";
+}
+
+function cookieHeader(name, value, { maxAge = 31536000, sameSite = "Strict", httpOnly = true, secure = true } = {}) {
+  return `${name}=${encodeURIComponent(value)}; Path=/; Max-Age=${maxAge}; SameSite=${sameSite}${httpOnly ? "; HttpOnly" : ""}${secure ? "; Secure" : ""}`;
+}
+
+function appendCookies(res, values) {
+  const previous = res.getHeader?.("set-cookie");
+  const list = previous == null ? [] : Array.isArray(previous) ? previous : [previous];
+  res.setHeader("set-cookie", list.concat(values));
+}
+
+function ensureBrowserIdentity(req, res) {
+  const existing = cookieValue(req, BROWSER_COOKIE_NAME);
+  if (existing && existing.length >= 32) { return existing; }
+  const created = randomBytes(32).toString("base64url");
+  appendCookies(res, [cookieHeader(BROWSER_COOKIE_NAME, created, { secure: secureRequest(req) })]);
+  return created;
+}
+
+function exactTerminalOrigin(req) {
+  const supplied = String(req.headers.origin ?? "");
+  return !!PUBLIC_ORIGIN && supplied === PUBLIC_ORIGIN;
+}
+
+function requireTerminalOrigin(req) {
+  if (!exactTerminalOrigin(req)) {
+    throw Object.assign(new Error("terminal request origin was rejected"), { status: 403, code: "terminal_origin_rejected" });
+  }
+}
+
+function terminalBrowser(req) {
+  const value = cookieValue(req, BROWSER_COOKIE_NAME);
+  if (!value) { throw Object.assign(new Error("terminal browser identity is missing; reload the app"), { status: 401, code: "terminal_browser_required" }); }
+  return value;
+}
+
+function terminalUnlock(req) {
+  return cookieValue(req, TERMINAL_UNLOCK_COOKIE_NAME);
+}
+
+function setTerminalUnlock(req, res, value, maxAgeMs) {
+  appendCookies(res, [cookieHeader(TERMINAL_UNLOCK_COOKIE_NAME, value, {
+    maxAge: Math.max(1, Math.floor(maxAgeMs / 1000)),
+    secure: secureRequest(req),
+  })]);
+}
+
 function requestClientKey(req) {
   const address = req.socket.remoteAddress ?? "unknown";
   const loopback = address === "127.0.0.1" || address === "::1" || address.startsWith("::ffff:127.");
@@ -1122,6 +1224,22 @@ function readBody(req, maxBytes = 12 * 1024 * 1024) {
   });
 }
 
+function readTextBody(req, maxBytes = 64 * 1024) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let bytes = 0;
+    req.on("data", (value) => {
+      const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
+      bytes += chunk.length;
+      if (bytes <= maxBytes) { chunks.push(chunk); }
+    });
+    req.on("end", () => bytes > maxBytes
+      ? reject(Object.assign(new Error("body too large"), { status: 413, code: "body_too_large" }))
+      : resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", reject);
+  });
+}
+
 // Resolve the provider for a GET (from query) or POST (from body); 400 if unknown.
 function providerFromQuery(res, url) {
   const name = url.searchParams.get("provider") || "codex";
@@ -1206,6 +1324,35 @@ function projectRoots(realCwd) {
 
 function fileAccessMode() {
   return readConfig().fileAccess || "project";
+}
+
+function findThreadSummary(rows, threadId) {
+  for (const row of rows ?? []) {
+    if (row?.id === threadId) { return row; }
+    const child = findThreadSummary(row?.subagents, threadId);
+    if (child) { return child; }
+  }
+  return null;
+}
+
+async function resolveTerminalContext(providerName, threadId) {
+  const provider = pickProvider(providerName);
+  if (!provider || !threadId) {
+    throw Object.assign(new Error("provider and threadId are required"), { status: 400, code: "terminal_context_invalid" });
+  }
+  const listed = await provider.listThreads({ limit: null });
+  const thread = findThreadSummary(listed?.data, threadId);
+  if (!thread?.cwd) {
+    throw Object.assign(new Error("this thread does not report a project directory"), { status: 409, code: "terminal_context_unavailable" });
+  }
+  let cwd;
+  try { cwd = realpathSync(thread.cwd); } catch {
+    throw Object.assign(new Error("the thread project directory no longer exists"), { status: 409, code: "terminal_context_unavailable" });
+  }
+  if (!statSync(cwd).isDirectory()) {
+    throw Object.assign(new Error("the thread project path is not a directory"), { status: 409, code: "terminal_context_unavailable" });
+  }
+  return { provider: provider.name, threadId, cwd, title: thread.name || thread.preview || "Project terminal" };
 }
 
 function readProjectFile(cwd, p) {
@@ -1755,18 +1902,87 @@ const routes = {
     json(res, 200, policy);
   },
 
-  "POST /api/terminal/run": async (req, res) => {
-    const body = await readBody(req);
-    json(res, 202, terminalRunner.start({ cwd: body?.cwd, command: body?.command }));
+  "GET /api/terminal/security/status": async (req, res) => {
+    const browserSecret = terminalBrowser(req);
+    const access = terminalSecurity.status({ browserSecret, unlockToken: terminalUnlock(req) });
+    const backend = await ptyTerminals.capability();
+    json(res, 200, { access, backend });
   },
 
-  "GET /api/terminal/status": async (_req, res, url) => {
-    json(res, 200, terminalRunner.get(url.searchParams.get("id"), url.searchParams.get("offset")));
+  "POST /api/terminal/register/options": async (req, res) => {
+    requireTerminalOrigin(req);
+    const body = await readBody(req, 64 * 1024);
+    json(res, 200, await terminalSecurity.registrationOptions({
+      capability: body?.capability,
+      browserSecret: terminalBrowser(req),
+      label: body?.label,
+    }));
+  },
+
+  "POST /api/terminal/register/verify": async (req, res) => {
+    requireTerminalOrigin(req);
+    const body = await readBody(req, 256 * 1024);
+    const result = await terminalSecurity.verifyRegistration({
+      ceremonyId: body?.ceremonyId,
+      response: body?.response,
+      browserSecret: terminalBrowser(req),
+    });
+    setTerminalUnlock(req, res, result.unlockToken, result.idleExpiresIn);
+    json(res, 200, { device: result.device });
+  },
+
+  "POST /api/terminal/auth/options": async (req, res) => {
+    requireTerminalOrigin(req);
+    json(res, 200, await terminalSecurity.authenticationOptions({ browserSecret: terminalBrowser(req) }));
+  },
+
+  "POST /api/terminal/auth/verify": async (req, res) => {
+    requireTerminalOrigin(req);
+    const body = await readBody(req, 256 * 1024);
+    const result = await terminalSecurity.verifyAuthentication({
+      ceremonyId: body?.ceremonyId,
+      response: body?.response,
+      browserSecret: terminalBrowser(req),
+    });
+    setTerminalUnlock(req, res, result.unlockToken, result.idleExpiresIn);
+    json(res, 200, { device: result.device });
+  },
+
+  "POST /api/terminal/ticket": async (req, res) => {
+    requireTerminalOrigin(req);
+    const body = await readBody(req, 64 * 1024);
+    const context = await resolveTerminalContext(body?.provider, body?.threadId);
+    json(res, 200, { ...terminalSecurity.issueTicket({
+      unlockToken: terminalUnlock(req),
+      browserSecret: terminalBrowser(req),
+      context,
+    }), context });
+  },
+
+  // The one-shot runner is retained for machines where the optional PTY addon
+  // cannot load. It is not an auth fallback: every shell path requires the same
+  // passkey unlock and server-derived project context.
+  "POST /api/terminal/run": async (req, res) => {
+    requireTerminalOrigin(req);
+    const browserSecret = terminalBrowser(req);
+    const { device } = terminalSecurity.requireUnlock(terminalUnlock(req), browserSecret);
+    const body = await readBody(req, 64 * 1024);
+    const context = await resolveTerminalContext(body?.provider, body?.threadId);
+    json(res, 202, terminalRunner.start({ cwd: context.cwd, command: body?.command, owner: device.id }));
+  },
+
+  "GET /api/terminal/status": async (req, res, url) => {
+    const browserSecret = terminalBrowser(req);
+    const { device } = terminalSecurity.requireUnlock(terminalUnlock(req), browserSecret);
+    json(res, 200, terminalRunner.get(url.searchParams.get("id"), url.searchParams.get("offset"), device.id));
   },
 
   "POST /api/terminal/stop": async (req, res) => {
-    const body = await readBody(req);
-    json(res, 200, terminalRunner.stop(body?.id));
+    requireTerminalOrigin(req);
+    const browserSecret = terminalBrowser(req);
+    const { device } = terminalSecurity.requireUnlock(terminalUnlock(req), browserSecret);
+    const body = await readBody(req, 64 * 1024);
+    json(res, 200, terminalRunner.stop(body?.id, device.id));
   },
 
   "GET /api/approvals": async (req, res, url) => {
@@ -2008,6 +2224,30 @@ export async function handleRequest(req, res) {
     return json(res, 200, { proof: localBridgeProof(TOKEN, nonce) });
   }
 
+  if (url.pathname === "/internal/terminal-admin" && req.method === "POST") {
+    if (!isLoopback(req)) { return json(res, 404, { error: "not found" }); }
+    try {
+      const raw = await readTextBody(req);
+      const nonce = String(req.headers["x-remote-agents-nonce"] ?? "");
+      const proof = String(req.headers["x-remote-agents-proof"] ?? "");
+      if (!localControlProofMatches(TOKEN, nonce, raw, proof)) { return json(res, 404, { error: "not found" }); }
+      const now = Date.now();
+      for (const [seen, at] of localTerminalAdminNonces) {
+        if (now - at > 60_000) { localTerminalAdminNonces.delete(seen); }
+      }
+      if (localTerminalAdminNonces.has(nonce)) { return json(res, 409, { error: "terminal administration request was already used", code: "local_control_replay" }); }
+      localTerminalAdminNonces.set(nonce, now);
+      const body = raw ? JSON.parse(raw) : {};
+      if (body.action === "enable") { return json(res, 200, terminalSecurity.createEnrollment()); }
+      if (body.action === "devices") { return json(res, 200, terminalSecurity.listDevices()); }
+      if (body.action === "revoke") { return json(res, 200, terminalSecurity.revokeDevice(String(body.deviceId ?? ""))); }
+      if (body.action === "disable") { return json(res, 200, terminalSecurity.disable()); }
+      return json(res, 400, { error: "unknown terminal administration action" });
+    } catch (error) {
+      return json(res, error.status ?? 500, { error: error.message, code: error.code });
+    }
+  }
+
   // Internal endpoint for the Claude PreToolUse hook (loopback only, secret-auth
   // inside the provider). No session cookie — the hook has no browser context.
   if (url.pathname === "/internal/claude-approval" && req.method === "POST") {
@@ -2041,9 +2281,13 @@ export async function handleRequest(req, res) {
       }
 
       clearAuthFailures(req);
-      const secure = req.socket.encrypted || String(req.headers["x-forwarded-proto"] ?? "").split(",")[0].trim() === "https";
+      const secure = secureRequest(req);
+      const browserIdentity = cookieValue(req, BROWSER_COOKIE_NAME) || randomBytes(32).toString("base64url");
       res.writeHead(302, {
-        "set-cookie": `${COOKIE_NAME}=${TOKEN}; HttpOnly; SameSite=Lax; Path=/; Max-Age=31536000${secure ? "; Secure" : ""}`,
+        "set-cookie": [
+          cookieHeader(COOKIE_NAME, TOKEN, { sameSite: "Lax", secure }),
+          cookieHeader(BROWSER_COOKIE_NAME, browserIdentity, { secure }),
+        ],
         location: "/",
         "referrer-policy": "no-referrer",
       });
@@ -2061,6 +2305,7 @@ export async function handleRequest(req, res) {
     }
 
     clearAuthFailures(req);
+    ensureBrowserIdentity(req, res);
 
     const body = renderIndexHtml(req.headers["user-agent"] ?? "", [...USABLE_PROVIDER_NAMES]);
     res.writeHead(200, {
@@ -2084,6 +2329,17 @@ export async function handleRequest(req, res) {
 
   clearAuthFailures(req);
 
+  if (req.method === "GET" && (url.pathname === "/terminal" || url.pathname === "/terminal.html")) {
+    ensureBrowserIdentity(req, res);
+    const file = join(__dirname, "public", "terminal.html");
+    if (!existsSync(file)) { return json(res, 404, { error: "not found" }); }
+    // xterm computes cell geometry with inline style properties. Keep scripts
+    // self-only and allow inline CSS solely in this isolated terminal document.
+    res.setHeader("content-security-policy", "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self'; font-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'");
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+    return res.end(readFileSync(file));
+  }
+
   // PWA assets are authenticated too. Manifest and service-worker requests on
   // the paired same-origin app carry its cookie; exposing them before pairing
   // would unnecessarily identify the internet-facing service.
@@ -2101,6 +2357,8 @@ export async function handleRequest(req, res) {
     if (url.pathname === "/sw.js") {
       headers["cache-control"] = "no-cache";
       headers["service-worker-allowed"] = "/";
+    } else if (entry.noCache) {
+      headers["cache-control"] = "no-store";
     } else {
       headers["cache-control"] = "max-age=86400";
     }
@@ -2109,13 +2367,15 @@ export async function handleRequest(req, res) {
     return res.end(readFileSync(file));
   }
 
-  // Vendored static assets (marked, DOMPurify). basename() prevents traversal.
+  // Vendored static assets. basename() prevents traversal; an explicit MIME
+  // map keeps the terminal stylesheet from being served as executable script.
   if (req.method === "GET" && url.pathname.startsWith("/vendor/")) {
     const file = join(__dirname, "public", "vendor", basename(url.pathname));
 
     if (existsSync(file)) {
       const body = readFileSync(file);
-      res.writeHead(200, { "content-type": "application/javascript; charset=utf-8", "cache-control": "max-age=86400" });
+      const type = extname(file) === ".css" ? "text/css; charset=utf-8" : "application/javascript; charset=utf-8";
+      res.writeHead(200, { "content-type": type, "cache-control": "max-age=86400" });
       return res.end(body);
     }
 
@@ -2140,10 +2400,102 @@ export async function handleRequest(req, res) {
 }
 
 const server = createServer(handleRequest);
+const terminalWebSockets = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024, perMessageDeflate: false });
+
+function rejectUpgrade(socket, status = 403, message = "Forbidden") {
+  try { socket.end(`HTTP/1.1 ${status} ${message}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`); } catch { socket.destroy(); }
+}
+
+server.on("upgrade", (req, socket, head) => {
+  try {
+    const url = new URL(req.url, "http://localhost");
+    if (url.pathname !== "/api/terminal/ws") { return rejectUpgrade(socket, 404, "Not Found"); }
+    if (!tokenMatches(cookieValue(req, COOKIE_NAME)) || !cookieValue(req, BROWSER_COOKIE_NAME) || !exactTerminalOrigin(req)) {
+      return rejectUpgrade(socket);
+    }
+    terminalWebSockets.handleUpgrade(req, socket, head, (webSocket) => {
+      terminalWebSockets.emit("connection", webSocket, req);
+    });
+  } catch {
+    // Upgrade handlers run outside the normal HTTP route try/catch. Never let
+    // hostile headers or WebSocket parser failures escape into the bridge.
+    return rejectUpgrade(socket, 400, "Bad Request");
+  }
+});
+
+terminalWebSockets.on("connection", (socket, req) => {
+  const browserSecret = cookieValue(req, BROWSER_COOKIE_NAME);
+  let session = null;
+  let authenticated = false;
+  let authenticating = false;
+  let inputWindowAt = Date.now();
+  let inputBytes = 0;
+  const authTimer = setTimeout(() => socket.close(4401, "terminal authentication timed out"), 5000);
+  authTimer.unref?.();
+
+  socket.on("message", async (payload, isBinary) => {
+    if (isBinary || payload.length > 16 * 1024) { return socket.close(4400, "invalid terminal frame"); }
+    let frame;
+    try { frame = JSON.parse(payload.toString("utf8")); } catch { return socket.close(4400, "invalid terminal frame"); }
+
+    if (!authenticated) {
+      if (authenticating) { return socket.close(4401, "terminal authentication already in progress"); }
+      if (frame?.type !== "auth" || typeof frame.ticket !== "string") { return socket.close(4401, "terminal ticket required"); }
+      authenticating = true;
+      let ticket;
+      try { ticket = terminalSecurity.consumeTicket(frame.ticket, browserSecret); } catch { return socket.close(4403, "terminal ticket rejected"); }
+      authenticated = true;
+      clearTimeout(authTimer);
+      try {
+        session = await ptyTerminals.attach(socket, {
+          deviceId: ticket.deviceId,
+          context: ticket.context,
+          cols: frame.cols,
+          rows: frame.rows,
+        });
+        // Revocation can race the asynchronous native PTY spawn. If it happened
+        // before the manager registered this session, the invalidation callback
+        // could not see it; recheck here. A later revocation sees and closes it.
+        terminalSecurity.requireDevice(ticket.deviceId);
+        if (socket.readyState !== 1) { ptyTerminals.detach(session, socket); }
+      } catch (error) {
+        if (session) { ptyTerminals.closeSession(session.id, "terminal access rejected"); }
+        try { socket.send(JSON.stringify({ type: "error", message: error.message, code: error.code })); } catch {}
+        socket.close(1011, "terminal backend unavailable");
+      }
+      return;
+    }
+
+    if (!session) { return socket.close(1011, "terminal session unavailable"); }
+    try {
+      if (frame.type === "input") {
+        const now = Date.now();
+        if (now - inputWindowAt >= 1000) { inputWindowAt = now; inputBytes = 0; }
+        inputBytes += Buffer.byteLength(String(frame.data ?? ""));
+        if (inputBytes > 64 * 1024) { return socket.close(4429, "terminal input rate exceeded"); }
+        ptyTerminals.input(session, frame.data, frame.seq);
+      } else if (frame.type === "resize") {
+        ptyTerminals.resize(session, frame.cols, frame.rows);
+      } else if (frame.type === "close") {
+        ptyTerminals.closeSession(session.id, "closed by user");
+      } else {
+        socket.close(4400, "unknown terminal frame");
+      }
+    } catch (error) {
+      try { socket.send(JSON.stringify({ type: "error", message: error.message, code: error.code })); } catch {}
+    }
+  });
+
+  socket.on("close", () => {
+    clearTimeout(authTimer);
+    if (session) { ptyTerminals.detach(session, socket); }
+  });
+  socket.on("error", () => {});
+});
 
 // Start the bridge. Resolves once listening. Caller owns host/port/token
 // resolution and any user-facing output (pairing URL, QR).
-export function configureServer({ host = "0.0.0.0", port = 0, token, usableProviders } = {}) {
+export function configureServer({ host = "0.0.0.0", port = 0, token, publicOrigin = null, usableProviders } = {}) {
   // Older codex-phone installs generated 12-character pairing identities.
   // Continue accepting those saved identities so an upgrade does not strand an
   // already-installed phone. New generated and explicit CLI tokens remain at
@@ -2155,6 +2507,8 @@ export function configureServer({ host = "0.0.0.0", port = 0, token, usableProvi
   HOST = host;
   PORT = Number(port);
   TOKEN = token;
+  PUBLIC_ORIGIN = publicOrigin ? new URL(publicOrigin).origin : null;
+  terminalSecurity.configureOrigin(PUBLIC_ORIGIN);
 
   const names = usableProviders == null ? Object.keys(providers) : [...new Set(usableProviders)];
   const unknown = names.filter((name) => !providers[name]);

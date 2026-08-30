@@ -22,7 +22,7 @@ import select, { Separator } from "@inquirer/select";
 import { fileURLToPath } from "node:url";
 
 import { dataPath, readConfig, writeConfig } from "../config.mjs";
-import { localBridgeProofMatches } from "../local-proof.mjs";
+import { localBridgeProofMatches, localControlProof } from "../local-proof.mjs";
 import { augmentedPath, detectProviders, resolvedBinaries, setupBlocker } from "../provider-detect.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -832,6 +832,7 @@ async function startLocalBridge(cfg, providerResult = providerPreflight(cfg)) {
       host,
       port,
       token,
+      publicOrigin: cfg.publicUrl || null,
       usableProviders: providerResult.usable.map((row) => row.name),
     });
   } catch (e) {
@@ -1412,6 +1413,59 @@ async function setup(a, args) {
   await printPairing(ts.config);
 }
 
+async function terminalAdmin(rest) {
+  const action = rest[0] || "devices";
+  if (!new Set(["enable", "devices", "revoke", "disable"]).has(action)) {
+    throw new Error("usage: remote-agents terminal [enable|devices|revoke DEVICE_ID|disable]");
+  }
+  const cfg = readConfig();
+  if (!validPort(cfg.port) || typeof cfg.token !== "string") {
+    throw new Error("Remote Agents is not configured. Run `remote-agents setup` first.");
+  }
+  const proof = await verifyLocalBridge(cfg);
+  if (!proof.verified) {
+    throw new Error(`the running bridge could not be verified (${proof.message}); start it first. No provider process was restarted.`);
+  }
+  const body = JSON.stringify({ action, ...(action === "revoke" ? { deviceId: rest[1] } : {}) });
+  if (action === "revoke" && !rest[1]) { throw new Error("usage: remote-agents terminal revoke DEVICE_ID"); }
+  const nonce = randomBytes(32).toString("hex");
+  const response = await fetch(`http://127.0.0.1:${cfg.port}/internal/terminal-admin`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-remote-agents-nonce": nonce,
+      "x-remote-agents-proof": localControlProof(cfg.token, nonce, body),
+    },
+    body,
+    signal: AbortSignal.timeout(8000),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) { throw new Error(result.error || `terminal administration failed (${response.status})`); }
+
+  if (action === "enable") {
+    const url = `${result.origin.replace(/\/$/, "")}/terminal#enroll=${encodeURIComponent(result.secret)}`;
+    const { default: qrcode } = await import("qrcode-terminal");
+    console.log("\n  Terminal enrollment is ready for 5 minutes.");
+    console.log("  The browser must already be paired with this Remote Agents bridge.");
+    console.log("  Scan this QR, then approve Face ID, Touch ID, Windows Hello, or your device passkey:\n");
+    qrcode.generate(url, { small: true });
+    console.log(`    ${url}`);
+    console.log(`\n  Manual enrollment code: ${result.code}`);
+    console.log("  Terminal access is full shell access as your OS user. The project is only the starting folder.\n");
+    return;
+  }
+  if (action === "devices") {
+    console.log(`\n  Terminal access: ${result.enabled ? "enabled" : "disabled"}`);
+    if (!result.devices?.length) { console.log("  No enrolled terminal devices.\n"); return; }
+    for (const device of result.devices) {
+      console.log(`  ${device.id}  ${device.label}  last used ${device.lastUsedAt ? new Date(device.lastUsedAt).toLocaleString() : "never"}`);
+    }
+    console.log();
+    return;
+  }
+  console.log(action === "disable" ? "\n  Terminal access disabled and all devices/sessions revoked.\n" : "\n  Terminal device revoked.\n");
+}
+
 async function main() {
   const [cmd, ...rest] = process.argv.slice(2);
   const args = parseArgs(rest);
@@ -1426,6 +1480,10 @@ async function main() {
 
   if (cmd === "tailscale") {
     return tailscale(args);
+  }
+
+  if (cmd === "terminal") {
+    return terminalAdmin(rest);
   }
 
   const a = agent();
@@ -1501,7 +1559,7 @@ async function main() {
       break;
 
     default:
-      console.log("usage: remote-agents [serve|setup|tailscale|tunnel|uninstall|start|stop|status|url]");
+      console.log("usage: remote-agents [serve|setup|tailscale|tunnel|terminal|uninstall|start|stop|status|url]");
       console.log("       default: --transport funnel; private: --transport serve; advanced: --transport cloudflare");
   }
 }
