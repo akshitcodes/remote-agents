@@ -120,6 +120,37 @@ test("a send waits for an in-flight lease release before resuming", async () => 
   assert.notEqual(provider.threadClients.get("thread-e"), oldClient);
 });
 
+test("an account change during a cold resume recycles before starting work", async () => {
+  const provider = new CodexProvider(() => {}, { idleReleaseMs: 1000, accountObserver: { start() {}, stop() {} } });
+  let finishFirstResume;
+  const firstResume = new Promise((resolve) => { finishFirstResume = resolve; });
+  const clients = [];
+  const stopped = [];
+  provider.startThreadClient = (threadId) => {
+    const client = { threadId, accountGeneration: provider.accountGeneration, child: {}, ready: Promise.resolve(), resumePromise: null };
+    clients.push(client);
+    return client;
+  };
+  provider.clientRpc = async (client, method) => {
+    assert.equal(method, "thread/resume");
+    if (client === clients[0]) { await firstResume; }
+    return {};
+  };
+  provider.stopThreadClient = async (client) => { stopped.push(client); };
+
+  const resuming = provider.ensureResumed("large-thread");
+  await new Promise((resolve) => setImmediate(resolve));
+  provider.accountGeneration = 1;
+  finishFirstResume();
+
+  assert.equal(await resuming, true);
+  assert.equal(clients.length, 2);
+  assert.deepEqual(stopped, [clients[0]]);
+  assert.equal(provider.threadClients.get("large-thread"), clients[1]);
+  assert.equal(clients[1].accountGeneration, 1);
+  provider.cancelIdleRelease("large-thread");
+});
+
 test("rename re-arms idle release after its lease operation", async () => {
   const provider = new CodexProvider(() => {}, { idleReleaseMs: 1000 });
   provider.resumedThreads.add("thread-f");

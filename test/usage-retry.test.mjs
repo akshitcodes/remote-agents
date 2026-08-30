@@ -94,6 +94,22 @@ test("duplicate terminal events and concurrent manual scheduling cannot create t
   assert.equal(store.list({ provider: "codex", threadId: "thread-1" }).length, 1);
 });
 
+test("an account change wakes only pending retries for that provider", (t) => {
+  let now = 1000;
+  const store = new UsageRetryStore({ file: fixture(t), now: () => now });
+  create(store, { id: "codex-pending", provider: "codex", requestId: "codex-request" });
+  create(store, { id: "claude-pending", provider: "claude", requestId: "claude-request", triggerId: "claude-terminal" });
+  store.update("codex-pending", { nextCheckAt: 99_000 });
+  store.update("claude-pending", { nextCheckAt: 99_000 });
+  now = 2000;
+
+  const changed = store.wake("codex");
+
+  assert.deepEqual(changed.map((entry) => entry.id), ["codex-pending"]);
+  assert.equal(store.get("codex-pending").nextCheckAt, 2000);
+  assert.equal(store.get("claude-pending").nextCheckAt, 99_000);
+});
+
 test("runner rechecks the active account, waits for idle, and sends exactly once", async (t) => {
   let now = 1000;
   const store = new UsageRetryStore({ file: fixture(t), now: () => now });

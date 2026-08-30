@@ -49,6 +49,7 @@ export function codexBinary() {
 }
 
 import { BaseProvider, makeLineReader } from "./base.mjs";
+import { CodexAccountObserver } from "../codex-account.mjs";
 
 const APPROVAL_METHODS = new Set([
   "item/commandExecution/requestApproval",
@@ -200,7 +201,13 @@ export function codexUserInput(text, attachments = []) {
 }
 
 export class CodexProvider extends BaseProvider {
-  constructor(emit, { idleReleaseMs = DEFAULT_IDLE_RELEASE_MS, rpcTimeoutMs = 180_000 } = {}) {
+  constructor(emit, {
+    idleReleaseMs = DEFAULT_IDLE_RELEASE_MS,
+    rpcTimeoutMs = 180_000,
+    accountObserver = null,
+    accountPollMs = 1000,
+    accountReleaseGraceMs = 1000,
+  } = {}) {
     super(emit, "codex");
 
     this.child = null;
@@ -222,13 +229,21 @@ export class CodexProvider extends BaseProvider {
     this.initializePromise = null;
     this.cache = { models: null, account: null };
     this.feed = null;
+    this.accountGeneration = 0;
+    this.accountReleaseGraceMs = accountReleaseGraceMs;
+    this.pendingAccountChange = null;
+    this.accountObserver = accountObserver ?? new CodexAccountObserver({
+      intervalMs: accountPollMs,
+      onChange: (change) => this.handleAccountIdentityChange(change),
+    });
   }
 
   async init() {
+    this.accountObserver.start();
     this.startChild();
   }
 
-  handleChildLine(line) {
+  handleChildLine(line, source = this.child) {
     let msg;
 
     try {
@@ -260,7 +275,7 @@ export class CodexProvider extends BaseProvider {
       return;
     }
 
-    this.handleNotification(msg);
+    this.handleNotification(msg, source);
   }
 
   rememberApproval(msg, client) {
@@ -283,8 +298,17 @@ export class CodexProvider extends BaseProvider {
     this.emit("approval", { requestId, method: msg.method, params });
   }
 
-  handleNotification(msg) {
+  handleNotification(msg, source = null) {
     if (!msg.method) { return; }
+
+    // A turn already running during an account switch is allowed to finish,
+    // but its usage belongs to the previous account and must not repopulate the
+    // new account's freshly-cleared usage state.
+    if (msg.method === "account/rateLimits/updated"
+        && source?.accountGeneration != null
+        && source.accountGeneration !== this.accountGeneration) {
+      return;
+    }
 
     if (msg.method === "account/rateLimits/updated" && this.cache.account) {
       this.cache.account.rateLimits = msg.params?.rateLimits ?? this.cache.account.rateLimits;
@@ -302,7 +326,15 @@ export class CodexProvider extends BaseProvider {
     } else if ((msg.method === "turn/completed" || msg.method === "turn/failed" || msg.method === "turn/aborted") && threadId) {
       if (this.startingTurns.has(threadId)) { this.finishedStartingTurns.add(threadId); }
       this.activeTurns.delete(threadId);
-      this.scheduleIdleRelease(threadId);
+      const client = this.threadClients.get(threadId);
+      if (client?.accountGeneration != null && client.accountGeneration !== this.accountGeneration) {
+        // Give a provider-native queued turn time to announce its start. That
+        // notification cancels this timer, so an account switch can never race
+        // a queued continuation by killing its holder between turns.
+        this.scheduleIdleRelease(threadId, this.accountReleaseGraceMs);
+      } else {
+        this.scheduleIdleRelease(threadId);
+      }
     }
 
     this.notify(msg.method, msg.params ?? {});
@@ -317,12 +349,14 @@ export class CodexProvider extends BaseProvider {
   }
 
   startChild() {
-    this.child = spawn(codexBinary(), ["app-server"], { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, PATH: augmentedPath() } });
-    this.feed = makeLineReader((line) => this.handleChildLine(line));
+    const child = spawn(codexBinary(), ["app-server"], { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, PATH: augmentedPath() } });
+    child.accountGeneration = this.accountGeneration;
+    this.child = child;
+    this.feed = makeLineReader((line) => this.handleChildLine(line, child));
 
     // A missing/unlaunchable `codex` must not crash the bridge (Claude may still
     // work). Mark unavailable and stop respawning until the process is restarted.
-    this.child.on("error", (e) => {
+    child.on("error", (e) => {
       this.unavailable = e.code === "ENOENT"
         ? "The `codex` CLI was not found on PATH. Install it and restart codex-phone."
         : `codex failed to start: ${e.message}`;
@@ -336,15 +370,15 @@ export class CodexProvider extends BaseProvider {
       this.initializePromise = null;
     });
 
-    this.child.stdout.on("data", (d) => {
+    child.stdout.on("data", (d) => {
       this.feed(d);
     });
 
-    this.child.stderr.on("data", (d) => {
+    child.stderr.on("data", (d) => {
       process.stderr.write(`[codex] ${d}`);
     });
 
-    this.child.on("exit", (code) => {
+    child.on("exit", (code) => {
       // Don't hot-loop respawning a binary that isn't there.
       if (this.unavailable) {
         return;
@@ -371,18 +405,68 @@ export class CodexProvider extends BaseProvider {
       this.cache.models = null;
       this.cache.account = null;
       this.initializePromise = null;
+      if (this.child === child) { this.child = null; }
       this.emit("bridge", { state: "restarting" });
-      setTimeout(() => this.startChild(), 1000);
+      setTimeout(() => {
+        if (!this.child && !this.unavailable) { this.startChild(); }
+      }, 1000);
     });
 
     this.initializePromise = this.rpc("initialize", {
       clientInfo: { name: "codex-phone", title: "Codex Phone", version: "0.2.0" },
       capabilities: { experimentalApi: true },
     }).then((res) => {
-      this.child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "initialized", params: {} }) + "\n");
+      child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "initialized", params: {} }) + "\n");
       this.emit("bridge", { state: "ready" });
       return res;
     });
+    this.initializePromise.then(() => this.confirmAccountChange(child)).catch(() => {});
+  }
+
+  handleAccountIdentityChange({ previous, current }) {
+    this.accountGeneration += 1;
+    this.pendingAccountChange = { previous, current, generation: this.accountGeneration };
+    this.cache.models = null;
+    this.cache.account = null;
+    this.notify("account/changing", {
+      generation: this.accountGeneration,
+      previous: previous ? { accountId: previous.accountId, userId: previous.userId, email: previous.email } : null,
+      current: { accountId: current.accountId, userId: current.userId, email: current.email },
+    });
+
+    const child = this.child;
+    if (child && child.exitCode == null && child.signalCode == null && child.accountGeneration !== this.accountGeneration) {
+      child.kill("SIGTERM");
+    } else if (!child) {
+      this.startChild();
+    }
+  }
+
+  async confirmAccountChange(child) {
+    const change = this.pendingAccountChange;
+    if (!change || child !== this.child || child.accountGeneration !== change.generation) { return; }
+
+    try {
+      const snapshot = await this.usage({ refresh: true });
+      if (this.pendingAccountChange?.generation !== change.generation || child !== this.child) { return; }
+      const expectedEmail = String(change.current.email ?? "").trim().toLowerCase();
+      const actualEmail = String(snapshot.account?.email ?? "").trim().toLowerCase();
+      if (expectedEmail && actualEmail !== expectedEmail) {
+        console.error("[codex] fresh app-server did not confirm the selected account; retrying safely");
+        if (child.exitCode == null && child.signalCode == null) { child.kill("SIGTERM"); }
+        return;
+      }
+      this.pendingAccountChange = null;
+      this.notify("account/changed", {
+        generation: change.generation,
+        previous: change.previous ? { accountId: change.previous.accountId, userId: change.previous.userId, email: change.previous.email } : null,
+        current: { accountId: change.current.accountId, userId: change.current.userId, email: change.current.email },
+        account: snapshot.account ?? null,
+        rateLimits: snapshot.rateLimits ?? null,
+      });
+    } catch (error) {
+      console.error("[codex] could not confirm switched account:", error);
+    }
   }
 
   rpc(method, params) {
@@ -421,6 +505,7 @@ export class CodexProvider extends BaseProvider {
       pending: new Map(),
       intentionalExit: false,
       resumePromise: null,
+      accountGeneration: this.accountGeneration,
     };
     const feed = makeLineReader((line) => {
       let msg;
@@ -451,7 +536,7 @@ export class CodexProvider extends BaseProvider {
         return;
       }
 
-      this.handleNotification(msg);
+      this.handleNotification(msg, client);
     });
 
     child.stdout.on("data", (data) => feed(data));
@@ -571,7 +656,7 @@ export class CodexProvider extends BaseProvider {
     this.idleReleaseTimers.delete(threadId);
   }
 
-  scheduleIdleRelease(threadId) {
+  scheduleIdleRelease(threadId, delayMs = this.idleReleaseMs) {
     if (!threadId || !this.resumedThreads.has(threadId)) { return; }
 
     this.cancelIdleRelease(threadId);
@@ -589,7 +674,7 @@ export class CodexProvider extends BaseProvider {
           console.error(`[codex:${threadId}] idle release failed:`, error);
         }
       }
-    }, this.idleReleaseMs);
+    }, delayMs);
     timer.unref?.();
     this.idleReleaseTimers.set(threadId, timer);
   }
@@ -608,11 +693,16 @@ export class CodexProvider extends BaseProvider {
 
     if (releasing) { await releasing; }
 
-    if (this.resumedThreads.has(threadId)) {
-      return false;
+    let client = this.threadClients.get(threadId);
+
+    if (this.resumedThreads.has(threadId)
+        && client?.accountGeneration != null
+        && client.accountGeneration !== this.accountGeneration) {
+      await this.releaseThread({ threadId, reason: "account-changed" });
+      client = null;
     }
 
-    let client = this.threadClients.get(threadId);
+    if (this.resumedThreads.has(threadId)) { return false; }
 
     if (client?.resumePromise) {
       try {
@@ -661,6 +751,14 @@ export class CodexProvider extends BaseProvider {
       }
 
       throw mapped;
+    }
+
+    // The account can change during a large thread's cold resume. Never start
+    // the next turn through a holder that finished resuming with stale auth.
+    if (client.accountGeneration != null && client.accountGeneration !== this.accountGeneration) {
+      await this.stopThreadClient(client);
+      this.threadClients.delete(threadId);
+      return this.ensureResumed(threadId, { approvalPolicy, sandbox, requestId });
     }
 
     client.resumePromise = null;

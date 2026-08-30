@@ -194,6 +194,23 @@ function broadcast(event, data) {
     }
   }
 
+  if (event === "notify" && data?.method === "account/changing" && data.provider) {
+    try { usageState.invalidate(data.provider); } catch (error) {
+      console.error("failed to clear usage for changed provider account:", error);
+    }
+  }
+
+  if (event === "notify" && data?.method === "account/changed" && data.provider) {
+    try {
+      usageState.invalidate(data.provider);
+      usageState.merge(data.provider, { account: data.params?.account, rateLimits: data.params?.rateLimits });
+      for (const entry of usageRetryStore.wake(data.provider)) { publishUsageRetry(entry); }
+      queueMicrotask(() => usageRetryRunner.tick().catch((error) => console.error("usage retry after account change failed:", error)));
+    } catch (error) {
+      console.error("failed to apply changed provider account:", error);
+    }
+  }
+
   const frame = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 
   for (const res of sseClients) {

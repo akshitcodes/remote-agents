@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -150,6 +150,19 @@ test("Codex refresh preserves each previously successful field independently", a
   assert.equal(refreshed.rateLimits.primary.usedPercent, 48);
   assert.equal(refreshed.usage, null);
   provider.child?.kill?.();
+});
+
+test("account invalidation removes stale provider usage immediately and durably", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "remote-agents-usage-invalidate-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = join(dir, "usage.json");
+  const state = new UsageStateStore({ file });
+  state.merge("codex", { account: { email: "old@example.com" }, rateLimits: { primary: { usedPercent: 100 } } });
+
+  assert.equal(state.invalidate("codex"), true);
+  assert.equal(state.merge("codex", {}).account, null);
+  assert.equal(new UsageStateStore({ file }).merge("codex", {}).rateLimits, null);
+  assert.equal(state.invalidate("codex"), false);
 });
 
 test("Grok billing checks deduplicate, cache, and honor explicit refresh", async () => {

@@ -299,6 +299,8 @@ test("usage-limit auto-resume is explicit, durable, cancellable, and defaults of
   assert.match(html, /USAGE_LIMIT_CODES\.has\(code\)/);
   assert.match(html, /out\\s\+of\|no[\s\S]*credits\?/);
   assert.match(html, /decorateUsageLimitError\(el, item\)/);
+  assert.match(html, /method === "account\/changing" \|\| method === "account\/changed"/);
+  assert.match(html, /usageSheetCache\.delete\(provider\)/);
 });
 
 test("Codex write access stays provider-specific and retryable after a conflict", () => {

@@ -2846,6 +2846,17 @@ function liveItem(itemId, factory) {
 function onNotify(method, params, provider) {
   const tid = params?.threadId;
 
+  if (method === "account/changing" || method === "account/changed") {
+    usageSheetCache.delete(provider);
+    if (provider === activeProvider() && method === "account/changed") {
+      initModels(provider);
+      if ($("sheetBody").dataset.sheetKind === "usage" && $("sheet").classList.contains("show")) {
+        refreshUsageProvider(provider);
+      }
+    }
+    return;
+  }
+
   // Run state belongs to the provider's task list, even when a task from a
   // different provider is currently open. Transcript events below are still
   // scoped to the open provider, but the provider-agnostic Recent view must

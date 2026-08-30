@@ -91,6 +91,13 @@ export class UsageStateStore {
     renameSync(tmp, this.file);
   }
 
+  invalidate(provider) {
+    if (!Object.hasOwn(this.state, provider)) { return false; }
+    delete this.state[provider];
+    this.persist();
+    return true;
+  }
+
   merge(provider, snapshot = {}) {
     const at = this.now();
     const previous = this.state[provider] ?? { values: {}, observedAt: {} };

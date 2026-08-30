@@ -222,6 +222,19 @@ export class UsageRetryStore {
       .filter((entry) => CHECKABLE_STATES.has(entry.state) && Number(entry.nextCheckAt) <= now)
       .map((entry) => structuredClone(entry));
   }
+
+  wake(provider) {
+    const now = this.now();
+    const changed = [];
+    for (const entry of this.entries.values()) {
+      if (entry.provider !== provider || !CHECKABLE_STATES.has(entry.state)) { continue; }
+      entry.nextCheckAt = now;
+      entry.updatedAt = now;
+      changed.push(structuredClone(entry));
+    }
+    if (changed.length) { this.persist(); }
+    return changed;
+  }
 }
 
 export class UsageRetryRunner {
