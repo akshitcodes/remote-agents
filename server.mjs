@@ -541,7 +541,9 @@ async function validateSendDispatch(provider, body) {
   let listed;
   let capabilities;
   try {
-    const catalog = await provider.models();
+    const catalog = body?.threadId && typeof provider.modelsForThread === "function"
+      ? await provider.modelsForThread(body.threadId)
+      : await provider.models();
     listed = catalog?.data ?? [];
     capabilities = catalog?.capabilities ?? null;
   } catch (error) {
@@ -908,7 +910,7 @@ async function refreshGlobalUsageInterests() {
   refreshInterest();
 }
 
-async function exactThreadDispatch(provider, threadId) {
+async function threadDispatchBody(provider, threadId) {
   const resolved = await threadSettings.resolve(provider.name, threadId);
   const body = {
     provider: provider.name,
@@ -929,6 +931,11 @@ async function exactThreadDispatch(provider, threadId) {
     };
     Object.assign(body, presets[resolved.mode] ?? {});
   }
+  return body;
+}
+
+async function exactThreadDispatch(provider, threadId) {
+  const body = await threadDispatchBody(provider, threadId);
   const dispatch = await validateSendDispatch(provider, body);
   return { ...body, ...dispatch };
 }
@@ -943,17 +950,33 @@ async function autoQueueUsageResume({ provider: providerName, threadId, triggerI
   try {
     body = await exactThreadDispatch(provider, threadId);
   } catch (error) {
-    const failed = usageRetryStore.create({
-      id: randomUUID(), provider: provider.name, threadId, triggerId,
-      requestId: `usage-resume:${randomUUID()}`, text: "Continue.", dispatch: {},
+    if (error?.code !== "model_verification_failed" && error?.status != null && error.status < 500) {
+      const failed = usageRetryStore.create({
+        id: randomUUID(), provider: provider.name, threadId, triggerId,
+        requestId: `usage-resume:${randomUUID()}`, text: "Continue.", dispatch: {},
+      });
+      const terminal = usageRetryStore.update(failed.id, {
+        state: "failed",
+        nextCheckAt: null,
+        error: { message: `Could not verify exact thread settings: ${error?.message ?? error}`, code: error?.code ?? "settings_unavailable", status: error?.status ?? null },
+      });
+      publishUsageRetry(terminal);
+      return terminal;
+    }
+
+    // Model discovery happens before any message can reach Codex. A control
+    // process exit here is safely retryable and must not discard the user's
+    // auto-resume intent. Capture the provider-recorded settings without using
+    // them until a later model catalog proves the exact combination.
+    body = await threadDispatchBody(provider, threadId);
+    const queued = createUsageRetry(provider, body, { triggerId });
+    const waiting = usageRetryStore.update(queued.id, {
+      state: "waiting_provider",
+      nextCheckAt: Date.now() + 60_000,
+      error: { message: `Codex is temporarily unavailable: ${error?.message ?? error}`, code: error?.code ?? "provider_unavailable", status: error?.status ?? null },
     });
-    const terminal = usageRetryStore.update(failed.id, {
-      state: "failed",
-      nextCheckAt: null,
-      error: { message: `Could not verify exact thread settings: ${error?.message ?? error}`, code: error?.code ?? "settings_unavailable", status: error?.status ?? null },
-    });
-    publishUsageRetry(terminal);
-    return terminal;
+    publishUsageRetry(waiting);
+    return waiting;
   }
   const entry = createUsageRetry(provider, body, { triggerId });
   publishUsageRetry(entry);
@@ -984,16 +1007,28 @@ function createUsageRetry(provider, body, { triggerId = null } = {}) {
 
 const usageRetryRunner = new UsageRetryRunner({
   store: usageRetryStore,
-  readUsage: async (providerName) => {
+  readUsage: async (providerName, threadId) => {
     const provider = pickProvider(providerName);
     if (!provider) { throw Object.assign(new Error("provider is unavailable"), { status: 409, code: "provider_unavailable" }); }
-    const live = await boundedUsageRefresh(provider.usage({ refresh: true }));
-    return { ...usageState.merge(provider.name, live), _capacityFresh: live?._fresh?.rateLimits === true };
+    const threadSpecific = threadId && typeof provider.usageForThread === "function";
+    const live = await boundedUsageRefresh(threadSpecific
+      ? provider.usageForThread(threadId, { refresh: true })
+      : provider.usage({ refresh: true }));
+    const selectedProfileId = threadSpecific && typeof provider.threadAccountState === "function"
+      ? provider.threadAccountState(threadId).selectedProfileId
+      : "shared";
+    const snapshot = selectedProfileId === "shared" ? usageState.merge(provider.name, live) : live;
+    return { ...snapshot, _capacityFresh: live?._fresh?.rateLimits === true };
   },
   readRuntime: async (providerName, threadId) => {
     const provider = pickProvider(providerName);
     if (!provider) { throw Object.assign(new Error("provider is unavailable"), { status: 409, code: "provider_unavailable" }); }
     return threadRuntime(provider, threadId);
+  },
+  prepare: async (entry) => {
+    const provider = pickProvider(entry.provider);
+    if (!provider) { throw Object.assign(new Error("provider is unavailable"), { status: 409, code: "provider_unavailable" }); }
+    return validateSendDispatch(provider, { provider: entry.provider, threadId: entry.threadId, ...(entry.dispatch ?? {}) });
   },
   send: async (entry) => {
     const provider = pickProvider(entry.provider);
@@ -1757,7 +1792,10 @@ const routes = {
       return;
     }
 
-    json(res, 200, await p.models());
+    const threadId = url.searchParams.get("threadId");
+    json(res, 200, threadId && typeof p.modelsForThread === "function"
+      ? await p.modelsForThread(threadId)
+      : await p.models());
   },
 
   "GET /api/thread/settings": async (req, res, url) => {
@@ -1794,7 +1832,9 @@ const routes = {
 
     let catalog;
     try {
-      catalog = await p.models();
+      catalog = typeof p.modelsForThread === "function"
+        ? await p.modelsForThread(body.threadId)
+        : await p.models();
     } catch (error) {
       throw Object.assign(new Error(`Could not verify ${p.name} models before saving settings: ${error?.message ?? error}`), {
         status: 503,
@@ -1835,6 +1875,31 @@ const routes = {
     if (!p) { return; }
 
     json(res, 200, usageState.merge(p.name, {}));
+  },
+
+  "GET /api/codex/thread-account": async (_req, res, url) => {
+    const provider = pickProvider("codex");
+    const threadId = url.searchParams.get("threadId");
+    if (!provider || typeof provider.threadAccountState !== "function") {
+      return json(res, 409, { error: "Codex is unavailable", code: "provider_unavailable" });
+    }
+    if (!threadId) {
+      return json(res, 400, { error: "threadId is required", code: "invalid_thread_account" });
+    }
+    json(res, 200, provider.threadAccountState(threadId));
+  },
+
+  "POST /api/codex/thread-account": async (req, res) => {
+    const provider = pickProvider("codex");
+    if (!provider || typeof provider.setThreadAccount !== "function") {
+      return json(res, 409, { error: "Codex is unavailable", code: "provider_unavailable" });
+    }
+    const body = await readBody(req);
+    const state = await provider.setThreadAccount(body);
+    for (const entry of usageRetryStore.list({ provider: "codex", threadId: body?.threadId, activeOnly: true })) {
+      scheduleUsageRetryCheck(entry.id);
+    }
+    json(res, 200, state);
   },
 
   "GET /api/usage-retries": async (_req, res, url) => {

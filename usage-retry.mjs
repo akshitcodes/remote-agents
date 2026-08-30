@@ -8,7 +8,7 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
-const CHECKABLE_STATES = new Set(["waiting_usage", "waiting_thread", "checking"]);
+const CHECKABLE_STATES = new Set(["waiting_usage", "waiting_thread", "waiting_provider", "checking"]);
 const PENDING_STATES = new Set([...CHECKABLE_STATES, "dispatching"]);
 const BLOCKING_STATES = new Set([...PENDING_STATES, "uncertain"]);
 const USAGE_LIMIT_CODES = new Set([
@@ -137,6 +137,15 @@ export class UsageRetryStore {
         row.error = { message: "Bridge restarted while sending; check the thread before retrying", code: "delivery_uncertain", status: 504 };
         repaired = true;
       }
+      // Older builds incorrectly made a pre-dispatch model probe failure
+      // terminal. attempts=0 proves no Continue reached the provider, so it is
+      // safe to preserve that intent and retry provider readiness after an
+      // upgrade. Never migrate an entry that may already have been delivered.
+      if (row.state === "failed" && Number(row.attempts ?? 0) === 0 && row.error?.code === "model_verification_failed") {
+        row.state = "waiting_provider";
+        row.nextCheckAt = this.now();
+        repaired = true;
+      }
       this.entries.set(row.id, row);
     }
     if (repaired) { this.persist(); }
@@ -254,12 +263,13 @@ export class UsageRetryStore {
 }
 
 export class UsageRetryRunner {
-  constructor({ store, now = () => Date.now(), readUsage, readRuntime, send, onUpdate = () => {}, pollMs = 60_000 } = {}) {
+  constructor({ store, now = () => Date.now(), readUsage, readRuntime, prepare = async (entry) => entry.dispatch, send, onUpdate = () => {}, pollMs = 60_000 } = {}) {
     if (!store || !readUsage || !readRuntime || !send) { throw new Error("usage retry runner requires store, readUsage, readRuntime, and send"); }
     this.store = store;
     this.now = now;
     this.readUsage = readUsage;
     this.readRuntime = readRuntime;
+    this.prepare = prepare;
     this.send = send;
     this.onUpdate = onUpdate;
     this.pollMs = pollMs;
@@ -284,7 +294,7 @@ export class UsageRetryRunner {
 
       let usage;
       try {
-        usage = await this.readUsage(entry.provider);
+        usage = await this.readUsage(entry.provider, entry.threadId, entry);
       } catch (error) {
         const current = this.store.get(id);
         if (!current || !CHECKABLE_STATES.has(current.state)) { return current; }
@@ -333,6 +343,20 @@ export class UsageRetryRunner {
         }));
       }
 
+      try {
+        const dispatch = await this.prepare(entry);
+        entry = this.store.update(id, { dispatch: dispatch ?? entry.dispatch, error: null });
+      } catch (error) {
+        const current = this.store.get(id);
+        if (!current || !CHECKABLE_STATES.has(current.state)) { return current; }
+        const transient = error?.code === "model_verification_failed" || error?.status == null || error?.status >= 500;
+        return this.publish(this.store.update(id, {
+          state: transient ? "waiting_provider" : "failed",
+          nextCheckAt: transient ? now + this.pollMs : null,
+          error: publicError(error),
+        }));
+      }
+
       entry = this.store.update(id, {
         state: "dispatching",
         nextCheckAt: null,
@@ -351,6 +375,14 @@ export class UsageRetryRunner {
           return this.publish(this.store.update(id, {
             state: "waiting_usage",
             nextCheckAt: this.now() + this.pollMs,
+            error: publicError(error),
+          }));
+        }
+        if (error?.code === "model_verification_failed") {
+          return this.publish(this.store.update(id, {
+            state: "waiting_provider",
+            nextCheckAt: this.now() + this.pollMs,
+            attempts: Math.max(0, Number(entry.attempts ?? 1) - 1),
             error: publicError(error),
           }));
         }

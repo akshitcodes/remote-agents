@@ -23,6 +23,7 @@
     "push.mjs",
     "codex-rollout.mjs",
     "codex-account.mjs",
+    "codex-profiles.mjs",
     "dispatch-settings.mjs",
     "codex-titles.mjs",
     "recent-threads.mjs",

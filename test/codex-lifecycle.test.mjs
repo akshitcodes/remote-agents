@@ -172,6 +172,29 @@ test("a turn-start RPC timeout is delivery-uncertain", async () => {
   );
 });
 
+test("a closed Codex stdin rejects RPCs instead of crashing the bridge", async () => {
+  const provider = new CodexProvider(() => {});
+  const closedStdin = {
+    destroyed: false,
+    writableEnded: false,
+    write() { throw Object.assign(new Error("write EPIPE"), { code: "EPIPE" }); },
+  };
+  provider.child = { stdin: closedStdin };
+
+  await assert.rejects(
+    provider.rpc("model/list", {}),
+    (error) => error.status === 503 && error.code === "provider_unavailable",
+  );
+  assert.equal(provider.pendingRequests.size, 0);
+
+  const client = { key: "thread-epipe", rpcId: 0, pending: new Map(), child: { stdin: closedStdin } };
+  await assert.rejects(
+    provider.clientRpc(client, "turn/start", { threadId: "thread-epipe" }),
+    (error) => error.status === 504 && error.code === "delivery_uncertain",
+  );
+  assert.equal(client.pending.size, 0);
+});
+
 test("completion before turn-start response does not resurrect an active turn", async () => {
   const provider = new CodexProvider(() => {}, { idleReleaseMs: 1000 });
   provider.ensureResumed = async () => false;
@@ -264,6 +287,74 @@ test("Codex native queue reconciles by client id and supports edit and cancel", 
     method: "thread/queue/delete",
     params: { threadId: "external", queuedSubmissionId: "queued-1" },
   });
+});
+
+test("Codex native queue uses the pinned account process instead of the shared control process", async () => {
+  const accountProfiles = {
+    selectedProfileId: () => "account-work",
+    contextForProfile: () => ({ profileId: "account-work", env: {}, expectedIdentity: { email: "work@example.com" } }),
+  };
+  const provider = new CodexProvider(() => {}, { accountProfiles, accountObserver: { start() {}, stop() {} } });
+  const client = { profileId: "account-work", child: { exitCode: null, signalCode: null } };
+  provider.profileClient = async () => client;
+  provider.scheduleProfileClientRelease = () => {};
+  let sharedCalls = 0;
+  provider.rpc = async () => { sharedCalls += 1; };
+  const calls = [];
+  provider.clientRpc = async (_client, method, params) => {
+    calls.push({ method, params });
+    if (method === "thread/queue/list") { return { data: [], nextCursor: null }; }
+    if (method === "thread/queue/add") { return { queuedSubmission: { id: "pinned-queue" } }; }
+    return {};
+  };
+
+  const result = await provider.queue({ threadId: "thread-pinned", text: "continue", requestId: "request-pinned" });
+  assert.equal(result.queuedSubmission.id, "pinned-queue");
+  assert.equal(sharedCalls, 0);
+  assert.deepEqual(calls.map(({ method }) => method), ["thread/queue/list", "thread/queue/add"]);
+});
+
+test("a pending account switch cannot queue a turn through the old account holder", async () => {
+  const accountProfiles = { selectedProfileId: () => "account-new" };
+  const provider = new CodexProvider(() => {}, { accountProfiles, accountObserver: { start() {}, stop() {} } });
+  provider.threadClients.set("thread-switching", {
+    profileId: "account-old",
+    child: { exitCode: null, signalCode: null },
+  });
+  let writes = 0;
+  provider.clientRpc = async () => { writes += 1; };
+
+  await assert.rejects(
+    provider.queueList({ threadId: "thread-switching" }),
+    (error) => error.status === 409 && error.code === "codex_thread_account_switch_pending",
+  );
+  assert.equal(writes, 0);
+});
+
+test("a wedged pinned-account control process times out and is discarded", async () => {
+  const accountProfiles = {
+    contextForProfile: () => ({ profileId: "account-work", env: {}, expectedIdentity: { email: "work@example.com" } }),
+    syncRuntimeProfile: () => false,
+  };
+  const provider = new CodexProvider(() => {}, {
+    accountProfiles,
+    accountObserver: { start() {}, stop() {} },
+    profileStartTimeoutMs: 5,
+  });
+  let resolveReady;
+  const client = {
+    profileId: "account-work",
+    profileControl: true,
+    child: { exitCode: null, signalCode: null },
+    ready: new Promise((resolve) => { resolveReady = resolve; }),
+  };
+  provider.startThreadClient = () => client;
+  let stopped = 0;
+  provider.stopThreadClient = async () => { stopped += 1; resolveReady(); };
+
+  await assert.rejects(provider.profileClient("account-work"), (error) => error.code === "codex_account_start_timeout");
+  assert.equal(stopped, 1);
+  assert.equal(provider.profileClients.has("account-work"), false);
 });
 
 test("Codex native queue reconciles an accepted add whose response was lost", async () => {

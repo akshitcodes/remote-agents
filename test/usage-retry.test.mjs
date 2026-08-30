@@ -153,7 +153,9 @@ test("runner rechecks the active account, waits for idle, and sends exactly once
   let sends = 0;
   const runner = new UsageRetryRunner({
     store, now: () => now, pollMs: 60,
-    readUsage: async () => {
+    readUsage: async (provider, threadId) => {
+      assert.equal(provider, "codex");
+      assert.equal(threadId, "thread-1");
       usageRound += 1;
       return usageRound === 1
         ? { _capacityFresh: true, account: { email: "full@example.com" }, rateLimits: { primary: { usedPercent: 100, resetsAt: 9999 } } }
@@ -190,6 +192,30 @@ test("a bridge restart during dispatch becomes durable uncertainty and never sen
   });
   await runner.tick();
   assert.equal(sends, 0);
+});
+
+test("an old pre-dispatch model failure is repaired without risking a duplicate Continue", (t) => {
+  const file = fixture(t);
+  writeFileSync(file, JSON.stringify([{
+    id: "old-model-failure",
+    provider: "codex",
+    threadId: "thread-1",
+    requestId: "request-1",
+    text: "Continue.",
+    dispatch: { model: "gpt-test", effort: "medium", mode: "auto" },
+    state: "failed",
+    attempts: 0,
+    nextCheckAt: null,
+    error: { code: "model_verification_failed", status: 503, message: "codex app-server exited" },
+  }]));
+
+  const repaired = new UsageRetryStore({ file, now: () => 1234 });
+  assert.equal(repaired.get("old-model-failure").state, "waiting_provider");
+  assert.equal(repaired.get("old-model-failure").nextCheckAt, 1234);
+
+  repaired.update("old-model-failure", { state: "failed", attempts: 1, nextCheckAt: null });
+  const attempted = new UsageRetryStore({ file, now: () => 9999 });
+  assert.equal(attempted.get("old-model-failure").state, "failed");
 });
 
 test("cancel wins a race with a slow usage probe and dispatching cannot pretend to cancel", async (t) => {
@@ -231,6 +257,35 @@ test("a confirmed usage rejection returns to the queue but an ambiguous send nev
   sendError = Object.assign(new Error("response lost"), { status: 504, code: "delivery_uncertain" });
   assert.equal((await runner.check("resume-1")).state, "uncertain");
   assert.equal(store.get("resume-1").attempts, 2);
+});
+
+test("a transient exact-settings check stays queued and never attempts delivery", async (t) => {
+  let now = 1000;
+  const store = new UsageRetryStore({ file: fixture(t), now: () => now });
+  create(store);
+  let prepared = 0;
+  let sends = 0;
+  const runner = new UsageRetryRunner({
+    store, now: () => now, pollMs: 60,
+    readUsage: async () => ({ _capacityFresh: true, rateLimits: { primary: { usedPercent: 1 } } }),
+    readRuntime: async () => ({ running: false }),
+    prepare: async (entry) => {
+      prepared += 1;
+      if (prepared === 1) {
+        throw Object.assign(new Error("codex app-server exited"), { status: 503, code: "model_verification_failed" });
+      }
+      return entry.dispatch;
+    },
+    send: async () => { sends += 1; },
+  });
+
+  const waiting = await runner.check("resume-1");
+  assert.equal(waiting.state, "waiting_provider");
+  assert.equal(waiting.attempts, 0);
+  assert.equal(sends, 0);
+  now += 60;
+  assert.equal((await runner.check("resume-1")).state, "accepted");
+  assert.equal(sends, 1);
 });
 
 test("a turn that wins the post-idle dispatch race supersedes auto-resume", async (t) => {

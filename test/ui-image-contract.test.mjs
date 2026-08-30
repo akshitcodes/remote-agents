@@ -6,6 +6,7 @@ const html = readFileSync(new URL("../public/index.html", import.meta.url), "utf
 const server = readFileSync(new URL("../server.mjs", import.meta.url), "utf8");
 const claudeProvider = readFileSync(new URL("../providers/claude.mjs", import.meta.url), "utf8");
 const codexProvider = readFileSync(new URL("../providers/codex.mjs", import.meta.url), "utf8");
+const codexProfiles = readFileSync(new URL("../codex-profiles.mjs", import.meta.url), "utf8");
 const onboarding = readFileSync(new URL("../onboarding.mjs", import.meta.url), "utf8");
 const sw = readFileSync(new URL("../public/sw.js", import.meta.url), "utf8");
 const terminalHtml = readFileSync(new URL("../public/terminal.html", import.meta.url), "utf8");
@@ -110,6 +111,21 @@ test("usage retry controls distinguish enabled policy from a queued retry", () =
   assert.match(html, /\["accepted", "cancelled", "superseded"\]/);
   assert.match(server, /usageRetryStore\.supersedeThread\(provider, threadId/);
   assert.match(server, /\["marker", "stalled"\]\.includes\(data\.runConfidence\)/);
+  assert.match(html, /waiting_provider: "Auto-resume queued — provider temporarily unavailable"/);
+  assert.match(server, /state: "waiting_provider"/);
+});
+
+test("Codex task settings expose a per-thread account without changing the global login", () => {
+  assert.match(html, /Codex account for this task/);
+  assert.match(html, /pins only this task; other Codex apps and tasks are unchanged/);
+  assert.match(html, /data-codex-profile/);
+  assert.match(html, /\/api\/codex\/thread-account/);
+  assert.match(html, /The current turn will finish on its existing account/);
+  assert.match(server, /provider\.modelsForThread\(body\.threadId\)/);
+  assert.match(server, /provider\.usageForThread\(threadId/);
+  assert.match(server, /"POST \/api\/codex\/thread-account"/);
+  assert.match(codexProfiles, /CODEX_SQLITE_HOME/);
+  assert.match(codexProvider, /accountRpcForThread/);
 });
 
 test("a bridge-owned live stream cannot be replayed by a forced transcript refresh", () => {
@@ -168,7 +184,7 @@ test("task list has orthogonal grouping and provider filters", () => {
   assert.match(html, /new-session-footer/);
   assert.match(html, /new-session-host/);
   assert.match(html, /Number\(b\.count \?\? 0\) - Number\(a\.count \?\? 0\)/);
-  assert.match(html, /if \(providerChanged\)[\s\S]*?await initModels\(threadProvider\);[\s\S]*?await loadThreadSettings\(t\)/);
+  assert.match(html, /if \(providerChanged \|\| threadProvider === "codex"\)[\s\S]*?await initModels\(threadProvider, t\.id\);[\s\S]*?await loadThreadSettings\(t\)/);
   assert.match(html, /localStorage\.removeItem\("cxp_thread_prefs"\)/);
   assert.match(html, /\/api\/thread\/settings/);
   assert.match(html, /function updateListChrome\(\)[\s\S]*?button\.setAttribute\("aria-pressed", String\(selected\)\)[\s\S]*?if \(state\.active\) \{ return; \}/);

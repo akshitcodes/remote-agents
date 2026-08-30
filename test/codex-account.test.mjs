@@ -166,3 +166,50 @@ test("automatic resumes are not awakened until the fresh process confirms the sw
   assert.equal(provider.pendingAccountChange.generation, 1);
   assert.ok(!events.some(({ data }) => data?.method === "account/changed"));
 });
+
+test("changing a live thread account preserves the turn and applies the selection only afterward", async () => {
+  let selected = "shared";
+  const accountProfiles = {
+    selectedProfileId: () => selected,
+    setThreadProfile: (_threadId, profileId) => { selected = profileId; return selected; },
+    publicThreadState: (_threadId, effectiveProfileId) => ({
+      accounts: [], selectedProfileId: selected, effectiveProfileId,
+      switchPending: !!effectiveProfileId && effectiveProfileId !== selected,
+    }),
+  };
+  const provider = new CodexProvider(() => {}, { accountObserver: { start() {}, stop() {} }, accountProfiles });
+  const holder = { profileId: "shared", child: {} };
+  provider.resumedThreads.add("thread-live");
+  provider.threadClients.set("thread-live", holder);
+  provider.activeTurns.set("thread-live", "turn-live");
+  let releases = 0;
+  provider.releaseThread = async () => { releases += 1; };
+
+  const live = await provider.setThreadAccount({ threadId: "thread-live", profileId: "account-work" });
+  assert.equal(live.switchPending, true);
+  assert.equal(releases, 0);
+  assert.equal(provider.activeTurns.get("thread-live"), "turn-live");
+
+  provider.activeTurns.delete("thread-live");
+  await provider.setThreadAccount({ threadId: "thread-live", profileId: "account-work" });
+  assert.equal(releases, 1);
+});
+
+test("global Codex login changes do not rotate a holder pinned to another account", async () => {
+  const provider = new CodexProvider(() => {}, { accountObserver: { start() {}, stop() {} }, accountReleaseGraceMs: 5 });
+  provider.child = { accountGeneration: 0, exitCode: null, signalCode: null, kill() {} };
+  const holder = { profileId: "account-work", accountGeneration: null, child: {} };
+  provider.resumedThreads.add("thread-pinned");
+  provider.threadClients.set("thread-pinned", holder);
+  let stops = 0;
+  provider.stopThreadClient = async () => { stops += 1; };
+
+  provider.handleAccountIdentityChange({
+    previous: { key: "user-a::account-a", email: "a@example.com" },
+    current: { key: "user-b::account-b", email: "b@example.com" },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 15));
+
+  assert.equal(stops, 0);
+  assert.equal(provider.resumedThreads.has("thread-pinned"), true);
+});

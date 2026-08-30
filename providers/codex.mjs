@@ -10,11 +10,15 @@ import { existsSync } from "node:fs";
 import { basename } from "node:path";
 
 import * as rollout from "../codex-rollout.mjs";
+import { remoteAgentsHome } from "../app-home.mjs";
+import { CodexThreadAccounts, SHARED_PROFILE_ID } from "../codex-profiles.mjs";
 import { readConfig } from "../config.mjs";
 import { augmentedPath, codexAppBinary, findBinary } from "../provider-detect.mjs";
 
 const PAGE_SIZE = 25;
 const DEFAULT_IDLE_RELEASE_MS = 60_000;
+const PROFILE_CLIENT_IDLE_MS = 5 * 60_000;
+const PROFILE_START_TIMEOUT_MS = 30_000;
 const APPROVAL_TIMEOUT_MS = 240_000;
 
 // Which `codex` to talk to.
@@ -65,6 +69,44 @@ const STEER_ERROR_CODES = {
   ActiveTurnNotSteerable: "not_steerable",
   EmptyInput: "empty_input",
 };
+
+function rpcTransportError(error, method) {
+  const uncertain = method === "turn/start" || method === "turn/steer";
+  return Object.assign(new Error(`codex app-server write failed: ${error?.message ?? error}`), uncertain
+    ? { status: 504, code: "delivery_uncertain" }
+    : { status: 503, code: "provider_unavailable" });
+}
+
+function writeJsonLine(stream, payload, { label = "codex app-server", onError = null } = {}) {
+  const fail = (error) => {
+    if (onError) { onError(error); }
+    else if (error?.code !== "EPIPE") { console.error(`[codex] ${label} write failed:`, error); }
+  };
+
+  if (!stream || stream.destroyed || stream.writableEnded) {
+    fail(Object.assign(new Error(`${label} is not writable`), { code: "EPIPE" }));
+    return false;
+  }
+
+  try {
+    stream.write(JSON.stringify(payload) + "\n", (error) => {
+      if (error) { fail(error); }
+    });
+    return true;
+  } catch (error) {
+    fail(error);
+    return false;
+  }
+}
+
+function observeStdinErrors(child, label) {
+  // A child can exit between the liveness check and stream.write(). Without an
+  // error listener, Node promotes that ordinary EPIPE race into an uncaught
+  // exception and kills the entire bridge.
+  child.stdin?.on("error", (error) => {
+    if (error?.code !== "EPIPE") { console.error(`[codex] ${label} stdin failed:`, error); }
+  });
+}
 
 export function groupCodexSummaries(summaries, { search = "", offset = 0, limit = PAGE_SIZE } = {}) {
   const q = String(search ?? "").trim().toLowerCase();
@@ -207,6 +249,8 @@ export class CodexProvider extends BaseProvider {
     accountObserver = null,
     accountPollMs = 1000,
     accountReleaseGraceMs = 1000,
+    accountProfiles = null,
+    profileStartTimeoutMs = PROFILE_START_TIMEOUT_MS,
   } = {}) {
     super(emit, "codex");
 
@@ -217,6 +261,7 @@ export class CodexProvider extends BaseProvider {
     this.resumedThreads = new Set();
     this.conflictedThreads = new Set(); // only an observed writer conflict puts a thread here
     this.threadClients = new Map(); // one app-server process per held writer lease
+    this.profileClients = new Map(); // one short-lived control process per explicitly pinned account
     this.activeTurns = new Map(); // thread id -> turn id owned by our holder process
     this.queueRequests = new Map(); // native queue additions deduplicated within this bridge process
     this.startingTurns = new Set(); // closes the gap between turn/start and turn/started
@@ -232,6 +277,8 @@ export class CodexProvider extends BaseProvider {
     this.accountGeneration = 0;
     this.accountReleaseGraceMs = accountReleaseGraceMs;
     this.pendingAccountChange = null;
+    this.accountProfiles = accountProfiles ?? new CodexThreadAccounts({ appHome: remoteAgentsHome() });
+    this.profileStartTimeoutMs = profileStartTimeoutMs;
     this.accountObserver = accountObserver ?? new CodexAccountObserver({
       intervalMs: accountPollMs,
       onChange: (change) => this.handleAccountIdentityChange(change),
@@ -258,6 +305,7 @@ export class CodexProvider extends BaseProvider {
 
       if (p) {
         this.pendingRequests.delete(msg.id);
+        clearTimeout(p.timer);
         msg.error ? p.reject(Object.assign(new Error(msg.error.message || "rpc error"), { rpc: msg.error })) : p.resolve(msg.result);
       }
 
@@ -301,6 +349,13 @@ export class CodexProvider extends BaseProvider {
   handleNotification(msg, source = null) {
     if (!msg.method) { return; }
 
+    // Managed per-thread processes must never replace the shared account usage
+    // shown in the top-level Usage sheet. Their limits are read explicitly for
+    // that thread's auto-resume checks instead.
+    if (msg.method === "account/rateLimits/updated" && source?.profileId && source.profileId !== SHARED_PROFILE_ID) {
+      return;
+    }
+
     // A turn already running during an account switch is allowed to finish,
     // but its usage belongs to the previous account and must not repopulate the
     // new account's freshly-cleared usage state.
@@ -327,7 +382,9 @@ export class CodexProvider extends BaseProvider {
       if (this.startingTurns.has(threadId)) { this.finishedStartingTurns.add(threadId); }
       this.activeTurns.delete(threadId);
       const client = this.threadClients.get(threadId);
-      if (client?.accountGeneration != null && client.accountGeneration !== this.accountGeneration) {
+      if (this.clientUsesSharedAccount(client)
+          && client?.accountGeneration != null
+          && client.accountGeneration !== this.accountGeneration) {
         // Give a provider-native queued turn time to announce its start. That
         // notification cancels this timer, so an account switch can never race
         // a queued continuation by killing its holder between turns.
@@ -345,7 +402,7 @@ export class CodexProvider extends BaseProvider {
       ? { jsonrpc: "2.0", id, error }
       : { jsonrpc: "2.0", id, result };
 
-    this.child?.stdin.write(JSON.stringify(payload) + "\n");
+    writeJsonLine(this.child?.stdin, payload, { label: "control response" });
   }
 
   startChild() {
@@ -353,6 +410,7 @@ export class CodexProvider extends BaseProvider {
     child.accountGeneration = this.accountGeneration;
     this.child = child;
     this.feed = makeLineReader((line) => this.handleChildLine(line, child));
+    observeStdinErrors(child, "control app-server");
 
     // A missing/unlaunchable `codex` must not crash the bridge (Claude may still
     // work). Mark unavailable and stop respawning until the process is restarted.
@@ -363,6 +421,7 @@ export class CodexProvider extends BaseProvider {
       console.error(`[codex] ${this.unavailable}`);
 
       for (const [, p] of this.pendingRequests) {
+        clearTimeout(p.timer);
         p.reject(new Error(this.unavailable));
       }
 
@@ -387,6 +446,7 @@ export class CodexProvider extends BaseProvider {
       console.error(`codex app-server exited (${code}); restarting in 1s`);
 
       for (const [, p] of this.pendingRequests) {
+        clearTimeout(p.timer);
         const uncertain = p.method === "turn/start" || p.method === "turn/steer";
         p.reject(Object.assign(new Error("codex app-server exited"), uncertain
           ? { status: 504, code: "delivery_uncertain" }
@@ -416,7 +476,7 @@ export class CodexProvider extends BaseProvider {
       clientInfo: { name: "codex-phone", title: "Codex Phone", version: "0.2.0" },
       capabilities: { experimentalApi: true },
     }).then((res) => {
-      child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "initialized", params: {} }) + "\n");
+      writeJsonLine(child.stdin, { jsonrpc: "2.0", method: "initialized", params: {} }, { label: "control initialized" });
       this.emit("bridge", { state: "ready" });
       return res;
     });
@@ -440,6 +500,10 @@ export class CodexProvider extends BaseProvider {
     } else if (!child) {
       this.startChild();
     }
+  }
+
+  clientUsesSharedAccount(client) {
+    return !client?.profileId || client.profileId === SHARED_PROFILE_ID;
   }
 
   async confirmAccountChange(child) {
@@ -471,11 +535,8 @@ export class CodexProvider extends BaseProvider {
 
   rpc(method, params) {
     const id = ++this.rpcId;
-    this.child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
-
     return new Promise((resolve, reject) => {
-      this.pendingRequests.set(id, { resolve, reject, method });
-      setTimeout(() => {
+      const timer = setTimeout(() => {
         if (this.pendingRequests.has(id)) {
           this.pendingRequests.delete(id);
           const uncertain = method === "turn/start" || method === "turn/steer";
@@ -484,6 +545,18 @@ export class CodexProvider extends BaseProvider {
             : {}));
         }
       }, this.rpcTimeoutMs);
+      const rejectWrite = (error) => {
+        const pending = this.pendingRequests.get(id);
+        if (!pending) { return; }
+        this.pendingRequests.delete(id);
+        clearTimeout(timer);
+        reject(rpcTransportError(error, method));
+      };
+      this.pendingRequests.set(id, { resolve, reject, method, timer });
+      writeJsonLine(this.child?.stdin, { jsonrpc: "2.0", id, method, params }, {
+        label: `control ${method}`,
+        onError: rejectWrite,
+      });
     });
   }
 
@@ -495,18 +568,29 @@ export class CodexProvider extends BaseProvider {
     await this.initializePromise;
   }
 
-  startThreadClient(threadId = null) {
-    const child = spawn(codexBinary(), ["app-server"], { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, PATH: augmentedPath() } });
+  startThreadClient(threadId = null, accountContext = null, { profileControl = false } = {}) {
+    const context = accountContext ?? (threadId
+      ? this.accountProfiles.contextForThread(threadId)
+      : this.accountProfiles.contextForProfile(SHARED_PROFILE_ID));
+    const child = spawn(codexBinary(), ["app-server"], {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, ...context.env, PATH: augmentedPath() },
+    });
     const client = {
       child,
       threadId,
-      key: `thread-${++this.clientSequence}`,
+      key: `${profileControl ? "profile" : "thread"}-${++this.clientSequence}`,
       rpcId: 0,
       pending: new Map(),
       intentionalExit: false,
       resumePromise: null,
-      accountGeneration: this.accountGeneration,
+      profileId: context.profileId,
+      expectedIdentity: context.expectedIdentity ?? null,
+      accountGeneration: context.profileId === SHARED_PROFILE_ID ? this.accountGeneration : null,
+      profileControl,
+      profileIdleTimer: null,
     };
+    observeStdinErrors(child, `${client.key} app-server`);
     const feed = makeLineReader((line) => {
       let msg;
 
@@ -568,6 +652,15 @@ export class CodexProvider extends BaseProvider {
 
       const id = client.threadId;
 
+      if (client.profileControl && this.profileClients.get(client.profileId) === client) {
+        this.profileClients.delete(client.profileId);
+      }
+
+      if (client.profileId && client.profileId !== SHARED_PROFILE_ID) {
+        try { this.accountProfiles.syncRuntimeProfile(client.profileId); }
+        catch (error) { console.error(`[codex:${client.profileId}] could not preserve refreshed credentials:`, error); }
+      }
+
       if (id && this.threadClients.get(id) === client) {
         this.cancelIdleRelease(id);
         const wasHeld = this.resumedThreads.delete(id);
@@ -589,17 +682,80 @@ export class CodexProvider extends BaseProvider {
     client.ready = this.clientRpc(client, "initialize", {
       clientInfo: { name: "codex-phone-thread", title: "Codex Phone", version: "0.2.0" },
       capabilities: { experimentalApi: true },
-    }).then((result) => {
-      child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "initialized", params: {} }) + "\n");
+    }).then(async (result) => {
+      writeJsonLine(child.stdin, { jsonrpc: "2.0", method: "initialized", params: {} }, { label: `${client.key} initialized` });
+      if (context.profileId !== SHARED_PROFILE_ID) {
+        const native = await this.clientRpc(client, "account/read", {});
+        const expectedEmail = String(context.expectedIdentity?.email ?? "").trim().toLowerCase();
+        const actualEmail = String(native?.account?.email ?? "").trim().toLowerCase();
+        if (!expectedEmail || actualEmail !== expectedEmail) {
+          throw Object.assign(new Error("Codex did not confirm the selected thread account"), {
+            status: 409,
+            code: "codex_thread_account_mismatch",
+          });
+        }
+      }
       return result;
     });
     return client;
   }
 
+  scheduleProfileClientRelease(client) {
+    if (!client?.profileControl) { return; }
+    if (client.profileIdleTimer) { clearTimeout(client.profileIdleTimer); }
+    client.profileIdleTimer = setTimeout(() => {
+      if (this.profileClients.get(client.profileId) !== client) { return; }
+      this.stopThreadClient(client).catch(() => {});
+    }, PROFILE_CLIENT_IDLE_MS);
+    client.profileIdleTimer.unref?.();
+  }
+
+  async awaitProfileReady(client) {
+    let timer;
+    try {
+      return await Promise.race([
+        client.ready,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(Object.assign(new Error("Codex account check timed out during startup"), {
+            status: 504,
+            code: "codex_account_start_timeout",
+          })), this.profileStartTimeoutMs);
+          timer.unref?.();
+        }),
+      ]);
+    } finally {
+      if (timer) { clearTimeout(timer); }
+    }
+  }
+
+  async profileClient(profileId) {
+    let client = this.profileClients.get(profileId);
+    if (client && client.child.exitCode == null && client.child.signalCode == null) {
+      if (client.profileIdleTimer) { clearTimeout(client.profileIdleTimer); }
+      try {
+        await this.awaitProfileReady(client);
+        return client;
+      } catch (error) {
+        if (this.profileClients.get(profileId) === client) { this.profileClients.delete(profileId); }
+        await this.stopThreadClient(client);
+        throw error;
+      }
+    }
+    const context = this.accountProfiles.contextForProfile(profileId);
+    client = this.startThreadClient(null, context, { profileControl: true });
+    this.profileClients.set(profileId, client);
+    try {
+      await this.awaitProfileReady(client);
+      return client;
+    } catch (error) {
+      if (this.profileClients.get(profileId) === client) { this.profileClients.delete(profileId); }
+      await this.stopThreadClient(client);
+      throw error;
+    }
+  }
+
   clientRpc(client, method, params) {
     const id = ++client.rpcId;
-    client.child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
-
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         if (client.pending.has(id)) {
@@ -611,6 +767,16 @@ export class CodexProvider extends BaseProvider {
         }
       }, this.rpcTimeoutMs);
       client.pending.set(id, { resolve, reject, timer, method });
+      writeJsonLine(client.child?.stdin, { jsonrpc: "2.0", id, method, params }, {
+        label: `${client.key ?? "thread"} ${method}`,
+        onError: (error) => {
+          const pending = client.pending.get(id);
+          if (!pending) { return; }
+          client.pending.delete(id);
+          clearTimeout(timer);
+          reject(rpcTransportError(error, method));
+        },
+      });
     });
   }
 
@@ -618,13 +784,14 @@ export class CodexProvider extends BaseProvider {
     const payload = error
       ? { jsonrpc: "2.0", id, error }
       : { jsonrpc: "2.0", id, result };
-    client.child?.stdin.write(JSON.stringify(payload) + "\n");
+    writeJsonLine(client.child?.stdin, payload, { label: `${client.key ?? "thread"} response` });
   }
 
   async stopThreadClient(client) {
     if (!client || client.child.exitCode != null || client.child.signalCode != null) { return; }
 
     client.intentionalExit = true;
+    if (client.profileIdleTimer) { clearTimeout(client.profileIdleTimer); }
     await new Promise((resolve) => {
       let done = false;
       const finish = () => {
@@ -693,9 +860,17 @@ export class CodexProvider extends BaseProvider {
 
     if (releasing) { await releasing; }
 
+    const accountContext = this.accountProfiles.contextForThread(threadId);
     let client = this.threadClients.get(threadId);
 
     if (this.resumedThreads.has(threadId)
+        && (client?.profileId ?? SHARED_PROFILE_ID) !== accountContext.profileId) {
+      await this.releaseThread({ threadId, reason: "thread-account-changed" });
+      client = null;
+    }
+
+    if (this.resumedThreads.has(threadId)
+        && this.clientUsesSharedAccount(client)
         && client?.accountGeneration != null
         && client.accountGeneration !== this.accountGeneration) {
       await this.releaseThread({ threadId, reason: "account-changed" });
@@ -714,7 +889,7 @@ export class CodexProvider extends BaseProvider {
       return false;
     }
 
-    client = this.startThreadClient(threadId);
+    client = this.startThreadClient(threadId, accountContext);
     this.threadClients.set(threadId, client);
 
     const params = { threadId };
@@ -755,7 +930,11 @@ export class CodexProvider extends BaseProvider {
 
     // The account can change during a large thread's cold resume. Never start
     // the next turn through a holder that finished resuming with stale auth.
-    if (client.accountGeneration != null && client.accountGeneration !== this.accountGeneration) {
+    const selectedAfterResume = this.accountProfiles.selectedProfileId(threadId);
+    if ((client.profileId ?? SHARED_PROFILE_ID) !== selectedAfterResume
+        || (this.clientUsesSharedAccount(client)
+          && client.accountGeneration != null
+          && client.accountGeneration !== this.accountGeneration)) {
       await this.stopThreadClient(client);
       this.threadClients.delete(threadId);
       return this.ensureResumed(threadId, { approvalPolicy, sandbox, requestId });
@@ -870,7 +1049,10 @@ export class CodexProvider extends BaseProvider {
       this.cache.models = await this.rpc("model/list", {});
     }
 
-    const result = this.cache.models;
+    return this.modelCatalog(this.cache.models);
+  }
+
+  modelCatalog(result) {
     const inputModalities = [...new Set((result?.data ?? []).flatMap((model) => model.inputModalities ?? []))];
     return {
       ...result,
@@ -890,6 +1072,18 @@ export class CodexProvider extends BaseProvider {
         nativeInterrupt: true,
       },
     };
+  }
+
+  async modelsForThread(threadId) {
+    const profileId = this.accountProfiles.selectedProfileId(threadId);
+    if (profileId === SHARED_PROFILE_ID) { return this.models(); }
+    const client = await this.profileClient(profileId);
+    try {
+      if (!client.models) { client.models = await this.clientRpc(client, "model/list", {}); }
+      return this.modelCatalog(client.models);
+    } finally {
+      this.scheduleProfileClientRelease(client);
+    }
   }
 
   async usage({ refresh } = {}) {
@@ -914,6 +1108,72 @@ export class CodexProvider extends BaseProvider {
     }
 
     return this.cache.account;
+  }
+
+  async usageForThread(threadId, { refresh = true } = {}) {
+    const profileId = this.accountProfiles.selectedProfileId(threadId);
+    if (profileId === SHARED_PROFILE_ID) { return this.usage({ refresh }); }
+    const client = await this.profileClient(profileId);
+    try {
+      const [account, rateLimits] = await Promise.allSettled([
+        this.clientRpc(client, "account/read", {}),
+        this.clientRpc(client, "account/rateLimits/read", {}),
+      ]);
+      return {
+        account: account.status === "fulfilled" ? account.value.account : null,
+        rateLimits: rateLimits.status === "fulfilled" ? rateLimits.value : null,
+        usage: null,
+        _fresh: {
+          account: account.status === "fulfilled",
+          rateLimits: rateLimits.status === "fulfilled",
+        },
+      };
+    } finally {
+      this.scheduleProfileClientRelease(client);
+    }
+  }
+
+  threadAccountState(threadId) {
+    const client = this.threadClients.get(threadId);
+    const effectiveProfileId = client ? (client.profileId ?? SHARED_PROFILE_ID) : null;
+    return this.accountProfiles.publicThreadState(threadId, effectiveProfileId);
+  }
+
+  async setThreadAccount({ threadId, profileId } = {}) {
+    const selectedProfileId = this.accountProfiles.setThreadProfile(threadId, profileId);
+    const client = this.threadClients.get(threadId);
+    const running = this.activeTurns.has(threadId) || this.startingTurns.has(threadId);
+    if (client && (client.profileId ?? SHARED_PROFILE_ID) !== selectedProfileId && !running) {
+      await this.releaseThread({ threadId, reason: "thread-account-changed" });
+    }
+    return this.threadAccountState(threadId);
+  }
+
+  async accountRpcForThread(threadId, method, params) {
+    const holder = this.threadClients.get(threadId);
+    const profileId = this.accountProfiles.selectedProfileId(threadId);
+    if (holder && holder.child.exitCode == null && holder.child.signalCode == null) {
+      const holderProfileId = holder.profileId ?? SHARED_PROFILE_ID;
+      if (holderProfileId !== profileId) {
+        throw Object.assign(new Error("the selected Codex account will apply after the current turn finishes"), {
+          status: 409,
+          code: "codex_thread_account_switch_pending",
+        });
+      }
+      return this.clientRpc(holder, method, params);
+    }
+
+    if (profileId === SHARED_PROFILE_ID) {
+      await this.ready();
+      return this.rpc(method, params);
+    }
+
+    const client = await this.profileClient(profileId);
+    try {
+      return await this.clientRpc(client, method, params);
+    } finally {
+      this.scheduleProfileClientRelease(client);
+    }
   }
 
   async projects() {
@@ -1155,7 +1415,6 @@ export class CodexProvider extends BaseProvider {
   }
 
   async queueOnce({ threadId, text, attachments, requestId }) {
-    await this.ready();
     const input = codexUserInput(text, attachments);
 
     // The provider-native client id is our durable idempotency key. Reconcile
@@ -1164,7 +1423,7 @@ export class CodexProvider extends BaseProvider {
     if (existing) { return { queuedSubmission: existing, reconciled: true }; }
 
     try {
-      const result = await this.rpc("thread/queue/add", { threadId, input, clientUserMessageId: requestId });
+      const result = await this.accountRpcForThread(threadId, "thread/queue/add", { threadId, input, clientUserMessageId: requestId });
       if (!result?.queuedSubmission?.id) {
         throw Object.assign(new Error("Codex queued the message without returning its id"), { status: 502, code: "invalid_provider_response" });
       }
@@ -1207,8 +1466,11 @@ export class CodexProvider extends BaseProvider {
       throw Object.assign(new Error("threadId required"), { status: 400, code: "invalid_queue_request" });
     }
 
-    await this.ready();
-    return this.rpc("thread/queue/list", { threadId, cursor, limit: Math.min(100, Math.max(1, Number(limit) || 100)) });
+    return this.accountRpcForThread(threadId, "thread/queue/list", {
+      threadId,
+      cursor,
+      limit: Math.min(100, Math.max(1, Number(limit) || 100)),
+    });
   }
 
   async queueUpdate({ threadId, queuedSubmissionId, text, attachments = [] } = {}) {
@@ -1216,8 +1478,7 @@ export class CodexProvider extends BaseProvider {
       throw Object.assign(new Error("threadId, queuedSubmissionId, and message content required"), { status: 400, code: "invalid_queue_request" });
     }
 
-    await this.ready();
-    return this.rpc("thread/queue/update", {
+    return this.accountRpcForThread(threadId, "thread/queue/update", {
       threadId,
       queuedSubmissionId,
       input: codexUserInput(text, attachments),
@@ -1229,8 +1490,7 @@ export class CodexProvider extends BaseProvider {
       throw Object.assign(new Error("threadId and queuedSubmissionId required"), { status: 400, code: "invalid_queue_request" });
     }
 
-    await this.ready();
-    return this.rpc("thread/queue/delete", { threadId, queuedSubmissionId });
+    return this.accountRpcForThread(threadId, "thread/queue/delete", { threadId, queuedSubmissionId });
   }
 
   async rename({ threadId, name } = {}) {

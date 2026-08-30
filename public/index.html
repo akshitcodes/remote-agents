@@ -1015,6 +1015,7 @@ const state = {
   terminalJobs: new Map(), // provider:thread -> last project terminal command
   usageRetries: new Map(), // durable bridge-side resume requests by id
   usageRetryPolicy: { globalEnabled: false, threadOverride: null, enabled: false },
+  codexThreadAccount: null,
   activityGroup: null,    // newest contiguous Codex activity run
   lock: { state: "unknown", label: "Checking…" },
   sendStage: null,        // { requestId, threadId, text, bubble, chip }
@@ -2634,7 +2635,7 @@ function isUsageLimitError(error) {
 
 function usageRetryForOpenThread() {
   if (!state.active) { return null; }
-  const pending = new Set(["waiting_usage", "waiting_thread", "checking", "dispatching", "uncertain"]);
+  const pending = new Set(["waiting_usage", "waiting_thread", "waiting_provider", "checking", "dispatching", "uncertain"]);
   return [...state.usageRetries.values()]
     .filter((entry) => entry.provider === activeProvider() && entry.threadId === state.active.id && pending.has(entry.state))
     .sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))[0] || null;
@@ -2672,11 +2673,12 @@ function usageRetryText(entry) {
     waiting_usage: "Auto-resume queued — checking current account every minute",
     checking: "Checking current account usage…",
     waiting_thread: "Usage is available — waiting for this turn to be idle",
+    waiting_provider: "Auto-resume queued — provider temporarily unavailable",
     dispatching: "Sending Continue…",
     uncertain: "Continue delivery is uncertain — it will not be sent again",
     failed: "Auto-resume could not send Continue",
   };
-  const failure = ["uncertain", "failed"].includes(entry.state) && entry.error?.message ? ` · ${entry.error.message}` : "";
+  const failure = ["waiting_provider", "uncertain", "failed"].includes(entry.state) && entry.error?.message ? ` · ${entry.error.message}` : "";
   return `${labels[entry.state] || "Auto-resume queued"}${suffix ? ` · ${suffix}` : ""}${failure}`;
 }
 
@@ -2689,7 +2691,7 @@ function renderUsageRetry(entry) {
   el.dataset.usageResumeId = entry.id;
   const actions = document.createElement("div");
   actions.className = "pending-actions";
-  if (["waiting_usage", "waiting_thread", "checking"].includes(entry.state)) {
+  if (["waiting_usage", "waiting_thread", "waiting_provider", "checking"].includes(entry.state)) {
     const check = document.createElement("button");
     check.className = "pending-action";
     check.textContent = "Check now";
@@ -3144,6 +3146,7 @@ async function openThread(t) {
   state.threadApprovalPolicy = null;
   state.threadSandboxPolicy = null;
   state.usageRetryPolicy = { globalEnabled: false, threadOverride: null, enabled: false, provider: null, threadId: null };
+  state.codexThreadAccount = null;
   state.settingsTruth = { state: "loading", sources: {}, message: "Checking settings…" };
   const threadProvider = t.provider || state.provider || "codex";
   const providerChanged = threadProvider !== state.modelsProvider;
@@ -3151,8 +3154,8 @@ async function openThread(t) {
   persistPrefs();
   syncProviderSeg();
 
-  if (providerChanged) {
-    await initModels(threadProvider);
+  if (providerChanged || threadProvider === "codex") {
+    await initModels(threadProvider, t.id);
     if (state.active !== t) { return; }
   }
 
@@ -6207,24 +6210,37 @@ async function openTaskSettingsSheet() {
   const provider = thread.provider || "codex";
   openSheet('<h2>Task settings</h2><div class="hint">Loading settings…</div>');
 
-  try {
-    state.usageRetryPolicy = {
-      ...await api(`/api/usage-retry-policy?provider=${encodeURIComponent(provider)}&threadId=${encodeURIComponent(thread.id)}`),
-      provider,
-      threadId: thread.id,
-    };
-  } catch (error) {
-    if (state.active === thread) { $("sheetBody").innerHTML = `<h2 id="sheetTitle">Task settings</h2><div class="hint">Could not load settings: ${esc(error.message)}</div>`; }
-    return;
+  const [policyResult, accountResult] = await Promise.allSettled([
+    api(`/api/usage-retry-policy?provider=${encodeURIComponent(provider)}&threadId=${encodeURIComponent(thread.id)}`),
+    provider === "codex"
+      ? api(`/api/codex/thread-account?threadId=${encodeURIComponent(thread.id)}`)
+      : Promise.resolve(null),
+  ]);
+  if (policyResult.status === "fulfilled") {
+    state.usageRetryPolicy = { ...policyResult.value, provider, threadId: thread.id };
   }
+  state.codexThreadAccount = accountResult.status === "fulfilled" ? accountResult.value : null;
   if (state.active !== thread || !$("sheet").classList.contains("show")) { return; }
 
   const render = () => {
     const policy = state.usageRetryPolicy;
     const inherited = policy.threadOverride == null;
+    const accountState = state.codexThreadAccount;
+    const accountError = provider === "codex" && accountResult.status === "rejected"
+      ? `<div class="hint">Could not load Codex accounts: ${esc(accountResult.reason?.message || accountResult.reason)}</div>`
+      : "";
+    const accountOptions = provider === "codex" && accountState
+      ? `<div class="toggle-title" style="margin-bottom:4px">Codex account for this task</div>
+        <div class="hint" style="margin-bottom:10px">Shared follows the Codex login on this Mac. Choosing an account pins only this task; other Codex apps and tasks are unchanged.</div>
+        ${(accountState.accounts || []).map((account) => `<button type="button" class="opt opt-button ${account.id === accountState.selectedProfileId ? "sel" : ""}" data-codex-profile="${esc(account.id)}">
+          <div class="radio"></div><div><div class="on">${esc(account.label)}</div><div class="od">${account.kind === "shared" ? "Use the account currently signed in globally" : esc([account.email, account.plan].filter(Boolean).join(" · ") || "Managed Codex account")}</div></div>
+        </button>`).join("")}
+        ${accountState.switchPending ? '<div class="hint" style="margin-bottom:14px">The current turn will finish on its existing account. The selected account will be used for the next turn.</div>' : '<div class="hint" style="margin-bottom:14px">The selected account will be used for this task’s next turn.</div>'}`
+      : accountError;
     $("sheetBody").innerHTML = `<h2 id="sheetTitle">Task settings</h2>
+      ${accountOptions}
       <div class="toggle-row">
-        <div class="toggle-copy"><div class="toggle-title">Auto-continue after usage resets</div><div class="toggle-desc">For this chat, queue one <b>Continue.</b> after a confirmed usage-limit stop. The bridge checks the currently signed-in account every minute.</div></div>
+        <div class="toggle-copy"><div class="toggle-title">Auto-continue after usage resets</div><div class="toggle-desc">For this chat, queue one <b>Continue.</b> after a confirmed usage-limit stop. The bridge checks the account selected for this task every minute.</div></div>
         <button type="button" class="toggle ${policy.enabled ? "on" : ""}" data-retry-scope="thread" role="switch" aria-checked="${policy.enabled}"></button>
       </div>
       <div class="toggle-row">
@@ -6233,6 +6249,24 @@ async function openTaskSettingsSheet() {
       </div>
       <div class="hint" style="margin-top:12px">${inherited ? `This chat currently follows the global default (${policy.globalEnabled ? "on" : "off"}).` : `This chat has its own ${policy.threadOverride ? "on" : "off"} override.`}</div>
       ${inherited ? "" : '<button type="button" class="pending-action" data-retry-inherit>Use global default</button>'}`;
+
+    $("sheetBody").querySelectorAll("[data-codex-profile]").forEach((button) => {
+      button.onclick = async () => {
+        $("sheetBody").querySelectorAll("button").forEach((candidate) => candidate.disabled = true);
+        try {
+          state.codexThreadAccount = await api("/api/codex/thread-account", {
+            threadId: thread.id,
+            profileId: button.dataset.codexProfile,
+          });
+          await initModels(provider, thread.id);
+          if (state.active === thread) { await loadThreadSettings(thread, { flush: false }); }
+          render();
+        } catch (error) {
+          chip("⚠️", "Could not change Codex account: " + error.message);
+          render();
+        }
+      };
+    });
 
     $("sheetBody").querySelectorAll("[data-retry-scope]").forEach((button) => {
       button.onclick = async () => {
@@ -7020,11 +7054,12 @@ function connectEvents() {
 }
 
 // ---------- init ----------
-async function initModels(provider = state.provider) {
+async function initModels(provider = state.provider, threadId = null) {
   const requestSeq = ++state.modelRequestSeq;
 
   try {
-    const res = await api("/api/models?provider=" + encodeURIComponent(provider));
+    const res = await api("/api/models?provider=" + encodeURIComponent(provider)
+      + (threadId ? "&threadId=" + encodeURIComponent(threadId) : ""));
     if (requestSeq !== state.modelRequestSeq) { return false; }
     state.models = res.data ?? [];
     state.capabilitiesByProvider.set(provider, res.capabilities ?? null);
