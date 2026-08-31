@@ -2216,6 +2216,30 @@ const routes = {
     json(res, 200, await startLocalTerminalBrowserHandoff({ provider, threadId, browserSecret }));
   },
 
+  // A terminal opened from localhost or a LAN address must still perform
+  // WebAuthn on the configured HTTPS origin. Transfer the paired browser via a
+  // one-use capability instead of weakening the exact RP/origin check or
+  // placing the bridge's permanent pairing token in a URL.
+  "POST /api/terminal/browser-handoff": async (req, res) => {
+    if (!PUBLIC_ORIGIN) {
+      return json(res, 409, { error: "Configure a stable HTTPS app address before opening terminal access", code: "terminal_origin_unavailable" });
+    }
+    const body = await readBody(req, 16 * 1024);
+    const provider = String(body?.provider ?? "");
+    const threadId = String(body?.threadId ?? "");
+    if (!USABLE_PROVIDER_NAMES.has(provider) || !threadId || threadId.length > 500) {
+      return json(res, 400, { error: "provider and threadId are required", code: "terminal_context_invalid" });
+    }
+    await requireReachableTerminalOrigin(PUBLIC_ORIGIN);
+    const bootstrap = terminalSecurity.createBrowserBootstrap({
+      browserSecret: ensureBrowserIdentity(req, res),
+      context: { provider, threadId },
+    });
+    const target = new URL("/api/terminal/handoff", bootstrap.origin ?? PUBLIC_ORIGIN);
+    target.searchParams.set("handoff", bootstrap.secret);
+    json(res, 200, { url: target.toString() });
+  },
+
   "POST /api/terminal/register/options": async (req, res) => {
     requireTerminalOrigin(req);
     const body = await readBody(req, 64 * 1024);
@@ -2588,7 +2612,9 @@ export async function handleRequest(req, res) {
     const target = new URL("/terminal", PUBLIC_ORIGIN);
     target.searchParams.set("provider", bootstrap.context.provider);
     target.searchParams.set("threadId", bootstrap.context.threadId);
-    target.hash = `enroll=${encodeURIComponent(bootstrap.enrollmentSecret)}`;
+    if (bootstrap.enrollmentSecret) {
+      target.hash = `enroll=${encodeURIComponent(bootstrap.enrollmentSecret)}`;
+    }
     const browserIdentity = cookieValue(req, BROWSER_COOKIE_NAME) || bootstrap.browserSecret;
     res.writeHead(302, {
       "set-cookie": [

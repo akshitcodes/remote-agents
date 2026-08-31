@@ -5723,18 +5723,33 @@ function openTerminalSheet() {
   if (["running", "stopping", "starting"].includes(session.state)) { pollTerminalJob(thread, session); }
 }
 
-function openNativeTerminal() {
+async function openNativeTerminal() {
   const thread = state.active;
   if (!thread?.id || !thread?.cwd) {
     openSheet('<h2>Project terminal</h2><div class="hint">This session does not report a project folder, so the bridge cannot choose a terminal starting directory.</div>');
     return;
   }
-  const query = new URLSearchParams({ provider: thread.provider || "codex", threadId: thread.id });
-  const url = `/terminal?${query}`;
-  if (matchMedia("(min-width: 760px)").matches) {
-    window.open(url, "_blank", "noopener");
-  } else {
-    location.assign(url);
+  const desktop = matchMedia("(min-width: 760px)").matches;
+  const popup = desktop ? window.open("about:blank", "_blank") : null;
+  if (popup) {
+    popup.opener = null;
+    popup.document.title = "Opening project terminal…";
+  }
+  try {
+    const handoff = await api("/api/terminal/browser-handoff", {
+      provider: thread.provider || "codex",
+      threadId: thread.id,
+    });
+    if (popup) {
+      popup.location.replace(handoff.url);
+    } else if (desktop) {
+      location.assign(handoff.url);
+    } else {
+      location.assign(handoff.url);
+    }
+  } catch (error) {
+    popup?.close();
+    chip("⚠️", error.message || "Could not open project terminal");
   }
 }
 

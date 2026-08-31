@@ -116,6 +116,21 @@ test("browser handoff bootstraps are one-use, expiring, and cleared by disable",
   assert.equal(security.consumeBrowserBootstrap(disabled.secret), null);
 });
 
+test("browser handoffs can enter the canonical terminal without creating an enrollment", (t) => {
+  const security = new TerminalSecurity({
+    file: fixture(t), origin: "https://agents.example.test", webauthn: mockWebauthn(),
+  });
+  const handoff = security.createBrowserBootstrap({
+    browserSecret: "already-paired-browser",
+    context: { provider: "codex", threadId: "thread-one" },
+  });
+  const consumed = security.consumeBrowserBootstrap(handoff.secret);
+  assert.equal(consumed.browserSecret, "already-paired-browser");
+  assert.equal(consumed.enrollmentSecret, null);
+  assert.deepEqual(consumed.context, { provider: "codex", threadId: "thread-one" });
+  assert.equal(security.consumeBrowserBootstrap(handoff.secret), null);
+});
+
 test("local terminal administration proof covers both nonce and exact body", () => {
   const token = "pairing-secret";
   const nonce = "a".repeat(64);

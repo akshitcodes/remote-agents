@@ -222,14 +222,14 @@ export class TerminalSecurity {
   }
 
   createBrowserBootstrap({ browserSecret, enrollmentSecret, context, ttlMs = BROWSER_BOOTSTRAP_TTL_MS } = {}) {
-    if (!browserSecret || !enrollmentSecret) {
+    if (!browserSecret) {
       throw terminalError("terminal browser handoff is incomplete", "terminal_handoff_invalid", 409);
     }
     this.prune();
     const secret = token(32);
     this.browserBootstraps.set(hash(secret), {
       browserSecret,
-      enrollmentSecret,
+      enrollmentSecret: enrollmentSecret || null,
       context: structuredClone(context ?? {}),
       expiresAt: this.now() + Math.max(1, Math.min(Number(ttlMs) || BROWSER_BOOTSTRAP_TTL_MS, BROWSER_BOOTSTRAP_TTL_MS)),
     });

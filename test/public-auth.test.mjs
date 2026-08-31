@@ -265,6 +265,31 @@ test("an unauthenticated browser cannot mint a local terminal handoff", async ()
   assert.equal(response.statusCode, 401);
 });
 
+test("an authenticated browser gets a one-use canonical terminal handoff", async () => {
+  resetAuthRateLimits();
+  configureServer({ host: "127.0.0.1", port: 0, token: TOKEN, publicOrigin: "https://localhost" });
+  const response = await request("/api/terminal/browser-handoff", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${TOKEN}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ provider: "codex", threadId: "thread-local-entry" }),
+  });
+  assert.equal(response.statusCode, 200);
+  const target = new URL(JSON.parse(response.body).url);
+  assert.equal(target.origin, "https://localhost");
+  assert.equal(target.pathname, "/api/terminal/handoff");
+  assert.ok(target.searchParams.get("handoff"));
+
+  const redeemed = await request(target.pathname + target.search, {
+    headers: { host: "localhost", "x-forwarded-proto": "https" },
+  });
+  assert.equal(redeemed.statusCode, 302);
+  assert.equal(redeemed.getHeader("location"), "https://localhost/terminal?provider=codex&threadId=thread-local-entry");
+  assert.match(redeemed.getHeader("set-cookie"), /cxp_session=/);
+});
+
 test("an authenticated client can reconcile an unrecorded send without retrying it", async () => {
   fixture();
   const response = await request("/api/send/status?provider=codex&method=steer&threadId=test-thread&requestId=definitely-missing", {

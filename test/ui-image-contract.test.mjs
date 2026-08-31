@@ -355,8 +355,8 @@ test("desktop workspace keeps session navigation visible and constrains the chat
 
 test("project terminal uses passkey step-up, a server-derived cwd, and an isolated interactive transport", () => {
   assert.match(html, /id="terminalBtn"[^>]*aria-label="Project terminal"/);
-  assert.match(html, /function openNativeTerminal\(\)/);
-  assert.match(html, /\/terminal\?\$\{query\}/);
+  assert.match(html, /async function openNativeTerminal\(\)/);
+  assert.match(html, /\/api\/terminal\/browser-handoff/);
   assert.match(terminalHtml, /simplewebauthn\.min\.js/);
   assert.match(terminalHtml, /xterm\.css/);
   assert.match(terminalJs, /startRegistration\(\{ optionsJSON: ceremony\.options \}\)/);
