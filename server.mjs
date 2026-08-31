@@ -7,6 +7,7 @@
 import { execFileSync } from "node:child_process";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
+import { lookup } from "node:dns/promises";
 import { readFileSync, existsSync, statSync, realpathSync } from "node:fs";
 import { basename, dirname, extname, join, resolve, sep, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1666,6 +1667,28 @@ export function startLocalTerminalBrowserHandoff({
   });
 }
 
+export async function requireReachableTerminalOrigin(origin, resolveHost = lookup) {
+  let url;
+  try { url = new URL(origin); } catch {
+    throw Object.assign(new Error("The saved terminal address is invalid. Re-run Remote Agents setup."), { status: 409, code: "terminal_origin_unavailable" });
+  }
+  if (url.protocol !== "https:" && url.hostname !== "localhost") {
+    throw Object.assign(new Error("Terminal passkeys require a stable HTTPS app address."), { status: 409, code: "terminal_origin_unavailable" });
+  }
+  try {
+    await resolveHost(url.hostname);
+  } catch {
+    const tailscale = url.hostname.endsWith(".ts.net");
+    throw Object.assign(new Error(tailscale
+      ? "The saved Tailscale address is offline. Open Tailscale and connect, then try again."
+      : "The saved app address is offline. Restore its tunnel or re-run Remote Agents setup, then try again."), {
+      status: 409,
+      code: "terminal_origin_unreachable",
+    });
+  }
+  return url.origin;
+}
+
 const routes = {
   "POST /api/attachment": async (req, res) => {
     const body = await readBody(req);
@@ -2137,6 +2160,7 @@ const routes = {
     if (!USABLE_PROVIDER_NAMES.has(provider) || !threadId || threadId.length > 500) {
       return json(res, 400, { error: "provider and threadId are required", code: "terminal_context_invalid" });
     }
+    await requireReachableTerminalOrigin(PUBLIC_ORIGIN);
     json(res, 200, await startLocalTerminalBrowserHandoff({ provider, threadId }));
   },
 
