@@ -74,6 +74,7 @@ const terminalSecurity = new TerminalSecurity({
   },
 });
 const localTerminalAdminNonces = new Map();
+let localTerminalBrowserHandoffCount = 0;
 const globalUsageInterests = new Map();
 const PROJECT_RUN_CANDIDATE_LIMIT = 30;
 let threadSettings = null;
@@ -1028,7 +1029,11 @@ const usageRetryRunner = new UsageRetryRunner({
   prepare: async (entry) => {
     const provider = pickProvider(entry.provider);
     if (!provider) { throw Object.assign(new Error("provider is unavailable"), { status: 409, code: "provider_unavailable" }); }
-    return validateSendDispatch(provider, { provider: entry.provider, threadId: entry.threadId, ...(entry.dispatch ?? {}) });
+    // Rebuild the complete current snapshot. validateSendDispatch deliberately
+    // returns only model/effort/mode; replacing the durable dispatch with that
+    // projection used to drop Codex approvalPolicy+sandbox, so the second
+    // validation correctly rejected every automatic Continue.
+    return exactThreadDispatch(provider, entry.threadId);
   },
   send: async (entry) => {
     const provider = pickProvider(entry.provider);
@@ -1527,6 +1532,84 @@ function recentProviderUnavailable(value) {
   return !!value && typeof value === "object" && value.unavailable === true;
 }
 
+export function startLocalTerminalBrowserHandoff({
+  provider,
+  threadId,
+  ttlMs = 60_000,
+  createEnrollment = () => terminalSecurity.createEnrollment(),
+} = {}) {
+  if (localTerminalBrowserHandoffCount >= 8) {
+    throw Object.assign(new Error("too many terminal setup windows are already open"), { status: 429, code: "terminal_setup_busy" });
+  }
+  localTerminalBrowserHandoffCount += 1;
+  const secret = randomBytes(32).toString("base64url");
+  const expiresAt = Date.now() + ttlMs;
+
+  return new Promise((resolveHandoff, rejectHandoff) => {
+    let consumed = false;
+    let released = false;
+    const releaseSlot = () => {
+      if (released) { return; }
+      released = true;
+      localTerminalBrowserHandoffCount = Math.max(0, localTerminalBrowserHandoffCount - 1);
+    };
+    const local = createServer((request, response) => {
+      let requestUrl;
+      try { requestUrl = new URL(request.url, "http://127.0.0.1"); } catch { requestUrl = null; }
+      const supplied = String(requestUrl?.searchParams.get("handoff") ?? "");
+      const expected = Buffer.from(secret);
+      const actual = Buffer.from(supplied);
+      const valid = request.method === "GET"
+        && requestUrl?.pathname === "/terminal-enable"
+        && !consumed
+        && Date.now() <= expiresAt
+        && actual.length === expected.length
+        && timingSafeEqual(actual, expected);
+
+      if (!valid) {
+        response.writeHead(404, { "content-type": "application/json", "cache-control": "no-store", connection: "close" });
+        return response.end('{"error":"not found"}');
+      }
+
+      consumed = true;
+      try {
+        const enrollment = createEnrollment();
+        const target = new URL("/terminal", enrollment.origin);
+        target.searchParams.set("provider", provider);
+        target.searchParams.set("threadId", threadId);
+        target.hash = `enroll=${encodeURIComponent(enrollment.secret)}`;
+        response.writeHead(302, { location: target.toString(), "cache-control": "no-store", "referrer-policy": "no-referrer", connection: "close" });
+        response.end();
+      } catch (error) {
+        const data = JSON.stringify({ error: error.message, code: error.code });
+        response.writeHead(error.status ?? 500, { "content-type": "application/json", "content-length": Buffer.byteLength(data), "cache-control": "no-store" });
+        response.end(data);
+      } finally {
+        setImmediate(() => local.close());
+      }
+    });
+
+    const timer = setTimeout(() => local.close(), ttlMs);
+    timer.unref?.();
+    local.on("close", () => { clearTimeout(timer); releaseSlot(); });
+    local.once("error", (error) => { releaseSlot(); rejectHandoff(error); });
+    local.listen(0, "127.0.0.1", () => {
+      const address = local.address();
+      const port = typeof address === "object" && address ? address.port : null;
+      if (!port) {
+        local.close();
+        return rejectHandoff(new Error("could not open local terminal setup"));
+      }
+      local.unref?.();
+      resolveHandoff({
+        url: `http://127.0.0.1:${port}/terminal-enable?handoff=${encodeURIComponent(secret)}`,
+        expiresAt,
+        close: () => { if (local.listening) { local.close(); } },
+      });
+    });
+  });
+}
+
 const routes = {
   "POST /api/attachment": async (req, res) => {
     const body = await readBody(req);
@@ -1972,6 +2055,22 @@ const routes = {
     const access = terminalSecurity.status({ browserSecret, unlockToken: terminalUnlock(req) });
     const backend = await ptyTerminals.capability();
     json(res, 200, { access, backend });
+  },
+
+  // A paired browser may ask for a one-click setup handoff. Redemption is
+  // served from a separate ephemeral listener bound only to 127.0.0.1, not
+  // from the bridge port forwarded by Funnel/cloudflared.
+  "POST /api/terminal/local-handoff": async (req, res) => {
+    if (!PUBLIC_ORIGIN) {
+      return json(res, 409, { error: "Configure a stable HTTPS app address before enabling terminal access", code: "terminal_origin_unavailable" });
+    }
+    const body = await readBody(req, 16 * 1024);
+    const provider = String(body?.provider ?? "");
+    const threadId = String(body?.threadId ?? "");
+    if (!USABLE_PROVIDER_NAMES.has(provider) || !threadId || threadId.length > 500) {
+      return json(res, 400, { error: "provider and threadId are required", code: "terminal_context_invalid" });
+    }
+    json(res, 200, await startLocalTerminalBrowserHandoff({ provider, threadId }));
   },
 
   "POST /api/terminal/register/options": async (req, res) => {

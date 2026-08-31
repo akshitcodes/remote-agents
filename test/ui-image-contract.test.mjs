@@ -17,7 +17,7 @@ test("image references survive queue, steer, send, retry, and reload paths", () 
   assert.match(html, /attachmentIds: \(entry\.attachments \?\? \[\]\)\.map/);
   assert.match(html, /attachmentIds: attachments\.map/);
   assert.match(html, /doSend\(entry\.text, \{ attachments: entry\.attachments/);
-  assert.match(html, /state\.failedSends\.push\(\{ provider, threadId, text, requestId, attachments, retryWithNewId \}\)/);
+  assert.match(html, /state\.failedSends\.push\(\{ provider, threadId, text, requestId, attachments, retryWithNewId, errorMessage: cleanFailureReason\(errorMessage\) \}\)/);
   assert.match(html, /Steer delivery could not be confirmed/);
   assert.match(html, /retryWithNewId/);
   assert.match(html, /const attachments = imageParts\.map\(\(part\) => part\.attachment \?\? null\)/);
@@ -39,7 +39,9 @@ test("failed delivery recovery distinguishes pre-dispatch failures and remains a
   assert.match(html, /Not sent — Retry, Edit, or Cancel/);
   assert.match(html, /removePendingEntry\(entry, \{ allowUncertain: true \}\)/);
   assert.match(html, /if \(btn\.isConnected && btn\.disabled\)/);
-  assert.match(html, /function markSendFailed\(bubble, onRetry, \{ uncertain = false, onDismiss = null \} = \{\}\)/);
+  assert.match(html, /function markSendFailed\(bubble, onRetry, \{ uncertain = false, onDismiss = null, reason = null \} = \{\}\)/);
+  assert.match(html, /detail\.className = "failed-reason"/);
+  assert.match(html, /function cleanFailureReason\(value\)/);
   assert.match(html, /dismiss\.textContent = uncertain \? "Dismiss" : "Cancel"/);
   assert.match(html, /dropFailedSend\(f\.requestId\);\s*bubble\.remove\(\)/);
   assert.match(html, /dropFailedSend\(id\);\s*bubble\.remove\(\)/);
@@ -113,6 +115,7 @@ test("usage retry controls distinguish enabled policy from a queued retry", () =
   assert.match(server, /\["marker", "stalled"\]\.includes\(data\.runConfidence\)/);
   assert.match(html, /waiting_provider: "Auto-resume queued — provider temporarily unavailable"/);
   assert.match(server, /state: "waiting_provider"/);
+  assert.match(server, /return exactThreadDispatch\(provider, entry\.threadId\)/);
 });
 
 test("Codex task settings expose a per-thread account without changing the global login", () => {

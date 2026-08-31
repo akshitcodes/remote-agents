@@ -1175,6 +1175,7 @@ export class ClaudeProvider extends BaseProvider {
       toolDescriptions: new Map(),
       sawResult: false,
       sawAssistantOutput: false,
+      syntheticNoResponse: false,
     };
   }
 
@@ -1191,6 +1192,7 @@ export class ClaudeProvider extends BaseProvider {
     ctx.toolDescriptions = new Map();
     ctx.sawResult = false;
     ctx.sawAssistantOutput = false;
+    ctx.syntheticNoResponse = false;
   }
 
   async ensureSession(emitThreadId, { cwd, model, effort, modeKey, isDraft }) {
@@ -1527,7 +1529,11 @@ export class ClaudeProvider extends BaseProvider {
     if (obj.type === "assistant") {
       // Synthetic API errors are reported once by the result/exit path. They
       // must never also masquerade as normal assistant content in the live UI.
-      if (obj.isApiErrorMessage !== true) {
+      const syntheticNoResponse = obj.message?.model === "<synthetic>"
+        && (obj.message?.content ?? []).some((block) => block?.type === "text" && /^no response requested\.?$/i.test(String(block.text ?? "").trim()));
+      if (syntheticNoResponse) {
+        ctx.syntheticNoResponse = true;
+      } else if (obj.isApiErrorMessage !== true) {
         this.handleAssistantMessage(obj.message ?? {}, ctx);
       }
       return;
@@ -1549,14 +1555,22 @@ export class ClaudeProvider extends BaseProvider {
       // Enrich usage(): accumulate spend and remember the last token/model breakdown.
       const providerSettingError = claudeTurnError(session.stderr);
       const resultText = typeof obj.result === "string" ? obj.result.trim() : "";
+      const syntheticNoResponse = !ctx.sawAssistantOutput && (ctx.syntheticNoResponse
+        || /^no response requested\.?$/i.test(resultText));
       const emptySuccess = (!obj.subtype || obj.subtype === "success")
         && !ctx.sawAssistantOutput
         && !resultText;
       const failed = (obj.subtype && obj.subtype !== "success")
         || providerSettingError.code === "provider_settings_unconfirmed"
+        || syntheticNoResponse
         || emptySuccess;
       const error = failed
-        ? (emptySuccess
+        ? (syntheticNoResponse
+            ? {
+                message: "Claude classified this prompt as a meta event and did not run it",
+                code: "no_response_requested",
+              }
+            : emptySuccess
             ? {
                 message: "Claude ended without returning a response",
                 code: "empty_provider_result",

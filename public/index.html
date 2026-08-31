@@ -125,6 +125,7 @@
      failure is attached to the thing that failed. */
   .msg.user.failed { border: 1px solid var(--danger); opacity: .85; }
   .msg.user .failed-actions { display: flex; justify-content: flex-end; align-items: center; gap: 6px; margin-top: 7px; }
+  .msg.user .failed-reason { margin-top: 7px; color: #ffd0cd; font-size: 11.5px; line-height: 1.35; }
   .msg.user .retry, .msg.user .dismiss-failed { background: transparent; border: 1px solid var(--danger); color: var(--danger); font-size: 11px; font-weight: 600; padding: 3px 10px; border-radius: 20px; cursor: pointer; }
   .msg.user .dismiss-failed { border-color: var(--border); color: var(--fg-dim); }
   .msg.user .retry:disabled { opacity: .6; cursor: default; }
@@ -3579,6 +3580,7 @@ function savePending() {
       viaCodexQueue: !!e.viaCodexQueue,
       nativeQueue: !!e.nativeQueue,
       nativeQueueId: e.nativeQueueId ?? null,
+      errorMessage: cleanFailureReason(e.errorMessage),
     }));
 
   if (entries.length) { all[key] = entries; } else { delete all[key]; }
@@ -3806,6 +3808,7 @@ function restorePending() {
     const viaCodexQueue = !!raw?.viaCodexQueue;
     const nativeQueue = !!raw?.nativeQueue;
     const nativeQueueId = raw?.nativeQueueId ?? null;
+    const errorMessage = cleanFailureReason(raw?.errorMessage);
     const mayHaveDispatched = !!raw?.mayHaveDispatched || (savedRetryRequired && legacyRetryWithNewId);
     const retryRequired = savedRetryRequired || (mayHaveDispatched && !nativeQueue);
 
@@ -3846,10 +3849,11 @@ function restorePending() {
       existing.mayHaveDispatched = mayHaveDispatched;
       existing.nativeQueue = nativeQueue;
       existing.nativeQueueId = nativeQueueId;
+      existing.errorMessage = errorMessage;
       existing.provider = state.active.provider;
       existing.threadId = tid;
     } else {
-      state.pending.push({ text, attachments, requestId, chip: c, bubble, retryRequired, retryWithNewId, retryAsSteer, awaitingOwnership, intendedSendMode, viaCodexQueue, mayHaveDispatched, nativeQueue, nativeQueueId, provider: state.active.provider, threadId: tid });
+      state.pending.push({ text, attachments, requestId, chip: c, bubble, retryRequired, retryWithNewId, retryAsSteer, awaitingOwnership, intendedSendMode, viaCodexQueue, mayHaveDispatched, nativeQueue, nativeQueueId, errorMessage, provider: state.active.provider, threadId: tid });
     }
 
     const entry = existing || state.pending.at(-1);
@@ -3858,6 +3862,7 @@ function restorePending() {
     if (retryRequired) {
       markSendFailed(bubble, () => retryPendingEntry(entry), {
         uncertain,
+        reason: entry.errorMessage,
         onDismiss: () => removePendingEntry(entry, { allowUncertain: true }),
       });
     }
@@ -4008,8 +4013,10 @@ async function checkPendingDelivery(entry) {
       entry.mayHaveDispatched = false;
       entry.retryRequired = true;
       entry.retryWithNewId = false;
+      entry.errorMessage = cleanFailureReason(result.error?.message || entry.errorMessage);
       if (label) { label.textContent = "Not sent — Retry, Edit, or Cancel"; }
       markSendFailed(entry.bubble, () => retryPendingEntry(entry), {
+        reason: entry.errorMessage,
         onDismiss: () => removePendingEntry(entry, { allowUncertain: true }),
       });
     } else if (result.state === "dispatching") {
@@ -4023,6 +4030,7 @@ async function checkPendingDelivery(entry) {
       }
       markSendFailed(entry.bubble, null, {
         uncertain: true,
+        reason: cleanFailureReason(result.error?.message || entry.errorMessage),
         onDismiss: () => removePendingEntry(entry, { allowUncertain: true }),
       });
     }
@@ -4190,10 +4198,12 @@ async function trySteer(entry) {
       entry.retryWithNewId = false;
       entry.retryAsSteer = true;
       entry.mayHaveDispatched = true;
+      entry.errorMessage = cleanFailureReason(e.message);
       savePending();
       if (label) { label.textContent = "Steer delivery could not be confirmed — check status or dismiss; it will not be resent"; }
       markSendFailed(entry.bubble, () => checkPendingDelivery(entry), {
         uncertain: true,
+        reason: entry.errorMessage,
         onDismiss: () => removePendingEntry(entry, { allowUncertain: true }),
       });
       syncPendingActions(entry);
@@ -4341,9 +4351,9 @@ function loadFailedSends() {
   } catch { return []; }
 }
 
-function recordFailedSend(threadId, text, requestId, provider = activeProvider(), attachments = [], retryWithNewId = false) {
+function recordFailedSend(threadId, text, requestId, provider = activeProvider(), attachments = [], retryWithNewId = false, errorMessage = null) {
   dropFailedSend(requestId);
-  state.failedSends.push({ provider, threadId, text, requestId, attachments, retryWithNewId });
+  state.failedSends.push({ provider, threadId, text, requestId, attachments, retryWithNewId, errorMessage: cleanFailureReason(errorMessage) });
   saveFailedSends();
 }
 
@@ -4366,6 +4376,7 @@ function restoreFailedSends() {
       ? () => checkStandaloneDelivery(f, bubble)
       : () => doSend(f.text, { attachments, bubble, requestId: f.requestId }), {
       uncertain: !!f.retryWithNewId,
+      reason: f.errorMessage,
       onDismiss: () => {
         dropFailedSend(f.requestId);
         bubble.remove();
@@ -4392,14 +4403,24 @@ async function checkStandaloneDelivery(failed, bubble) {
 
   if (result.state === "failed") {
     failed.retryWithNewId = false;
+    failed.errorMessage = cleanFailureReason(result.error?.message || failed.errorMessage);
     saveFailedSends();
     markSendFailed(bubble, () => doSend(failed.text, {
       attachments: failed.attachments ?? [],
       bubble,
       requestId: failed.requestId,
-    }), { onDismiss: () => { dropFailedSend(failed.requestId); bubble.remove(); } });
+    }), { reason: failed.errorMessage, onDismiss: () => { dropFailedSend(failed.requestId); bubble.remove(); } });
     return;
   }
+
+  failed.retryWithNewId = true;
+  failed.errorMessage = cleanFailureReason(result.error?.message || failed.errorMessage);
+  saveFailedSends();
+  markSendFailed(bubble, () => checkStandaloneDelivery(failed, bubble), {
+    uncertain: true,
+    reason: failed.errorMessage,
+    onDismiss: () => { dropFailedSend(failed.requestId); bubble.remove(); },
+  });
 
   chip("⚠️", result.state === "not_found"
     ? "The bridge no longer has proof of delivery. It was not resent, so this app cannot create a duplicate."
@@ -4645,19 +4666,22 @@ async function doSend(text, { attachments = [], bubble, requestId, pendingEntry 
         pendingEntry.retryRequired = true;
         pendingEntry.retryWithNewId = false;
         pendingEntry.mayHaveDispatched = deliveryMayBeAmbiguous;
+        pendingEntry.errorMessage = cleanFailureReason(e.message);
         savePending();
         if (label) { label.textContent = pendingEntry.mayHaveDispatched ? "Delivery could not be confirmed — check the thread, then retry if needed" : "Not sent — tap Retry"; }
         markSendFailed(bubble, retry, {
           uncertain: pendingEntry.mayHaveDispatched,
+          reason: pendingEntry.errorMessage,
           onDismiss: () => removePendingEntry(pendingEntry, { allowUncertain: true }),
         });
         syncPendingActions(pendingEntry);
       }
     } else if (e.code !== "thread_locked_elsewhere") {
       const uncertain = deliveryMayBeAmbiguous;
-      recordFailedSend(threadId, text, id, activeProvider(), attachments, uncertain);
+      recordFailedSend(threadId, text, id, activeProvider(), attachments, uncertain, e.message);
       markSendFailed(bubble, retry, {
         uncertain,
+        reason: e.message,
         onDismiss: () => {
           dropFailedSend(id);
           bubble.remove();
@@ -4674,16 +4698,29 @@ function newRequestId() {
   return crypto.randomUUID?.() ?? (String(Date.now()) + Math.random().toString(16).slice(2));
 }
 
+function cleanFailureReason(value) {
+  const text = String(value ?? "").trim();
+  return text ? text.slice(0, 800) : null;
+}
+
 // Mark the message that failed, rather than dropping a warning further down the
 // transcript — the thing that didn't send is the thing you tap to retry.
-function markSendFailed(bubble, onRetry, { uncertain = false, onDismiss = null } = {}) {
+function markSendFailed(bubble, onRetry, { uncertain = false, onDismiss = null, reason = null } = {}) {
   if (!bubble) { return; }
 
   bubble.querySelector(".failed-actions")?.remove();
+  bubble.querySelector(".failed-reason")?.remove();
   bubble.querySelector(".retry")?.remove(); // remove controls from pre-0.4.4 DOM
   bubble.classList.toggle("failed", !!onRetry || !!onDismiss);
 
   if (!onRetry && !onDismiss) { return; }
+
+  if (reason) {
+    const detail = document.createElement("div");
+    detail.className = "failed-reason";
+    detail.textContent = cleanFailureReason(reason);
+    bubble.appendChild(detail);
+  }
 
   const actions = document.createElement("div");
   actions.className = "failed-actions";

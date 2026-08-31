@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { configureServer, handleRequest, resetAuthRateLimits } from "../server.mjs";
+import { configureServer, handleRequest, resetAuthRateLimits, startLocalTerminalBrowserHandoff } from "../server.mjs";
 import { localBridgeProof } from "../local-proof.mjs";
 
 const TOKEN = "portable-test-token-with-at-least-32-characters";
@@ -25,13 +25,21 @@ class MockResponse {
   end(chunk) { this.body += chunk == null ? "" : String(chunk); this.headersSent = true; }
 }
 
-async function request(path, { headers = {}, remoteAddress = "127.0.0.1" } = {}) {
+async function request(path, { headers = {}, remoteAddress = "127.0.0.1", method = "GET", body = null } = {}) {
   const req = {
-    method: "GET",
+    method,
     url: path,
     headers: { host: "127.0.0.1:9491", ...headers },
     socket: { remoteAddress, encrypted: false },
   };
+  if (body != null) {
+    const listeners = {};
+    req.on = (event, handler) => { listeners[event] = handler; };
+    queueMicrotask(() => {
+      listeners.data?.(Buffer.from(body));
+      listeners.end?.();
+    });
+  }
   const res = new MockResponse();
   await handleRequest(req, res);
   return res;
@@ -79,6 +87,56 @@ test("the loopback setup challenge proves token knowledge without returning the 
   assert.equal(remote.statusCode, 404);
   const malformed = await request("/internal/local-proof?nonce=short");
   assert.equal(malformed.statusCode, 404);
+});
+
+test("terminal browser handoffs use a separate one-use loopback listener", async () => {
+  let enrollments = 0;
+  const handoff = await startLocalTerminalBrowserHandoff({
+    provider: "claude",
+    threadId: "thread-local-setup",
+    ttlMs: 2_000,
+    createEnrollment: () => {
+      enrollments += 1;
+      return { origin: "https://agents.example.test", secret: "passkey-enrollment-secret" };
+    },
+  });
+  const handoffUrl = new URL(handoff.url);
+  assert.equal(handoffUrl.hostname, "127.0.0.1");
+  assert.notEqual(handoffUrl.port, "9491", "the tunnel-facing bridge port must not serve redemption");
+
+  const consumed = await fetch(handoff.url, { redirect: "manual" });
+  assert.equal(consumed.status, 302);
+  assert.equal(enrollments, 1);
+  assert.match(consumed.headers.get("location"), /^https:\/\/agents\.example\.test\/terminal\?provider=claude&threadId=thread-local-setup#enroll=/);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await assert.rejects(fetch(handoff.url, { redirect: "manual" }));
+  assert.equal(enrollments, 1);
+});
+
+test("an expired terminal browser handoff cannot create an enrollment", async () => {
+  let enrollments = 0;
+  const handoff = await startLocalTerminalBrowserHandoff({
+    provider: "claude",
+    threadId: "thread-expired-setup",
+    ttlMs: 15,
+    createEnrollment: () => {
+      enrollments += 1;
+      return { origin: "https://agents.example.test", secret: "should-not-exist" };
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  await assert.rejects(fetch(handoff.url, { redirect: "manual" }));
+  assert.equal(enrollments, 0);
+});
+
+test("an unauthenticated browser cannot mint a local terminal handoff", async () => {
+  fixture();
+  const response = await request("/api/terminal/local-handoff", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ provider: "claude", threadId: "thread-local-setup" }),
+  });
+  assert.equal(response.statusCode, 401);
 });
 
 test("an authenticated client can reconcile an unrecorded send without retrying it", async () => {

@@ -95,6 +95,20 @@ async function unlock() {
   }
 }
 
+async function beginLocalSetup() {
+  setError();
+  $("gateAction").disabled = true;
+  $("gateAction").textContent = "Opening local setup…";
+  try {
+    const handoff = await api("/api/terminal/local-handoff", { provider, threadId });
+    location.assign(handoff.url);
+  } catch (error) {
+    setError(error.message);
+    $("gateAction").disabled = false;
+    $("gateAction").textContent = "Set up on this Mac";
+  }
+}
+
 function terminalDimensions() {
   return { cols: terminal?.cols || 100, rows: terminal?.rows || 30 };
 }
@@ -210,8 +224,11 @@ async function initialize() {
   $("context").textContent = `${provider} · ${threadId}`;
   try {
     const status = await api("/api/terminal/security/status");
-    if (!status.access.enabled) {
-      return gate({ title: "Terminal access is off", copy: "On the bridge computer, run: remote-agents terminal enable. Then scan its QR code or enter the one-time code here.", action: "Check again", onclick: initialize });
+    if (!status.access.enabled || (!status.access.enrolled && !enrollmentCapability)) {
+      const bridgeMacBrowser = /Macintosh|Mac OS X/i.test(navigator.userAgent) && (navigator.maxTouchPoints || 0) < 2;
+      return gate(!bridgeMacBrowser
+        ? { title: "Finish setup on the bridge Mac", copy: "For safety, terminal access can only be turned on from a browser running on the bridge Mac. Open this chat there, tap the terminal icon, and choose Set up on this Mac.", action: "Check again", onclick: initialize }
+        : { title: "Turn on secure terminal", copy: "This opens a one-time setup through this Mac only. You’ll create a passkey before any command can run.", action: "Set up on this Mac", onclick: beginLocalSetup });
     }
     if (!status.access.enrolled || enrollmentCapability) {
       $("deviceLabel").value ||= deviceLabel();

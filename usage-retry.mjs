@@ -137,11 +137,12 @@ export class UsageRetryStore {
         row.error = { message: "Bridge restarted while sending; check the thread before retrying", code: "delivery_uncertain", status: 504 };
         repaired = true;
       }
-      // Older builds incorrectly made a pre-dispatch model probe failure
+      // Older builds incorrectly made some pre-dispatch settings/probe failures
       // terminal. attempts=0 proves no Continue reached the provider, so it is
-      // safe to preserve that intent and retry provider readiness after an
-      // upgrade. Never migrate an entry that may already have been delivered.
-      if (row.state === "failed" && Number(row.attempts ?? 0) === 0 && row.error?.code === "model_verification_failed") {
+      // safe to preserve that intent and rebuild provider truth after upgrade.
+      // Never migrate an entry that may already have been delivered.
+      if (row.state === "failed" && Number(row.attempts ?? 0) === 0
+          && ["model_verification_failed", "permission_mode_mismatch", "model_unavailable", "effort_unavailable"].includes(row.error?.code)) {
         row.state = "waiting_provider";
         row.nextCheckAt = this.now();
         repaired = true;

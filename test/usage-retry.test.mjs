@@ -218,6 +218,30 @@ test("an old pre-dispatch model failure is repaired without risking a duplicate 
   assert.equal(attempted.get("old-model-failure").state, "failed");
 });
 
+test("old pre-dispatch settings projection failures are safely re-armed", (t) => {
+  const file = fixture(t);
+  writeFileSync(file, JSON.stringify([{
+    id: "old-permission-failure",
+    provider: "codex",
+    threadId: "thread-1",
+    requestId: "request-1",
+    text: "Continue.",
+    dispatch: { model: "gpt-test", effort: "medium", mode: "full" },
+    state: "failed",
+    attempts: 0,
+    nextCheckAt: null,
+    error: { code: "permission_mode_mismatch", status: 409, message: "low-level fields were dropped" },
+  }]));
+
+  const repaired = new UsageRetryStore({ file, now: () => 4321 });
+  assert.equal(repaired.get("old-permission-failure").state, "waiting_provider");
+  assert.equal(repaired.get("old-permission-failure").nextCheckAt, 4321);
+
+  repaired.update("old-permission-failure", { state: "failed", attempts: 1, nextCheckAt: null });
+  const potentiallyAttempted = new UsageRetryStore({ file, now: () => 9999 });
+  assert.equal(potentiallyAttempted.get("old-permission-failure").state, "failed");
+});
+
 test("cancel wins a race with a slow usage probe and dispatching cannot pretend to cancel", async (t) => {
   const store = new UsageRetryStore({ file: fixture(t) });
   create(store);

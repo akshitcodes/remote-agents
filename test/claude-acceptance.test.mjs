@@ -116,6 +116,47 @@ test("Claude cannot silently report success without any assistant output", () =>
   assert.equal(session.dead, true);
 });
 
+test("Claude synthetic no-response output is a visible failed turn, not an answer", () => {
+  const events = [];
+  const provider = new ClaudeProvider((event, data) => events.push({ event, data }));
+  const session = fakeSession(provider, () => {});
+  session.child.kill = () => {};
+  session.busy = true;
+  provider.sessions.set(session.emitThreadId, session);
+
+  provider.handleStreamLine(JSON.stringify({
+    type: "assistant",
+    message: { model: "<synthetic>", content: [{ type: "text", text: "No response requested." }] },
+  }), session);
+  provider.handleStreamLine(JSON.stringify({ type: "result", subtype: "success", result: "No response requested." }), session);
+
+  assert.ok(!events.some(({ data }) => data?.method === "item/completed"));
+  const terminal = events.find(({ data }) => data?.method === "turn/failed");
+  assert.deepEqual(terminal?.data?.params?.error, {
+    message: "Claude classified this prompt as a meta event and did not run it",
+    code: "no_response_requested",
+  });
+});
+
+test("Claude synthetic no-response metadata cannot override real streamed output", () => {
+  const events = [];
+  const provider = new ClaudeProvider((event, data) => events.push({ event, data }));
+  const session = fakeSession(provider, () => {});
+  session.child.kill = () => {};
+  session.busy = true;
+  provider.sessions.set(session.emitThreadId, session);
+
+  provider.handleAnthropicEvent({ type: "content_block_start", index: 0, content_block: { type: "text", text: "Real answer" } }, session.ctx, session);
+  provider.handleStreamLine(JSON.stringify({
+    type: "assistant",
+    message: { model: "<synthetic>", content: [{ type: "text", text: "No response requested." }] },
+  }), session);
+  provider.handleStreamLine(JSON.stringify({ type: "result", subtype: "success", result: "No response requested." }), session);
+
+  assert.ok(events.some(({ data }) => data?.method === "turn/completed"));
+  assert.ok(!events.some(({ data }) => data?.method === "turn/failed"));
+});
+
 test("a streamed Claude response remains a successful terminal result", () => {
   const events = [];
   const provider = new ClaudeProvider((event, data) => events.push({ event, data }));
