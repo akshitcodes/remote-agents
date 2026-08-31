@@ -1111,26 +1111,22 @@ export class CodexProvider extends BaseProvider {
   }
 
   async usageForThread(threadId, { refresh = true } = {}) {
-    const profileId = this.accountProfiles.selectedProfileId(threadId);
-    if (profileId === SHARED_PROFILE_ID) { return this.usage({ refresh }); }
-    const client = await this.profileClient(profileId);
-    try {
-      const [account, rateLimits] = await Promise.allSettled([
-        this.clientRpc(client, "account/read", {}),
-        this.clientRpc(client, "account/rateLimits/read", {}),
-      ]);
-      return {
-        account: account.status === "fulfilled" ? account.value.account : null,
-        rateLimits: rateLimits.status === "fulfilled" ? rateLimits.value : null,
-        usage: null,
-        _fresh: {
-          account: account.status === "fulfilled",
-          rateLimits: rateLimits.status === "fulfilled",
-        },
-      };
-    } finally {
-      this.scheduleProfileClientRelease(client);
-    }
+    // Probe through the same holder that will dispatch this thread. Consulting a
+    // separate selected-profile control process while an older holder owns the
+    // writer lease can authorize a send with account B and execute it as A.
+    const [account, rateLimits] = await Promise.allSettled([
+      this.accountRpcForThread(threadId, "account/read", {}),
+      this.accountRpcForThread(threadId, "account/rateLimits/read", {}),
+    ]);
+    return {
+      account: account.status === "fulfilled" ? account.value.account : null,
+      rateLimits: rateLimits.status === "fulfilled" ? rateLimits.value : null,
+      usage: null,
+      _fresh: {
+        account: account.status === "fulfilled",
+        rateLimits: rateLimits.status === "fulfilled",
+      },
+    };
   }
 
   threadAccountState(threadId) {

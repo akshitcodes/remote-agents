@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { isUsageLimitError, usageRetryTrigger, userProgressFromThread, UsageRetryPolicyStore, UsageRetryRunner, UsageRetryStore, usageAvailability } from "../usage-retry.mjs";
+import { isUsageLimitError, usageCapacityKey, usageRetryTrigger, userProgressFromThread, UsageRetryPolicyStore, UsageRetryRunner, UsageRetryStore, usageAvailability } from "../usage-retry.mjs";
+import { UsageStateStore } from "../usage-state.mjs";
 
 function fixture(t, name = "retries.json") {
   const dir = mkdtempSync(join(tmpdir(), "remote-agents-usage-retry-"));
@@ -46,15 +47,15 @@ test("only a terminal provider usage error with stable identity triggers auto-re
     provider: "codex",
     method: "turn/failed",
     params: { threadId: "thread-1", turn: { id: "turn-1", error: { message: "TTR usage limit reached" } } },
-  }), { provider: "codex", threadId: "thread-1", triggerId: "codex:turn-1" });
+  }), { provider: "codex", threadId: "thread-1", triggerId: "codex:turn-1", terminalId: "turn-1" });
   assert.deepEqual(usageRetryTrigger("external", {
     provider: "claude", threadId: "thread-2", terminalId: "terminal-2", terminalOutcome: "failed",
     terminalError: { message: "You've hit your monthly spend limit" }, observedChange: true,
-  }), { provider: "claude", threadId: "thread-2", triggerId: "terminal-2" });
+  }), { provider: "claude", threadId: "thread-2", triggerId: "terminal-2", terminalId: "terminal-2" });
   assert.deepEqual(usageRetryTrigger("external", {
     provider: "codex", threadId: "thread-3", terminalId: "terminal-3", terminalOutcome: "failed",
     terminalError: { code: "usage_limit_exceeded", message: "Your workspace is out of credits. Add credits to continue." }, observedChange: true,
-  }), { provider: "codex", threadId: "thread-3", triggerId: "terminal-3" });
+  }), { provider: "codex", threadId: "thread-3", triggerId: "terminal-3", terminalId: "terminal-3" });
   assert.equal(usageRetryTrigger("notify", { provider: "codex", method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1" } } }), null);
   assert.equal(usageRetryTrigger("external", { provider: "claude", threadId: "thread-2", terminalOutcome: "failed", terminalError: { message: "usage limit reached" } }), null);
   assert.equal(usageRetryTrigger("external", { provider: "claude", threadId: "thread-2", terminalId: "old", terminalOutcome: "failed", terminalError: { message: "usage limit reached" }, observedChange: false }), null);
@@ -66,6 +67,47 @@ test("usage exhaustion prefers provider codes and supports legacy provider wordi
   assert.equal(isUsageLimitError({ message: "Your workspace is out of credits. Add credits to continue." }), true);
   assert.equal(isUsageLimitError({ message: "No usage left for this account." }), true);
   assert.equal(isUsageLimitError({ code: "authentication_error", message: "Please sign in again." }), false);
+});
+
+test("provider-level exhaustion blocks dispatch even when percentage windows show room", () => {
+  const snapshot = {
+    _capacityFresh: true,
+    account: { email: "workspace@example.com" },
+    rateLimits: { rateLimits: {
+      primary: { usedPercent: 20, resetsAt: 9999 },
+      secondary: { usedPercent: 10, resetsAt: 99999 },
+      rateLimitReachedType: "workspace_owner_credits_depleted",
+    } },
+  };
+  assert.equal(usageAvailability(snapshot).available, false);
+  assert.equal(usageCapacityKey(snapshot), usageCapacityKey(structuredClone(snapshot)));
+});
+
+test("shared usage normalization preserves provider exhaustion metadata", (t) => {
+  const state = new UsageStateStore({ file: fixture(t, "usage-state.json") });
+  const merged = state.merge("codex", {
+    account: { email: "workspace@example.com" },
+    rateLimits: {
+      primary: { usedPercent: 20, resetsAt: Math.floor(Date.now() / 1000) + 3600 },
+      secondary: { usedPercent: 10 },
+      rateLimitReachedType: "workspace_owner_credits_depleted",
+      spendControlReached: true,
+    },
+  });
+  const snapshot = { ...merged, _capacityFresh: true };
+  assert.equal(usageAvailability(snapshot).available, false);
+  assert.match(usageCapacityKey(snapshot), /workspace_owner_credits_depleted/);
+  assert.match(usageCapacityKey(snapshot), /"spendControlReached":true/);
+});
+
+test("raw and normalized snapshots produce the same capacity fingerprint", (t) => {
+  const raw = {
+    account: { email: "same@example.com" },
+    rateLimits: { primary: { usedPercent: 20, resetsAt: 12345 }, secondary: null },
+  };
+  const state = new UsageStateStore({ file: fixture(t, "canonical-capacity.json") });
+  const normalized = state.merge("codex", raw);
+  assert.equal(usageCapacityKey(raw), usageCapacityKey(normalized));
 });
 
 test("global policy defaults off and a chat can override or inherit it", (t) => {
@@ -161,6 +203,24 @@ test("durable transcript progress supersedes a retry when the live turn-start ev
   assert.equal(sends, 0);
 });
 
+test("manual progress supersedes even while rejected capacity is unchanged", async (t) => {
+  const store = new UsageRetryStore({ file: fixture(t) });
+  create(store, { progressGuard: { userCount: 3, lastUserId: "before-limit" } });
+  const unchanged = { _capacityFresh: true, account: { email: "same@example.com" }, rateLimits: { primary: { usedPercent: 5 } } };
+  store.update("resume-1", { rejectedCapacityKey: usageCapacityKey(unchanged) });
+  let sends = 0;
+  const runner = new UsageRetryRunner({
+    store,
+    readUsage: async () => unchanged,
+    readProgress: async () => ({ userCount: 4, lastUserId: "manual-message" }),
+    readRuntime: async () => ({ running: false }),
+    send: async () => { sends += 1; },
+  });
+
+  assert.equal((await runner.check("resume-1")).state, "superseded");
+  assert.equal(sends, 0);
+});
+
 test("matching durable transcript progress allows one resume", async (t) => {
   const store = new UsageRetryStore({ file: fixture(t) });
   create(store, { progressGuard: { userCount: 3, lastUserId: "before-limit" } });
@@ -170,11 +230,68 @@ test("matching durable transcript progress allows one resume", async (t) => {
     readUsage: async () => ({ _capacityFresh: true, rateLimits: { primary: { usedPercent: 1 } } }),
     readProgress: async () => ({ userCount: 3, lastUserId: "before-limit" }),
     readRuntime: async () => ({ running: false }),
-    send: async () => { sends += 1; },
+    send: async () => { sends += 1; return { turn: { id: "auto-turn-1" } }; },
   });
 
   assert.equal((await runner.check("resume-1")).state, "accepted");
   assert.equal(sends, 1);
+  assert.equal(store.get("resume-1").dispatchedTurnId, "auto-turn-1");
+  assert.equal(store.findByDispatchedTurn("codex", "thread-1", "auto-turn-1").id, "resume-1");
+});
+
+test("an accepted auto-resume that immediately hits usage is re-armed as one intent", (t) => {
+  const store = new UsageRetryStore({ file: fixture(t), now: () => 1000 });
+  create(store, { progressGuard: { userCount: 3, lastUserId: "before" } });
+  store.update("resume-1", {
+    state: "accepted",
+    dispatchedTurnId: "auto-turn-1",
+    capacityKey: "account-a:window-1",
+  });
+
+  const rearmed = store.rearmDispatchedTurn("codex", "thread-1", "auto-turn-1", {
+    requestId: "request-2",
+    triggerId: "codex:auto-turn-1",
+    progressGuard: { userCount: 4, lastUserId: "auto-continue" },
+    nextCheckAt: 61_000,
+  });
+
+  assert.equal(rearmed.id, "resume-1");
+  assert.equal(rearmed.state, "waiting_usage");
+  assert.equal(rearmed.requestId, "request-2", "a later attempt must not replay the accepted send-ledger id");
+  assert.equal(rearmed.rejectedCapacityKey, "account-a:window-1");
+  assert.equal(store.list({ provider: "codex", threadId: "thread-1" }).length, 1);
+});
+
+test("an id-less provider acknowledgement still collapses its next usage failure", (t) => {
+  const store = new UsageRetryStore({ file: fixture(t) });
+  create(store, { progressGuard: { userCount: 1, lastUserId: "before" } });
+  store.update("resume-1", { state: "accepted", capacityKey: "account-a:window-1", dispatchedTurnId: null });
+
+  const rearmed = store.rearmDispatchedTurn("codex", "thread-1", "provider-terminal-id", {
+    requestId: "request-2",
+    triggerId: "codex:provider-terminal-id",
+    progressGuard: { userCount: 2, lastUserId: "auto-continue" },
+  });
+
+  assert.equal(rearmed.id, "resume-1");
+  assert.equal(rearmed.state, "waiting_usage");
+  assert.equal(rearmed.rejectedCapacityKey, "account-a:window-1");
+});
+
+test("re-arm reuses an existing blocking intent instead of creating a second send", (t) => {
+  const store = new UsageRetryStore({ file: fixture(t) });
+  create(store, { progressGuard: { userCount: 1, lastUserId: "before" } });
+  store.update("resume-1", { state: "accepted", capacityKey: "account-a:window-1", dispatchedTurnId: "turn-1" });
+  create(store, { id: "already-waiting", requestId: "request-2", triggerId: "watch-record", progressGuard: { userCount: 2 } });
+
+  const result = store.rearmDispatchedTurn("codex", "thread-1", "turn-1", {
+    requestId: "request-3",
+    triggerId: "codex:turn-1",
+    progressGuard: { userCount: 2, lastUserId: "continue" },
+  });
+
+  assert.equal(result.id, "already-waiting");
+  assert.equal(store.list({ provider: "codex", threadId: "thread-1", activeOnly: true }).length, 1);
 });
 
 test("normalized provider transcripts produce a stable count-only guard when IDs are absent", () => {
@@ -232,7 +349,7 @@ test("a confirmed usage rejection refreshes the guard before a later retry", asy
   let sends = 0;
   const runner = new UsageRetryRunner({
     store,
-    readUsage: async () => ({ _capacityFresh: true, rateLimits: { primary: { usedPercent: 1 } } }),
+    readUsage: async () => ({ _capacityFresh: true, rateLimits: { primary: { usedPercent: sends ? 2 : 1 } } }),
     readProgress: async () => progressReads++ === 0
       ? { userCount: 1, lastUserId: null }
       : { userCount: 2, lastUserId: null },
@@ -395,6 +512,9 @@ test("a confirmed usage rejection returns to the queue but an ambiguous send nev
     send: async () => { throw sendError; },
   });
   assert.equal((await runner.check("resume-1")).state, "waiting_usage");
+  assert.equal((await runner.check("resume-1")).state, "waiting_usage", "unchanged capacity cannot cause another send");
+  assert.equal(store.get("resume-1").attempts, 1);
+  store.update("resume-1", { rejectedCapacityKey: null });
   sendError = Object.assign(new Error("response lost"), { status: 504, code: "delivery_uncertain" });
   assert.equal((await runner.check("resume-1")).state, "uncertain");
   assert.equal(store.get("resume-1").attempts, 2);

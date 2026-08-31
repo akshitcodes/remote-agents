@@ -11,6 +11,7 @@ import { dirname } from "node:path";
 const CHECKABLE_STATES = new Set(["waiting_usage", "waiting_thread", "waiting_provider", "checking"]);
 const PENDING_STATES = new Set([...CHECKABLE_STATES, "dispatching"]);
 const BLOCKING_STATES = new Set([...PENDING_STATES, "uncertain"]);
+const ACCEPTED_REARM_WINDOW_MS = 10 * 60_000;
 const USAGE_LIMIT_CODES = new Set([
   "credit_balance_exhausted",
   "credits_exhausted",
@@ -75,8 +76,17 @@ export function usageAvailability(snapshot) {
     return { available: false, reason: "Waiting for a fresh provider usage check", resetAt: null };
   }
 
-  const limits = snapshot?.rateLimits?.rateLimits ?? snapshot?.rateLimits ?? {};
+  const envelope = snapshot?.rateLimits ?? {};
+  const limits = envelope?.rateLimits ?? envelope;
+  const providerExhaustion = String(envelope.rateLimitReachedType ?? limits.rateLimitReachedType ?? "").trim();
+  const spendControlReached = envelope.spendControlReached === true || limits.spendControlReached === true;
   const windows = [limits.primary, limits.secondary].filter((value) => value && typeof value === "object");
+  const futureResets = windows.map((limit) => numericEpoch(limit.resetsAt))
+    .filter((resetAt) => resetAt && resetAt > Date.now() / 1000)
+    .sort((a, b) => a - b);
+  if (providerExhaustion || spendControlReached) {
+    return { available: false, reason: "Provider reports no remaining usage", resetAt: futureResets[0] ?? null };
+  }
 
   if (!windows.length) {
     return { available: false, reason: "Usage is not available yet", resetAt: null };
@@ -103,6 +113,42 @@ export function usageAvailability(snapshot) {
     : { available: false, reason: "Usage is not measured yet", resetAt: null };
 }
 
+function accountIdentity(account) {
+  return String(account?.accountId ?? account?.email ?? account?.accountLabel ?? "unknown").trim().toLowerCase();
+}
+
+// Deliberately excludes fetch timestamps. A new poll of unchanged provider data
+// is not new evidence that a turn rejected for usage will now succeed.
+export function usageCapacityKey(snapshot) {
+  const envelope = snapshot?.rateLimits ?? {};
+  const limits = envelope?.rateLimits ?? envelope;
+  const windowKey = (window) => window && typeof window === "object" ? {
+    usedPercent: Number.isFinite(Number(window.usedPercent)) ? Number(window.usedPercent) : null,
+    // remainingPercent is a provider/UI derivation of usedPercent on some paths.
+    // Hash one canonical value so raw and persisted snapshots compare equally.
+    remainingPercent: Number.isFinite(Number(window.usedPercent))
+      ? Math.max(0, 100 - Number(window.usedPercent))
+      : Number.isFinite(Number(window.remainingPercent)) ? Number(window.remainingPercent) : null,
+    resetsAt: numericEpoch(window.resetsAt),
+  } : null;
+  return JSON.stringify({
+    account: accountIdentity(snapshot?.account),
+    primary: windowKey(limits.primary),
+    secondary: windowKey(limits.secondary),
+    rateLimitReachedType: String(envelope.rateLimitReachedType ?? limits.rateLimitReachedType ?? "").trim() || null,
+    spendControlReached: envelope.spendControlReached === true || limits.spendControlReached === true,
+  });
+}
+
+function usageCapacityResetAt(snapshot) {
+  const envelope = snapshot?.rateLimits ?? {};
+  const limits = envelope?.rateLimits ?? envelope;
+  return [limits.primary, limits.secondary]
+    .map((limit) => numericEpoch(limit?.resetsAt))
+    .filter((resetAt) => resetAt && resetAt > Date.now() / 1000)
+    .sort((a, b) => a - b)[0] ?? null;
+}
+
 export function isUsageLimitError(error) {
   if (error?.status === 429) { return true; }
   const rawCode = error?.code ?? error?.error ?? error?.codex_error_info;
@@ -118,6 +164,7 @@ export function usageRetryTrigger(event, data) {
       provider: data.provider,
       threadId: data.threadId,
       triggerId: String(data.terminalId),
+      terminalId: String(data.terminalId),
     } : null;
   }
 
@@ -130,6 +177,7 @@ export function usageRetryTrigger(event, data) {
     provider: data.provider,
     threadId,
     triggerId: `${data.provider}:${terminalId}`,
+    terminalId: String(terminalId),
   } : null;
 }
 
@@ -195,6 +243,45 @@ export class UsageRetryStore {
       .filter((entry) => (!provider || entry.provider === provider) && (!threadId || entry.threadId === threadId) && (!activeOnly || BLOCKING_STATES.has(entry.state)))
       .sort((a, b) => b.updatedAt - a.updatedAt)
       .map((entry) => structuredClone(entry));
+  }
+
+  findByDispatchedTurn(provider, threadId, turnId) {
+    const expected = clip(turnId, 300);
+    if (!expected) { return null; }
+    const candidates = [...this.entries.values()].filter((candidate) =>
+      candidate.provider === provider && candidate.threadId === threadId
+      && candidate.state === "accepted"
+    ).sort((a, b) => b.updatedAt - a.updatedAt);
+    // Provider ids are not comparable across every source (a native turn id vs
+    // a watched-record id), and some providers omit one entirely. Prefer an
+    // exact match, then conservatively fold the terminal into the newest
+    // accepted auto-resume. Delaying is safer than creating duplicate Continue.
+    const entry = candidates.find((candidate) => candidate.dispatchedTurnId === expected)
+      ?? candidates.find((candidate) => this.now() - candidate.updatedAt <= ACCEPTED_REARM_WINDOW_MS);
+    return entry ? structuredClone(entry) : null;
+  }
+
+  rearmDispatchedTurn(provider, threadId, turnId, { requestId, triggerId, progressGuard, nextCheckAt } = {}) {
+    const prior = this.findByDispatchedTurn(provider, threadId, turnId);
+    if (!prior) { return null; }
+    const blocking = [...this.entries.values()].find((candidate) =>
+      candidate.id !== prior.id && candidate.provider === provider && candidate.threadId === threadId
+      && BLOCKING_STATES.has(candidate.state)
+    );
+    if (blocking) { return structuredClone(blocking); }
+    const nextRequestId = clip(requestId, 200);
+    if (!nextRequestId || !progressGuard) { throw retryError("requestId and progressGuard are required to re-arm usage resume"); }
+    return this.update(prior.id, {
+      state: "waiting_usage",
+      requestId: nextRequestId,
+      triggerId: clip(triggerId, 300),
+      progressGuard,
+      nextCheckAt: Number(nextCheckAt) || this.now(),
+      rejectedCapacityKey: prior.capacityKey ?? null,
+      rejectedResetAt: prior.capacityResetAt ?? null,
+      dispatchedTurnId: null,
+      error: { message: "The provider still reports this account is out of usage", code: "usage_still_exhausted", status: 429 },
+    });
   }
 
   create(input = {}) {
@@ -352,6 +439,7 @@ export class UsageRetryRunner {
           error: capacity.reason ? { message: capacity.reason, code: "usage_unavailable", status: null } : null,
         }));
       }
+      const capacityKey = usageCapacityKey(usage);
 
       // Live turn/started events are an optimization, not the safety boundary.
       // A bridge restart or an externally-owned turn can make us miss that
@@ -387,6 +475,18 @@ export class UsageRetryRunner {
             error: null,
           }));
         }
+      }
+
+      const unchangedCapacity = entry.rejectedCapacityKey && entry.rejectedCapacityKey === capacityKey;
+      const resetPassed = numericEpoch(entry.rejectedResetAt) && numericEpoch(entry.rejectedResetAt) * 1000 <= now;
+      if (unchangedCapacity && !resetPassed) {
+        return this.publish(this.store.update(id, {
+          state: "waiting_usage",
+          nextCheckAt: now + this.pollMs,
+          resetAt: entry.rejectedResetAt ?? capacity.resetAt,
+          account: usage?.account ?? null,
+          error: { message: "Waiting for this account's usage state to change", code: "usage_unchanged", status: null },
+        }));
       }
 
       let runtime;
@@ -434,14 +534,17 @@ export class UsageRetryRunner {
         nextCheckAt: null,
         resetAt: null,
         account: usage?.account ?? null,
+        capacityKey,
+        capacityResetAt: usageCapacityResetAt(usage),
         error: null,
         attempts: Number(entry.attempts ?? 0) + 1,
       });
       this.publish(entry);
 
       try {
-        await this.send(entry);
-        return this.publish(this.store.update(id, { state: "accepted", nextCheckAt: null, error: null }));
+        const result = await this.send(entry);
+        const dispatchedTurnId = clip(result?.turn?.id ?? result?.turnId, 300);
+        return this.publish(this.store.update(id, { state: "accepted", nextCheckAt: null, error: null, dispatchedTurnId }));
       } catch (error) {
         if (isUsageLimitError(error)) {
           let progress;
@@ -459,6 +562,8 @@ export class UsageRetryRunner {
             nextCheckAt: this.now() + this.pollMs,
             error: publicError(error),
             progressGuard: progress,
+            rejectedCapacityKey: entry.capacityKey ?? null,
+            rejectedResetAt: entry.capacityResetAt ?? null,
           }));
         }
         if (error?.code === "model_verification_failed") {

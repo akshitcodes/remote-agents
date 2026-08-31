@@ -979,8 +979,33 @@ export async function reconcileUserIntent(provider, threadId, baseline, text) {
   return { state: matched ? "accepted" : "unconfirmed", progress: userProgressFromThread(full) };
 }
 
-async function autoQueueUsageResume({ provider: providerName, threadId, triggerId }) {
+const autoQueueUsageLocks = new Map();
+
+async function autoQueueUsageResumeInner({ provider: providerName, threadId, triggerId, terminalId = null }) {
   if (!usageRetryPolicies.get(providerName, threadId).enabled) { return null; }
+  const prior = terminalId ? usageRetryStore.findByDispatchedTurn(providerName, threadId, terminalId) : null;
+  if (prior) {
+    let progressGuard;
+    try {
+      progressGuard = await threadUserProgress(pickProvider(providerName), threadId);
+    } catch (error) {
+      // Delivery was already accepted. A transient transcript read cannot turn
+      // that fact into failure or justify another automatic send.
+      const unreadable = usageRetryStore.update(prior.id, {
+        error: { message: `Could not verify thread progress: ${error?.message ?? error}`, code: "thread_progress_unavailable", status: error?.status ?? null },
+      });
+      publishUsageRetry(unreadable);
+      return unreadable;
+    }
+    const waiting = usageRetryStore.rearmDispatchedTurn(providerName, threadId, terminalId, {
+      requestId: `usage-resume:${randomUUID()}`,
+      triggerId,
+      progressGuard,
+      nextCheckAt: Date.now() + 60_000,
+    });
+    if (waiting) { publishUsageRetry(waiting); }
+    return waiting;
+  }
   if (usageRetryStore.list({ provider: providerName, threadId, activeOnly: true }).length) { return null; }
   if (usageRetryStore.list({ provider: providerName, threadId }).some((entry) => entry.triggerId === triggerId)) { return null; }
   const provider = pickProvider(providerName);
@@ -1036,6 +1061,18 @@ async function autoQueueUsageResume({ provider: providerName, threadId, triggerI
   return entry;
 }
 
+async function autoQueueUsageResume(trigger) {
+  const key = metaKey(trigger?.provider, trigger?.threadId);
+  const previous = autoQueueUsageLocks.get(key) ?? Promise.resolve();
+  const current = previous.catch(() => {}).then(() => autoQueueUsageResumeInner(trigger));
+  autoQueueUsageLocks.set(key, current);
+  try {
+    return await current;
+  } finally {
+    if (autoQueueUsageLocks.get(key) === current) { autoQueueUsageLocks.delete(key); }
+  }
+}
+
 function createUsageRetry(provider, body, { triggerId = null, progressGuard = null } = {}) {
   const dispatch = {
     model: body.model,
@@ -1071,7 +1108,7 @@ const usageRetryRunner = new UsageRetryRunner({
       ? provider.threadAccountState(threadId).selectedProfileId
       : "shared";
     const snapshot = selectedProfileId === "shared" ? usageState.merge(provider.name, live) : live;
-    return { ...snapshot, _capacityFresh: live?._fresh?.rateLimits === true };
+    return { ...snapshot, _capacityFresh: live?._fresh?.rateLimits === true && live?._fresh?.account === true };
   },
   readRuntime: async (providerName, threadId) => {
     const provider = pickProvider(providerName);

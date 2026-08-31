@@ -328,6 +328,9 @@ test("a pending account switch cannot queue a turn through the old account holde
     provider.queueList({ threadId: "thread-switching" }),
     (error) => error.status === 409 && error.code === "codex_thread_account_switch_pending",
   );
+  const usage = await provider.usageForThread("thread-switching", { refresh: true });
+  assert.equal(usage._fresh.account, false);
+  assert.equal(usage._fresh.rateLimits, false);
   assert.equal(writes, 0);
 });
 

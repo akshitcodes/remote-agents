@@ -65,6 +65,8 @@ function mergeRateLimits(previous, incoming) {
     ...previous,
     ...incoming,
     rateLimits: {
+      ...previousLimits,
+      ...incomingLimits,
       primary: incomingLimits.primary ? { ...previousLimits.primary, ...incomingLimits.primary } : previousLimits.primary ?? null,
       secondary: incomingLimits.secondary ? { ...previousLimits.secondary, ...incomingLimits.secondary } : previousLimits.secondary ?? null,
     },
