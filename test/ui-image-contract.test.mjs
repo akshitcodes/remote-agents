@@ -80,7 +80,13 @@ test("composer scratch text and saved prompt drafts are thread scoped", () => {
   assert.match(html, /async function openThread\(t\) \{\s*saveComposerDraft\(\);[\s\S]*?resetActivityGroup\(\)/);
   assert.match(html, /restoreComposerDraft\(t\)/);
   assert.match(html, /window\.addEventListener\("pagehide", saveComposerDraft\)/);
-  assert.match(html, /id="draftBtn"/);
+  assert.match(html, /id="draftStrip"/);
+  assert.match(html, /id="saveDraftAction"/);
+  assert.match(html, /openSendActionsSheet/);
+  assert.match(html, /sendHoldTimer = setTimeout/);
+  assert.match(html, /const canSend = hasMessage && !\$\('sendBtn'\)\.disabled/);
+  assert.match(html, /\$\("sendActions"\)\.title = readiness\.ready/);
+  assert.doesNotMatch(html, /id="draftBtn"/);
   assert.match(html, /Save current message as draft/);
   assert.match(html, /Queue all/);
   assert.match(html, /Steer all/);
@@ -406,8 +412,11 @@ test("composer settings fail closed and distinguish confirmed values from next-t
   assert.match(html, /saveThreadSettings\(recoverPair, \{ pending: false \}\)/);
   assert.match(html, /!materializedMode\.unknown && !materializedMode\.providerExact/);
   assert.match(html, /if \(selection\) \{[\s\S]*?syncControls\(\);[\s\S]*?if \(flush\) \{ flushPending\(\); \}/);
-  assert.match(html, /id="modelCtl" aria-label="Select model"><b id="modelName"/);
-  assert.match(html, /id="effortCtl" aria-label="Select reasoning effort"><b id="effortName"/);
+  assert.match(html, /id="modelEffortCtl" aria-label="Select model and reasoning effort"><b id="modelName"/);
+  assert.match(html, /function openModelEffortSheet\(\)/);
+  assert.match(html, /openModelSheet\(true\)/);
+  assert.match(html, /openEffortSheet\(true\)/);
+  assert.doesNotMatch(html, /id="modelCtl"|id="effortCtl"/);
   assert.doesNotMatch(html, /id="modelLabel"|id="effortLabel"/);
   assert.match(html, /Requested settings accepted by provider/);
   assert.match(html, /awaiting recorded confirmation/);

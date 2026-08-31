@@ -278,7 +278,7 @@
   #noBtn { background: var(--bg3); color: var(--danger); border: 1px solid var(--danger) !important; }
 
   /* composer + controls */
-  #composerWrap { background: var(--bg2); border-top: 1px solid var(--border); flex-shrink: 0; max-width: 100%; overflow-x: hidden; padding: 8px 10px calc(env(safe-area-inset-bottom) + 8px); }
+  #composerWrap { background: var(--bg2); border-top: 1px solid var(--border); flex-shrink: 0; max-width: 100%; overflow-x: clip; overflow-y: visible; padding: 8px 10px calc(env(safe-area-inset-bottom) + 8px); }
   #composerWrap.dragover { position: relative; outline: 2px solid var(--accent2); outline-offset: -3px; background: #1f6feb18; }
   #composerWrap.dragover::after { content: "Drop images to attach"; position: absolute; inset: 5px; z-index: 8; display: grid; place-items: center; border: 1px dashed var(--accent2); border-radius: 12px; color: var(--accent2); background: #0d1117e8; font-size: 14px; font-weight: 650; pointer-events: none; }
   #controls { display: flex; gap: 7px; margin-bottom: 8px; flex-wrap: wrap; min-width: 0; }
@@ -287,23 +287,29 @@
   .ctl b { color: var(--fg); font-weight: 600; }
   .ctl .ck { color: var(--fg-faint); font-size: 10px; }
   .settings-truth { display: inline-flex; align-items: center; gap: 6px; min-height: 29px; margin-left: auto; color: var(--fg-dim); font-size: 11px; white-space: nowrap; }
+  .settings-truth[hidden] { display: none; }
   .settings-truth::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px #3fb95018; }
   .settings-truth[data-state="loading"]::before { background: var(--warn); animation: pulse 1.3s ease-in-out infinite; }
   .settings-truth[data-state="error"] { color: var(--danger); }
   .settings-truth[data-state="error"]::before { background: var(--danger); box-shadow: 0 0 0 3px #f8514918; }
   .settings-truth[data-state="override"] { color: var(--accent2); }
   .settings-truth[data-state="override"]::before { background: var(--accent2); box-shadow: 0 0 0 3px #58a6ff18; }
-  #composer { display: flex; gap: 8px; align-items: flex-end; min-width: 0; }
-  #input { flex: 1; min-width: 0; background: var(--bg3); border: 1px solid var(--border); color: var(--fg); border-radius: 18px; padding: 9px 14px; font-size: 16px; outline: none; resize: none; max-height: 120px; font-family: inherit; line-height: 1.4; }
-  #sendBtn, #stopBtn, #attachBtn, #draftBtn { width: 38px; height: 38px; border-radius: 50%; border: none; font-size: 17px; cursor: pointer; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
+  #composer { display: flex; gap: 8px; align-items: flex-end; min-width: 0; width: 100%; }
+  #input { flex: 1 1 auto; min-width: 0; min-height: 40px; box-sizing: border-box; background: var(--bg3); border: 1px solid var(--border); color: var(--fg); border-radius: 18px; padding: 9px 14px; font-size: 16px; outline: none; resize: none; max-height: 120px; font-family: inherit; line-height: 1.4; }
+  #sendBtn, #stopBtn, #attachBtn { width: 38px; height: 38px; border-radius: 50%; border: none; font-size: 17px; cursor: pointer; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
   #sendBtn { background: var(--accent); color: #04260f; }
-  #sendBtn:disabled { opacity: .4; }
+  #sendBtn:disabled { opacity: .4; pointer-events: none; }
   #stopBtn { background: var(--danger); color: #fff; display: none; }
-  #attachBtn, #draftBtn { background: var(--bg3); color: var(--fg-dim); border: 1px solid var(--border); }
+  #attachBtn { background: var(--bg3); color: var(--fg-dim); border: 1px solid var(--border); }
   #attachBtn:disabled { opacity: .35; }
-  #draftBtn { position: relative; font-size: 16px; }
-  #draftCount { display: none; position: absolute; right: -4px; top: -5px; min-width: 17px; height: 17px; padding: 0 4px; border-radius: 9px; align-items: center; justify-content: center; background: var(--accent2); color: #07111d; border: 2px solid var(--bg2); font-size: 10px; font-weight: 750; }
-  #draftCount.on { display: inline-flex; }
+  #draftStrip { display: none; width: max-content; max-width: 100%; margin: 0 0 7px 46px; border: 0; border-radius: 8px; padding: 4px 9px; background: var(--bg3); color: var(--fg-dim); font-size: 11px; cursor: pointer; }
+  #draftStrip.on { display: block; }
+  #sendActions { position: relative; flex: 0 0 38px; touch-action: manipulation; -webkit-touch-callout: none; user-select: none; }
+  #sendActions #sendBtn { position: relative; z-index: 2; }
+  .send-popover { display: none; position: absolute; z-index: 12; right: 0; bottom: calc(100% - 2px); min-width: 132px; padding: 5px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg3); box-shadow: 0 10px 28px #0008; }
+  .send-popover button { width: 100%; border: 0; border-radius: 7px; padding: 8px 9px; background: transparent; color: var(--fg); font-size: 12px; text-align: left; cursor: pointer; }
+  .send-popover button:hover { background: var(--bg2); }
+  @media (hover: hover) and (pointer: fine) { #sendActions:hover .send-popover, #sendActions:focus-within .send-popover { display: block; } }
   .draft-list { display: grid; gap: 9px; margin-top: 12px; }
   .draft-card { padding: 11px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg3); }
   .draft-text { color: var(--fg); font-size: 13px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 86px; overflow: hidden; }
@@ -372,6 +378,8 @@
   .sheet .seclabel { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--fg-faint); margin: 16px 0 8px; font-family: ui-monospace, Menlo, monospace; }
   .primary-btn { width: 100%; background: var(--accent); color: #04260f; border: none; border-radius: 11px; padding: 13px; font-size: 15px; font-weight: 600; cursor: pointer; margin-top: 14px; }
   .primary-btn:disabled { opacity: .4; }
+  .secondary-btn { width: 100%; margin-top: 8px; border: 1px solid var(--border); border-radius: 11px; padding: 12px; background: var(--bg3); color: var(--fg); font: inherit; font-weight: 600; cursor: pointer; }
+  .secondary-btn:disabled { opacity: .4; }
   .field-input { width: 100%; background: var(--bg3); border: 1px solid var(--border); color: var(--fg); border-radius: 10px; padding: 10px 12px; font-size: 16px; outline: none; }
   .sheet.new-session-host { height: min(82dvh, 680px); overflow: hidden; display: flex; flex-direction: column; }
   .sheet.new-session-host #sheetBody { flex: 1; min-height: 0; }
@@ -628,21 +636,23 @@
     </div>
     <div id="composerWrap">
       <div id="controls">
-        <button class="ctl" id="modelCtl" aria-label="Select model"><b id="modelName">—</b> <span class="ck">▾</span></button>
-        <button class="ctl" id="effortCtl" aria-label="Select reasoning effort"><b id="effortName">—</b> <span class="ck">▾</span></button>
+        <button class="ctl" id="modelEffortCtl" aria-label="Select model and reasoning effort"><b id="modelName">—</b><span aria-hidden="true">·</span><b id="effortName">—</b> <span class="ck">▾</span></button>
         <button class="ctl" id="modeCtl"><span id="modeName">Agent</span> <span class="ck">▾</span></button>
         <button class="ctl" id="steerCtl"><span>Send</span> <b id="steerName">Queue</b> <span class="ck">▾</span></button>
         <button class="ctl" id="lockCtl" style="display:none"><span>Lock</span> <b id="lockName">Not held here</b> <span class="ck">▾</span></button>
         <span class="settings-truth" id="settingsTruth" data-state="loading" role="status">Checking settings…</span>
       </div>
       <div id="attachmentStrip"></div>
+      <button id="draftStrip" type="button" aria-label="Open saved drafts"></button>
       <div id="composer">
         <input id="imageInput" type="file" accept="image/*" multiple hidden>
         <button id="attachBtn" aria-label="Attach images" title="Attach images">＋</button>
-        <button id="draftBtn" aria-label="Drafts" title="Drafts">▱<span id="draftCount"></span></button>
         <textarea id="input" rows="1" placeholder="Message Codex…"></textarea>
         <button id="stopBtn" aria-label="Stop">■</button>
-        <button id="sendBtn" aria-label="Send">➤</button>
+        <div id="sendActions">
+          <button id="sendBtn" aria-label="Send">➤</button>
+          <div class="send-popover" id="sendPopover"><button type="button" id="saveDraftAction">Save as draft</button></div>
+        </div>
       </div>
     </div>
   </main>
@@ -3621,12 +3631,12 @@ function writeDraftsForActiveThread(rows) {
 
 function syncDraftButton() {
   const count = draftsForActiveThread().length;
-  const badge = $('draftCount');
-  if (!badge) { return; }
-  badge.textContent = count > 99 ? "99+" : String(count);
-  badge.classList.toggle("on", count > 0);
-  $('draftBtn').title = count ? `${count} saved draft${count === 1 ? "" : "s"}` : "Save or open drafts";
-  $('draftBtn').setAttribute('aria-label', count ? `Drafts, ${count} saved` : 'Drafts');
+  const strip = $('draftStrip');
+  if (!strip) { return; }
+  strip.textContent = `${count} draft${count === 1 ? "" : "s"}`;
+  strip.classList.toggle("on", count > 0);
+  strip.title = count ? `Open ${count} saved draft${count === 1 ? "" : "s"}` : "";
+  strip.setAttribute('aria-label', count ? `Open ${count} saved draft${count === 1 ? "" : "s"}` : 'No saved drafts');
 }
 
 function saveCurrentAsDraft() {
@@ -5207,7 +5217,7 @@ async function answerApproval(decision) {
 
 // ---------- sheets ----------
 function openSheet(html) {
-  state.sheetReturnFocus = document.activeElement;
+  if (!$("sheet").classList.contains("show")) { state.sheetReturnFocus = document.activeElement; }
   $("sheet").removeAttribute("inert");
   $("app").setAttribute("inert", "");
   $("sheet").classList.remove("new-session-host");
@@ -5919,7 +5929,7 @@ async function openLockSheet() {
   if (state.active && activeProvider() === "codex" && isLockSheetOpen()) { renderLockSheet(); }
 }
 
-function openModelSheet() {
+function openModelSheet(returnToPair = false) {
   const html = state.models.filter((m) => !m.hidden).map((m) => `
     <button type="button" class="opt opt-button ${m.id === state.model ? "sel" : ""}" data-model="${m.id}">
       <div class="radio"></div>
@@ -5927,11 +5937,11 @@ function openModelSheet() {
     </button>`).join("");
   openSheet(`<h2>Model</h2><div class="hint">Which model runs your next message.</div>${html}`);
   $("sheetBody").querySelectorAll("[data-model]").forEach((el) => {
-    el.onclick = () => { setModel(el.dataset.model); closeSheet(); };
+    el.onclick = () => { setModel(el.dataset.model); returnToPair ? openModelEffortSheet() : closeSheet(); };
   });
 }
 
-function openEffortSheet() {
+function openEffortSheet(returnToPair = false) {
   const m = currentModel();
   const efforts = [...(m?.supportedReasoningEfforts ?? [])];
 
@@ -5955,9 +5965,19 @@ function openEffortSheet() {
       persistPrefs();
       saveThreadSettings().catch((e) => chip("⚠️", "Could not save thread settings: " + e.message));
       syncControls();
-      closeSheet();
+      returnToPair ? openModelEffortSheet() : closeSheet();
     };
   });
+}
+
+function openModelEffortSheet() {
+  const model = currentModel();
+  const effort = state.effort === "provider-default" ? "Provider default" : (state.effort || "Unavailable");
+  openSheet(`<h2>Model and effort</h2>
+    <button type="button" class="opt opt-button" id="chooseModel"><div><div class="od">Model</div><div class="on">${esc(model?.displayName || state.model || "Unavailable")}</div></div><span class="ck">›</span></button>
+    <button type="button" class="opt opt-button" id="chooseEffort"><div><div class="od">Effort</div><div class="on">${esc(effort)}</div></div><span class="ck">›</span></button>`);
+  $('chooseModel').onclick = () => openModelSheet(true);
+  $('chooseEffort').onclick = () => openEffortSheet(true);
 }
 
 function openModeSheet() {
@@ -6051,16 +6071,19 @@ function syncControls() {
   const imagesSupported = supportsInput("image");
   $("attachBtn").disabled = !imagesSupported || state.uploadingAttachments > 0;
   $("attachBtn").title = imagesSupported ? "Attach images" : `${providerLabel()} does not advertise image prompt support`;
-  $("modelCtl").title = state.model === "provider-default" ? "Let the provider select its current default model" : (state.model ? `Exact provider model ID: ${state.model}` : readiness.reason);
-  $("effortCtl").title = state.effort === "provider-default" ? "Let the provider select its current default effort" : (state.effort ? `Exact reasoning effort: ${state.effort}` : readiness.reason);
+  $("modelEffortCtl").title = readiness.ready
+    ? `${m?.displayName || state.model} · ${state.effort === "provider-default" ? "Provider default" : state.effort}`
+    : readiness.reason;
   $("modeCtl").title = currentMode().unknown
     ? readiness.reason
     : (currentMode().providerExact ? currentMode().desc : `Exact permission preset: ${currentMode().key}`);
   $("settingsTruth").dataset.state = truth.state;
   $("settingsTruth").textContent = truth.message;
   $("settingsTruth").title = `Model: ${state.model || "unavailable"} · Effort: ${state.effort || "unavailable"} · Mode: ${currentMode().key || "unavailable"}`;
+  $("settingsTruth").hidden = truth.state !== "loading" && truth.state !== "error";
   $("sendBtn").disabled = state.uploadingAttachments > 0 || !readiness.ready;
   $("sendBtn").title = readiness.ready ? "Send with the exact settings shown" : readiness.reason;
+  $("sendActions").title = readiness.ready ? "" : readiness.reason;
   syncLockControl();
 }
 
@@ -7421,12 +7444,34 @@ async function initModels(provider = state.provider, threadId = null) {
 $("backBtn").onclick = backToList;
 $("sidebarToggleBtn").onclick = () => toggleSidebar();
 $("loadMore").onclick = () => loadThreads(true);
+let sendHoldTimer = null;
+function openSendActionsSheet() {
+  const hasMessage = !!$('input').value.trim() || state.composerAttachments.length > 0;
+  const canSend = hasMessage && !$('sendBtn').disabled;
+  openSheet(`<h2>Message action</h2>
+    <button type="button" class="primary-btn" id="sendActionNow"${canSend ? "" : " disabled"}>Send</button>
+    <button type="button" class="secondary-btn" id="saveActionDraft"${hasMessage ? "" : " disabled"}>Save as draft</button>`);
+  $('sendActionNow').onclick = () => { closeSheet(); send(); };
+  $('saveActionDraft').onclick = () => { if (saveCurrentAsDraft()) { closeSheet(); } };
+}
 $("sendBtn").onclick = send;
+$("sendActions").addEventListener("pointerdown", (event) => {
+  if (event.pointerType === "mouse") { return; }
+  clearTimeout(sendHoldTimer);
+  sendHoldTimer = setTimeout(() => {
+    navigator.vibrate?.(15);
+    openSendActionsSheet();
+  }, 500);
+});
+for (const eventName of ["pointerup", "pointercancel", "pointerleave"]) {
+  $("sendActions").addEventListener(eventName, () => { clearTimeout(sendHoldTimer); sendHoldTimer = null; });
+}
+$("saveDraftAction").onclick = () => saveCurrentAsDraft();
 $("attachBtn").onclick = () => {
   if (!supportsInput("image")) { chip("⚠️", `${providerLabel()} does not advertise image prompt support`); return; }
   $("imageInput").click();
 };
-$("draftBtn").onclick = openDraftsSheet;
+$("draftStrip").onclick = openDraftsSheet;
 $("imageInput").onchange = () => uploadImages($("imageInput").files);
 let composerDragDepth = 0;
 const composerWrap = $("composerWrap");
@@ -7479,8 +7524,7 @@ $("stopBtn").onclick = stopAgent;
 $("okBtn").onclick = () => answerApproval("approve");
 $("sessBtn").onclick = () => answerApproval("session");
 $("noBtn").onclick = () => answerApproval("deny");
-$("modelCtl").onclick = openModelSheet;
-$("effortCtl").onclick = openEffortSheet;
+$("modelEffortCtl").onclick = openModelEffortSheet;
 $("modeCtl").onclick = openModeSheet;
 $("steerCtl").onclick = openSendModeSheet;
 $("lockCtl").onclick = openLockSheet;
