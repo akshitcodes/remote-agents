@@ -33,6 +33,26 @@ function clip(value, max) {
   return text && text.length <= max ? text : null;
 }
 
+export function userProgressFromThread(full) {
+  const users = (full?.thread?.turns ?? [])
+    .flatMap((turn) => turn.items ?? [])
+    .filter((item) => item?.type === "userMessage");
+  const last = users.at(-1);
+  return {
+    userCount: users.length,
+    lastUserId: last?.id ? String(last.id).slice(0, 300) : null,
+  };
+}
+
+function progressRelation(guard, current) {
+  const before = Number(guard?.userCount);
+  const after = Number(current?.userCount);
+  if (!Number.isSafeInteger(before) || !Number.isSafeInteger(after) || before < 0 || after < before) { return "unreadable"; }
+  if (after > before) { return "advanced"; }
+  if (guard?.lastUserId && current?.lastUserId && guard.lastUserId !== current.lastUserId) { return "unreadable"; }
+  return "same";
+}
+
 function numericEpoch(value) {
   const epoch = Number(value);
   return Number.isFinite(epoch) && epoch > 0 ? epoch : null;
@@ -137,6 +157,15 @@ export class UsageRetryStore {
         row.error = { message: "Bridge restarted while sending; check the thread before retrying", code: "delivery_uncertain", status: 504 };
         repaired = true;
       }
+      // A previous build did not record transcript progress. It cannot safely
+      // distinguish a still-needed Continue from one already supplied by the
+      // user while the bridge was down, so never dispatch that legacy intent.
+      if (CHECKABLE_STATES.has(row.state) && !row.progressGuard) {
+        row.state = "failed";
+        row.nextCheckAt = null;
+        row.error = { message: "Auto-resume must be armed again after this update", code: "progress_guard_missing", status: 409 };
+        repaired = true;
+      }
       // Older builds incorrectly made some pre-dispatch settings/probe failures
       // terminal. Probe failures are safe only at attempts=0. A permission-mode
       // mismatch is also safe after the old runner incremented attempts because
@@ -144,7 +173,7 @@ export class UsageRetryStore {
       const safelyPreDispatch = row.error?.code === "permission_mode_mismatch"
         || (Number(row.attempts ?? 0) === 0
           && ["model_verification_failed", "model_unavailable", "effort_unavailable"].includes(row.error?.code));
-      if (row.state === "failed" && safelyPreDispatch) {
+      if (row.state === "failed" && safelyPreDispatch && row.progressGuard) {
         row.state = "waiting_provider";
         row.nextCheckAt = this.now();
         repaired = true;
@@ -192,6 +221,7 @@ export class UsageRetryStore {
       id, provider, threadId, requestId, text,
       triggerId,
       dispatch: structuredClone(input.dispatch ?? {}),
+      progressGuard: input.progressGuard ? structuredClone(input.progressGuard) : null,
       state: "waiting_usage",
       createdAt: now,
       updatedAt: now,
@@ -266,12 +296,13 @@ export class UsageRetryStore {
 }
 
 export class UsageRetryRunner {
-  constructor({ store, now = () => Date.now(), readUsage, readRuntime, prepare = async (entry) => entry.dispatch, send, onUpdate = () => {}, pollMs = 60_000 } = {}) {
+  constructor({ store, now = () => Date.now(), readUsage, readRuntime, readProgress = async () => null, prepare = async (entry) => entry.dispatch, send, onUpdate = () => {}, pollMs = 60_000 } = {}) {
     if (!store || !readUsage || !readRuntime || !send) { throw new Error("usage retry runner requires store, readUsage, readRuntime, and send"); }
     this.store = store;
     this.now = now;
     this.readUsage = readUsage;
     this.readRuntime = readRuntime;
+    this.readProgress = readProgress;
     this.prepare = prepare;
     this.send = send;
     this.onUpdate = onUpdate;
@@ -322,6 +353,42 @@ export class UsageRetryRunner {
         }));
       }
 
+      // Live turn/started events are an optimization, not the safety boundary.
+      // A bridge restart or an externally-owned turn can make us miss that
+      // event. Any durable user-message change since the usage failure means
+      // the user already resumed the thread, so this fallback is obsolete.
+      if (entry.progressGuard) {
+        let progress;
+        try {
+          progress = await this.readProgress(entry.provider, entry.threadId);
+        } catch (error) {
+          const current = this.store.get(id);
+          if (!current || !CHECKABLE_STATES.has(current.state)) { return current; }
+          return this.publish(this.store.update(id, {
+            state: "waiting_thread",
+            nextCheckAt: now + this.pollMs,
+            error: publicError(error),
+          }));
+        }
+        entry = this.store.get(id);
+        if (!entry || !CHECKABLE_STATES.has(entry.state)) { return entry; }
+        const relation = progressRelation(entry.progressGuard, progress);
+        if (relation === "unreadable") {
+          return this.publish(this.store.update(id, {
+            state: "waiting_thread",
+            nextCheckAt: now + this.pollMs,
+            error: { message: "Thread progress could not be verified yet", code: "thread_progress_unavailable", status: null },
+          }));
+        }
+        if (relation === "advanced") {
+          return this.publish(this.store.update(id, {
+            state: "superseded",
+            nextCheckAt: null,
+            error: null,
+          }));
+        }
+      }
+
       let runtime;
       try {
         runtime = await this.readRuntime(entry.provider, entry.threadId);
@@ -348,7 +415,9 @@ export class UsageRetryRunner {
 
       try {
         const dispatch = await this.prepare(entry);
-        entry = this.store.update(id, { dispatch: dispatch ?? entry.dispatch, error: null });
+        const current = this.store.get(id);
+        if (!current || !CHECKABLE_STATES.has(current.state)) { return current; }
+        entry = this.store.update(id, { dispatch: dispatch ?? current.dispatch, error: null });
       } catch (error) {
         const current = this.store.get(id);
         if (!current || !CHECKABLE_STATES.has(current.state)) { return current; }
@@ -375,10 +444,21 @@ export class UsageRetryRunner {
         return this.publish(this.store.update(id, { state: "accepted", nextCheckAt: null, error: null }));
       } catch (error) {
         if (isUsageLimitError(error)) {
+          let progress;
+          try {
+            progress = await this.readProgress(entry.provider, entry.threadId);
+          } catch (progressError) {
+            return this.publish(this.store.update(id, {
+              state: "failed",
+              nextCheckAt: null,
+              error: publicError(progressError),
+            }));
+          }
           return this.publish(this.store.update(id, {
             state: "waiting_usage",
             nextCheckAt: this.now() + this.pollMs,
             error: publicError(error),
+            progressGuard: progress,
           }));
         }
         if (error?.code === "model_verification_failed") {

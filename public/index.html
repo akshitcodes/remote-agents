@@ -4339,6 +4339,7 @@ function flushPending() {
 // message that never landed. Without this, the bubble and its Retry button are
 // destroyed moments after they appear and the typed text is lost.
 const FAILED_SENDS_KEY = "cxp_failed_sends";
+const automaticDeliveryChecks = new Map();
 
 function saveFailedSends() {
   try { localStorage.setItem(FAILED_SENDS_KEY, JSON.stringify(state.failedSends.slice(-200))); } catch {}
@@ -4353,7 +4354,7 @@ function loadFailedSends() {
 
 function recordFailedSend(threadId, text, requestId, provider = activeProvider(), attachments = [], retryWithNewId = false, errorMessage = null) {
   dropFailedSend(requestId);
-  state.failedSends.push({ provider, threadId, text, requestId, attachments, retryWithNewId, errorMessage: cleanFailureReason(errorMessage) });
+  state.failedSends.push({ provider, threadId, text, requestId, attachments, retryWithNewId, errorMessage: cleanFailureReason(errorMessage), createdAt: Date.now() });
   saveFailedSends();
 }
 
@@ -4382,10 +4383,30 @@ function restoreFailedSends() {
         bubble.remove();
       },
     });
+    // Most "uncertain" browser failures are only a lost HTTP response. Ask the
+    // durable bridge ledger automatically instead of making the user press
+    // Check delivery just to clear a message that was already accepted.
+    if (f.retryWithNewId) { autoCheckStandaloneDelivery(f, bubble, 250); }
   }
 }
 
-async function checkStandaloneDelivery(failed, bubble) {
+function autoCheckStandaloneDelivery(failed, bubble, delay = 0) {
+  if (automaticDeliveryChecks.has(failed.requestId)) { return; }
+  automaticDeliveryChecks.set(failed.requestId, 0);
+  const check = async () => {
+    const attempt = (automaticDeliveryChecks.get(failed.requestId) ?? 0) + 1;
+    automaticDeliveryChecks.set(failed.requestId, attempt);
+    try {
+      const state = await checkStandaloneDelivery(failed, bubble, { announce: false });
+      if (state === "dispatching" && attempt < 5) { setTimeout(check, Math.min(4000, 500 * (2 ** attempt))); }
+    } catch {
+      if (attempt < 5) { setTimeout(check, Math.min(5000, 1000 * (2 ** attempt))); }
+    }
+  };
+  setTimeout(check, delay);
+}
+
+async function checkStandaloneDelivery(failed, bubble, { announce = true } = {}) {
   const query = new URLSearchParams({
     provider: failed.provider || activeProvider(),
     method: "send",
@@ -4398,7 +4419,7 @@ async function checkStandaloneDelivery(failed, bubble) {
     dropFailedSend(failed.requestId);
     markSendFailed(bubble, null);
     scheduleExternalRefresh();
-    return;
+    return result.state;
   }
 
   if (result.state === "failed") {
@@ -4410,7 +4431,7 @@ async function checkStandaloneDelivery(failed, bubble) {
       bubble,
       requestId: failed.requestId,
     }), { reason: failed.errorMessage, onDismiss: () => { dropFailedSend(failed.requestId); bubble.remove(); } });
-    return;
+    return result.state;
   }
 
   failed.retryWithNewId = true;
@@ -4422,9 +4443,12 @@ async function checkStandaloneDelivery(failed, bubble) {
     onDismiss: () => { dropFailedSend(failed.requestId); bubble.remove(); },
   });
 
-  chip("⚠️", result.state === "not_found"
-    ? "The bridge no longer has proof of delivery. It was not resent, so this app cannot create a duplicate."
-    : "Delivery is still uncertain. It was not resent, so this app cannot create a duplicate.");
+  if (announce) {
+    chip("⚠️", result.state === "not_found"
+      ? "The bridge no longer has proof of delivery. It was not resent, so this app cannot create a duplicate."
+      : "Delivery is still uncertain. It was not resent, so this app cannot create a duplicate.");
+  }
+  return result.state;
 }
 
 function startSendProgress(requestId, threadId, text, bubble) {
@@ -4687,6 +4711,10 @@ async function doSend(text, { attachments = [], bubble, requestId, pendingEntry 
           bubble.remove();
         },
       });
+      if (uncertain) {
+        const failed = state.failedSends.find((entry) => entry.requestId === id);
+        if (failed) { autoCheckStandaloneDelivery(failed, bubble, 1200); }
+      }
     }
 
     if (!bubble) { chip("⚠️", "send failed: " + e.message); }

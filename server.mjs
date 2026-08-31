@@ -27,7 +27,7 @@ import { SendLedger } from "./send-ledger.mjs";
 import { ThreadSubscriptions } from "./thread-subscriptions.mjs";
 import { pruneAttachments, readAttachment, resolveAttachmentIds, storeAttachment } from "./attachments.mjs";
 import { UsageStateStore } from "./usage-state.mjs";
-import { usageRetryTrigger, UsageRetryPolicyStore, UsageRetryRunner, UsageRetryStore } from "./usage-retry.mjs";
+import { usageRetryTrigger, userProgressFromThread, UsageRetryPolicyStore, UsageRetryRunner, UsageRetryStore } from "./usage-retry.mjs";
 import { captureReplyStart, notificationBody, notificationTitle } from "./notification-content.mjs";
 import { localBridgeProof, localControlProofMatches, validLocalProofNonce } from "./local-proof.mjs";
 import { TerminalRunner } from "./terminal-runner.mjs";
@@ -841,7 +841,7 @@ function pickProvider(name) {
 
 function publicUsageRetry(entry) {
   if (!entry) { return null; }
-  const { dispatch, ...publicEntry } = entry;
+  const { dispatch, progressGuard, ...publicEntry } = entry;
   return publicEntry;
 }
 
@@ -885,9 +885,12 @@ function maybeAutoQueueUsageResume(event, data) {
   }
   const trigger = usageRetryTrigger(event, data);
   if (!trigger || !usageRetryPolicies.get(trigger.provider, trigger.threadId).enabled) { return; }
-  queueMicrotask(() => autoQueueUsageResume(trigger).catch((error) => {
+  // Start the transcript snapshot in this same provider event callback. Moving
+  // it to a later microtask leaves a window in which a manual Continue can land
+  // before the baseline and then look like old history.
+  autoQueueUsageResume(trigger).catch((error) => {
     console.error("could not queue usage resume:", error);
-  }));
+  });
 }
 
 async function refreshGlobalUsageInterests() {
@@ -941,12 +944,30 @@ async function exactThreadDispatch(provider, threadId) {
   return { ...body, ...dispatch };
 }
 
+async function threadUserProgress(provider, threadId) {
+  const full = await provider.readThread(threadId);
+  return userProgressFromThread(full);
+}
+
 async function autoQueueUsageResume({ provider: providerName, threadId, triggerId }) {
   if (!usageRetryPolicies.get(providerName, threadId).enabled) { return null; }
   if (usageRetryStore.list({ provider: providerName, threadId, activeOnly: true }).length) { return null; }
   if (usageRetryStore.list({ provider: providerName, threadId }).some((entry) => entry.triggerId === triggerId)) { return null; }
   const provider = pickProvider(providerName);
   if (!provider) { return null; }
+  let progressGuard;
+  try {
+    progressGuard = await threadUserProgress(provider, threadId);
+  } catch (error) {
+    const failed = createUsageRetry(provider, { threadId, text: "Continue." }, { triggerId });
+    const terminal = usageRetryStore.update(failed.id, {
+      state: "failed",
+      nextCheckAt: null,
+      error: { message: `Could not verify thread progress: ${error?.message ?? error}`, code: "thread_progress_unavailable", status: error?.status ?? null },
+    });
+    publishUsageRetry(terminal);
+    return terminal;
+  }
   let body;
   try {
     body = await exactThreadDispatch(provider, threadId);
@@ -970,7 +991,7 @@ async function autoQueueUsageResume({ provider: providerName, threadId, triggerI
     // auto-resume intent. Capture the provider-recorded settings without using
     // them until a later model catalog proves the exact combination.
     body = await threadDispatchBody(provider, threadId);
-    const queued = createUsageRetry(provider, body, { triggerId });
+    const queued = createUsageRetry(provider, body, { triggerId, progressGuard });
     const waiting = usageRetryStore.update(queued.id, {
       state: "waiting_provider",
       nextCheckAt: Date.now() + 60_000,
@@ -979,13 +1000,13 @@ async function autoQueueUsageResume({ provider: providerName, threadId, triggerI
     publishUsageRetry(waiting);
     return waiting;
   }
-  const entry = createUsageRetry(provider, body, { triggerId });
+  const entry = createUsageRetry(provider, body, { triggerId, progressGuard });
   publishUsageRetry(entry);
   scheduleUsageRetryCheck(entry.id);
   return entry;
 }
 
-function createUsageRetry(provider, body, { triggerId = null } = {}) {
+function createUsageRetry(provider, body, { triggerId = null, progressGuard = null } = {}) {
   const dispatch = {
     model: body.model,
     effort: body.effort,
@@ -1003,6 +1024,7 @@ function createUsageRetry(provider, body, { triggerId = null } = {}) {
     text: body.text || "Continue.",
     dispatch,
     triggerId,
+    progressGuard,
   });
 }
 
@@ -1025,6 +1047,11 @@ const usageRetryRunner = new UsageRetryRunner({
     const provider = pickProvider(providerName);
     if (!provider) { throw Object.assign(new Error("provider is unavailable"), { status: 409, code: "provider_unavailable" }); }
     return threadRuntime(provider, threadId);
+  },
+  readProgress: async (providerName, threadId) => {
+    const provider = pickProvider(providerName);
+    if (!provider) { throw Object.assign(new Error("provider is unavailable"), { status: 409, code: "provider_unavailable" }); }
+    return threadUserProgress(provider, threadId);
   },
   prepare: async (entry) => {
     const provider = pickProvider(entry.provider);
@@ -2005,8 +2032,9 @@ const routes = {
     // Capture exactly the currently selected turn settings, then re-validate
     // them at dispatch time. A delayed resume must fail closed rather than let
     // any provider silently choose a newer default model or permission mode.
+    const progressGuard = await threadUserProgress(provider, body.threadId);
     const dispatch = await validateSendDispatch(provider, body);
-    const entry = createUsageRetry(provider, { ...body, ...dispatch });
+    const entry = createUsageRetry(provider, { ...body, ...dispatch }, { progressGuard });
     publishUsageRetry(entry);
     scheduleUsageRetryCheck(entry.id);
     json(res, 201, { entry: publicUsageRetry(entry) });

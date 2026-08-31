@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { isUsageLimitError, usageRetryTrigger, UsageRetryPolicyStore, UsageRetryRunner, UsageRetryStore, usageAvailability } from "../usage-retry.mjs";
+import { isUsageLimitError, usageRetryTrigger, userProgressFromThread, UsageRetryPolicyStore, UsageRetryRunner, UsageRetryStore, usageAvailability } from "../usage-retry.mjs";
 
 function fixture(t, name = "retries.json") {
   const dir = mkdtempSync(join(tmpdir(), "remote-agents-usage-retry-"));
@@ -21,6 +21,7 @@ function create(store, input = {}) {
     text: "Continue.",
     dispatch: { model: "gpt-test", effort: "medium", mode: "auto" },
     triggerId: Object.hasOwn(input, "triggerId") ? input.triggerId : "terminal-1",
+    progressGuard: input.progressGuard ?? null,
   });
 }
 
@@ -144,6 +145,109 @@ test("a newer turn supersedes an older pending usage resume but not one already 
   assert.equal(store.get(dispatching.id).state, "dispatching");
 });
 
+test("durable transcript progress supersedes a retry when the live turn-start event was missed", async (t) => {
+  const store = new UsageRetryStore({ file: fixture(t) });
+  create(store, { progressGuard: { userCount: 3, lastUserId: "before-limit" } });
+  let sends = 0;
+  const runner = new UsageRetryRunner({
+    store,
+    readUsage: async () => ({ _capacityFresh: true, rateLimits: { primary: { usedPercent: 1 } } }),
+    readProgress: async () => ({ userCount: 4, lastUserId: "manual-continue" }),
+    readRuntime: async () => ({ running: false }),
+    send: async () => { sends += 1; },
+  });
+
+  assert.equal((await runner.check("resume-1")).state, "superseded");
+  assert.equal(sends, 0);
+});
+
+test("matching durable transcript progress allows one resume", async (t) => {
+  const store = new UsageRetryStore({ file: fixture(t) });
+  create(store, { progressGuard: { userCount: 3, lastUserId: "before-limit" } });
+  let sends = 0;
+  const runner = new UsageRetryRunner({
+    store,
+    readUsage: async () => ({ _capacityFresh: true, rateLimits: { primary: { usedPercent: 1 } } }),
+    readProgress: async () => ({ userCount: 3, lastUserId: "before-limit" }),
+    readRuntime: async () => ({ running: false }),
+    send: async () => { sends += 1; },
+  });
+
+  assert.equal((await runner.check("resume-1")).state, "accepted");
+  assert.equal(sends, 1);
+});
+
+test("normalized provider transcripts produce a stable count-only guard when IDs are absent", () => {
+  assert.deepEqual(userProgressFromThread({ thread: { turns: [
+    { items: [{ type: "userMessage", content: [{ type: "text", text: "one" }] }, { type: "agentMessage", text: "answer" }] },
+    { items: [{ type: "userMessage", content: [{ type: "text", text: "two" }] }] },
+  ] } }), { userCount: 2, lastUserId: null });
+});
+
+test("unreadable or shrinking transcript progress waits and never sends", async (t) => {
+  for (const [label, readProgress] of [
+    ["throws", async () => { throw new Error("temporarily unreadable"); }],
+    ["shrinks", async () => ({ userCount: 2, lastUserId: null })],
+  ]) {
+    const store = new UsageRetryStore({ file: fixture(t, `${label}.json`) });
+    create(store, { id: label, requestId: `${label}-request`, progressGuard: { userCount: 3, lastUserId: null } });
+    let sends = 0;
+    const runner = new UsageRetryRunner({
+      store,
+      readUsage: async () => ({ _capacityFresh: true, rateLimits: { primary: { usedPercent: 1 } } }),
+      readProgress,
+      readRuntime: async () => ({ running: false }),
+      send: async () => { sends += 1; },
+    });
+    assert.equal((await runner.check(label)).state, "waiting_thread");
+    assert.equal(sends, 0);
+  }
+});
+
+test("cancel or supersede during slow settings preparation cannot resurrect a retry", async (t) => {
+  const store = new UsageRetryStore({ file: fixture(t) });
+  create(store, { progressGuard: { userCount: 1, lastUserId: null } });
+  let releasePrepare;
+  let sends = 0;
+  const runner = new UsageRetryRunner({
+    store,
+    readUsage: async () => ({ _capacityFresh: true, rateLimits: { primary: { usedPercent: 1 } } }),
+    readProgress: async () => ({ userCount: 1, lastUserId: null }),
+    readRuntime: async () => ({ running: false }),
+    prepare: () => new Promise((resolve) => { releasePrepare = resolve; }),
+    send: async () => { sends += 1; },
+  });
+  const checking = runner.check("resume-1");
+  while (!releasePrepare) { await new Promise((resolve) => setImmediate(resolve)); }
+  store.cancel("resume-1");
+  releasePrepare({ model: "gpt-test", effort: "medium", mode: "auto" });
+  assert.equal((await checking).state, "cancelled");
+  assert.equal(sends, 0);
+});
+
+test("a confirmed usage rejection refreshes the guard before a later retry", async (t) => {
+  const store = new UsageRetryStore({ file: fixture(t) });
+  create(store, { progressGuard: { userCount: 1, lastUserId: null } });
+  let progressReads = 0;
+  let sends = 0;
+  const runner = new UsageRetryRunner({
+    store,
+    readUsage: async () => ({ _capacityFresh: true, rateLimits: { primary: { usedPercent: 1 } } }),
+    readProgress: async () => progressReads++ === 0
+      ? { userCount: 1, lastUserId: null }
+      : { userCount: 2, lastUserId: null },
+    readRuntime: async () => ({ running: false }),
+    send: async () => {
+      sends += 1;
+      if (sends === 1) { throw Object.assign(new Error("usage limit"), { status: 429, code: "rate_limit" }); }
+    },
+  });
+  assert.equal((await runner.check("resume-1")).state, "waiting_usage");
+  assert.deepEqual(store.get("resume-1").progressGuard, { userCount: 2, lastUserId: null });
+  assert.equal((await runner.check("resume-1")).state, "accepted");
+  assert.equal(sends, 2);
+});
+
 test("runner rechecks the active account, waits for idle, and sends exactly once", async (t) => {
   let now = 1000;
   const store = new UsageRetryStore({ file: fixture(t), now: () => now });
@@ -194,6 +298,17 @@ test("a bridge restart during dispatch becomes durable uncertainty and never sen
   assert.equal(sends, 0);
 });
 
+test("a legacy pending resume without transcript guard is failed closed on upgrade", (t) => {
+  const file = fixture(t);
+  writeFileSync(file, JSON.stringify([{
+    id: "legacy", provider: "codex", threadId: "thread-1", requestId: "request-1",
+    text: "Continue.", dispatch: {}, state: "waiting_usage", nextCheckAt: 1, attempts: 0,
+  }]));
+  const upgraded = new UsageRetryStore({ file, now: () => 1234 });
+  assert.equal(upgraded.get("legacy").state, "failed");
+  assert.equal(upgraded.get("legacy").error.code, "progress_guard_missing");
+});
+
 test("an old pre-dispatch model failure is repaired without risking a duplicate Continue", (t) => {
   const file = fixture(t);
   writeFileSync(file, JSON.stringify([{
@@ -207,6 +322,7 @@ test("an old pre-dispatch model failure is repaired without risking a duplicate 
     attempts: 0,
     nextCheckAt: null,
     error: { code: "model_verification_failed", status: 503, message: "codex app-server exited" },
+    progressGuard: { userCount: 1, lastUserId: null },
   }]));
 
   const repaired = new UsageRetryStore({ file, now: () => 1234 });
@@ -233,6 +349,7 @@ test("old pre-dispatch settings projection failures are safely re-armed", (t) =>
     attempts: 1,
     nextCheckAt: null,
     error: { code: "permission_mode_mismatch", status: 409, message: "low-level fields were dropped" },
+    progressGuard: { userCount: 1, lastUserId: null },
   }]));
 
   const repaired = new UsageRetryStore({ file, now: () => 4321 });

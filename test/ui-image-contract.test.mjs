@@ -17,7 +17,10 @@ test("image references survive queue, steer, send, retry, and reload paths", () 
   assert.match(html, /attachmentIds: \(entry\.attachments \?\? \[\]\)\.map/);
   assert.match(html, /attachmentIds: attachments\.map/);
   assert.match(html, /doSend\(entry\.text, \{ attachments: entry\.attachments/);
-  assert.match(html, /state\.failedSends\.push\(\{ provider, threadId, text, requestId, attachments, retryWithNewId, errorMessage: cleanFailureReason\(errorMessage\) \}\)/);
+  assert.match(html, /state\.failedSends\.push\(\{ provider, threadId, text, requestId, attachments, retryWithNewId, errorMessage: cleanFailureReason\(errorMessage\), createdAt: Date\.now\(\) \}\)/);
+  assert.match(html, /autoCheckStandaloneDelivery\(f, bubble, 250\)/);
+  assert.match(html, /checkStandaloneDelivery\(failed, bubble, \{ announce = true \} = \{\}\)/);
+  assert.doesNotMatch(html, /const freshNotFound = result\.state === "not_found"/);
   assert.match(html, /Steer delivery could not be confirmed/);
   assert.match(html, /retryWithNewId/);
   assert.match(html, /const attachments = imageParts\.map\(\(part\) => part\.attachment \?\? null\)/);
@@ -339,6 +342,7 @@ test("usage-limit auto-resume is explicit, durable, cancellable, and defaults of
   assert.match(html, /es\.addEventListener\("usage-retry"/);
   assert.match(server, /usage-retry-policy\.json/);
   assert.match(server, /setInterval\(\(\) => usageRetryRunner\.tick/);
+  assert.match(server, /const \{ dispatch, progressGuard, \.\.\.publicEntry \} = entry/);
   assert.match(server, /_capacityFresh: live\?\._fresh\?\.rateLimits === true/);
   assert.match(html, /USAGE_LIMIT_CODES\.has\(code\)/);
   assert.match(html, /out\\s\+of\|no[\s\S]*credits\?/);
