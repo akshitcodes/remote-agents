@@ -138,11 +138,13 @@ export class UsageRetryStore {
         repaired = true;
       }
       // Older builds incorrectly made some pre-dispatch settings/probe failures
-      // terminal. attempts=0 proves no Continue reached the provider, so it is
-      // safe to preserve that intent and rebuild provider truth after upgrade.
-      // Never migrate an entry that may already have been delivered.
-      if (row.state === "failed" && Number(row.attempts ?? 0) === 0
-          && ["model_verification_failed", "permission_mode_mismatch", "model_unavailable", "effort_unavailable"].includes(row.error?.code)) {
+      // terminal. Probe failures are safe only at attempts=0. A permission-mode
+      // mismatch is also safe after the old runner incremented attempts because
+      // sendOnce's local validation raised it before calling the provider.
+      const safelyPreDispatch = row.error?.code === "permission_mode_mismatch"
+        || (Number(row.attempts ?? 0) === 0
+          && ["model_verification_failed", "model_unavailable", "effort_unavailable"].includes(row.error?.code));
+      if (row.state === "failed" && safelyPreDispatch) {
         row.state = "waiting_provider";
         row.nextCheckAt = this.now();
         repaired = true;

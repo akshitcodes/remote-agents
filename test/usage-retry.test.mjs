@@ -228,7 +228,9 @@ test("old pre-dispatch settings projection failures are safely re-armed", (t) =>
     text: "Continue.",
     dispatch: { model: "gpt-test", effort: "medium", mode: "full" },
     state: "failed",
-    attempts: 0,
+    // The old runner incremented this before sendOnce performed its second
+    // local validation, even though the provider was never called.
+    attempts: 1,
     nextCheckAt: null,
     error: { code: "permission_mode_mismatch", status: 409, message: "low-level fields were dropped" },
   }]));
@@ -237,9 +239,7 @@ test("old pre-dispatch settings projection failures are safely re-armed", (t) =>
   assert.equal(repaired.get("old-permission-failure").state, "waiting_provider");
   assert.equal(repaired.get("old-permission-failure").nextCheckAt, 4321);
 
-  repaired.update("old-permission-failure", { state: "failed", attempts: 1, nextCheckAt: null });
-  const potentiallyAttempted = new UsageRetryStore({ file, now: () => 9999 });
-  assert.equal(potentiallyAttempted.get("old-permission-failure").state, "failed");
+  assert.equal(repaired.get("old-permission-failure").attempts, 1);
 });
 
 test("cancel wins a race with a slow usage probe and dispatching cannot pretend to cancel", async (t) => {
