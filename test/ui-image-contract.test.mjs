@@ -423,6 +423,10 @@ test("composer settings fail closed and distinguish confirmed values from next-t
   assert.match(html, /!materializedMode\.unknown && !materializedMode\.providerExact/);
   assert.match(html, /if \(selection\) \{[\s\S]*?syncControls\(\);[\s\S]*?if \(flush\) \{ flushPending\(\); \}/);
   assert.match(html, /id="modelEffortCtl" aria-label="Select model and reasoning effort"[^>]*><b id="modelName"/);
+  assert.match(html, /id="composer"[\s\S]*?id="input"[\s\S]*?id="composerToolbar"[\s\S]*?id="controls"/);
+  assert.match(html, /#composerToolbar \{ position: absolute;[\s\S]*?bottom: 6px/);
+  assert.match(html, /#input \{[\s\S]*?padding: 9px 12px 42px/);
+  assert.match(html, /#controls \{[\s\S]*?overflow-x: auto/);
   assert.match(html, /id="controlPopover" role="dialog" aria-modal="false"/);
   assert.match(html, /function openModelEffortSheet\(\)/);
   assert.match(html, /function openModelEffortSheet\(\)[\s\S]*?openControlPopover\(\$\("modelEffortCtl"\)/);

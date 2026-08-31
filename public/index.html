@@ -281,11 +281,13 @@
   #composerWrap { background: var(--bg2); border-top: 1px solid var(--border); flex-shrink: 0; max-width: 100%; overflow-x: clip; overflow-y: visible; padding: 8px 10px calc(env(safe-area-inset-bottom) + 8px); }
   #composerWrap.dragover { position: relative; outline: 2px solid var(--accent2); outline-offset: -3px; background: #1f6feb18; }
   #composerWrap.dragover::after { content: "Drop images to attach"; position: absolute; inset: 5px; z-index: 8; display: grid; place-items: center; border: 1px dashed var(--accent2); border-radius: 12px; color: var(--accent2); background: #0d1117e8; font-size: 14px; font-weight: 650; pointer-events: none; }
-  #controls { display: flex; gap: 7px; margin-bottom: 8px; flex-wrap: wrap; min-width: 0; }
-  .ctl { display: flex; align-items: center; gap: 5px; background: var(--bg3); border: 1px solid var(--border); color: var(--fg-dim); border-radius: 8px; padding: 5px 9px; font-size: 12px; cursor: pointer; white-space: nowrap; }
+  #controls { display: flex; flex: 1 1 auto; min-width: 0; align-items: center; gap: 3px; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; }
+  #controls::-webkit-scrollbar { display: none; }
+  .ctl { display: flex; flex: 0 0 auto; align-items: center; gap: 5px; background: transparent; border: 0; color: var(--fg-dim); border-radius: 15px; padding: 5px 7px; font-size: 12px; cursor: pointer; white-space: nowrap; }
   .ctl:active { background: var(--bg); }
   .ctl b { color: var(--fg); font-weight: 600; }
   .ctl .ck { color: var(--fg-faint); font-size: 10px; }
+  #modelEffortCtl { background: #ffffff08; }
   .control-popover { display: none; position: fixed; z-index: 31; width: min(320px, calc(100vw - 16px)); max-height: min(52dvh, 430px); overflow-y: auto; overscroll-behavior: contain; padding: 7px; border: 1px solid var(--border); border-radius: 13px; background: var(--bg3); box-shadow: 0 14px 42px #000a; }
   .control-popover.show { display: block; }
   .control-menu-title { padding: 7px 9px 6px; color: var(--fg-faint); font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
@@ -301,7 +303,7 @@
   .control-popover h2 { margin: 4px 8px 2px; font-size: 14px; }
   .control-popover .hint { margin: 3px 8px 8px; font-size: 11px; line-height: 1.35; }
   .control-popover .primary-btn { margin-top: 7px; }
-  .settings-truth { display: inline-flex; align-items: center; gap: 6px; min-height: 29px; margin-left: auto; color: var(--fg-dim); font-size: 11px; white-space: nowrap; }
+  .settings-truth { display: inline-flex; align-items: center; gap: 6px; min-height: 22px; margin: 0 4px 6px; color: var(--fg-dim); font-size: 11px; white-space: nowrap; }
   .settings-truth[hidden] { display: none; }
   .settings-truth::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px #3fb95018; }
   .settings-truth[data-state="loading"]::before { background: var(--warn); animation: pulse 1.3s ease-in-out infinite; }
@@ -309,17 +311,18 @@
   .settings-truth[data-state="error"]::before { background: var(--danger); box-shadow: 0 0 0 3px #f8514918; }
   .settings-truth[data-state="override"] { color: var(--accent2); }
   .settings-truth[data-state="override"]::before { background: var(--accent2); box-shadow: 0 0 0 3px #58a6ff18; }
-  #composer { display: flex; gap: 8px; align-items: flex-end; min-width: 0; width: 100%; }
-  #input { flex: 1 1 auto; min-width: 0; min-height: 40px; box-sizing: border-box; background: var(--bg3); border: 1px solid var(--border); color: var(--fg); border-radius: 18px; padding: 9px 14px; font-size: 16px; outline: none; resize: none; max-height: 120px; font-family: inherit; line-height: 1.4; }
-  #sendBtn, #stopBtn, #attachBtn { width: 38px; height: 38px; border-radius: 50%; border: none; font-size: 17px; cursor: pointer; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
+  #composer { position: relative; min-width: 0; width: 100%; min-height: 72px; background: var(--bg3); border: 1px solid var(--border); border-radius: 22px; }
+  #input { display: block; width: 100%; min-width: 0; min-height: 70px; box-sizing: border-box; background: transparent; border: 0; color: var(--fg); border-radius: 22px; padding: 9px 12px 42px; font-size: 16px; outline: none; resize: none; max-height: 150px; font-family: inherit; line-height: 1.4; }
+  #composerToolbar { position: absolute; left: 7px; right: 7px; bottom: 6px; display: flex; align-items: center; gap: 5px; min-width: 0; height: 34px; }
+  #sendBtn, #stopBtn, #attachBtn { width: 34px; height: 34px; border-radius: 50%; border: none; font-size: 16px; cursor: pointer; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
   #sendBtn { background: var(--accent); color: #04260f; }
   #sendBtn:disabled { opacity: .4; pointer-events: none; }
   #stopBtn { background: var(--danger); color: #fff; display: none; }
   #attachBtn { background: var(--bg3); color: var(--fg-dim); border: 1px solid var(--border); }
   #attachBtn:disabled { opacity: .35; }
-  #draftStrip { display: none; width: max-content; max-width: 100%; margin: 0 0 7px 46px; border: 0; border-radius: 8px; padding: 4px 9px; background: var(--bg3); color: var(--fg-dim); font-size: 11px; cursor: pointer; }
+  #draftStrip { display: none; width: max-content; max-width: 100%; margin: 0 0 7px 10px; border: 0; border-radius: 8px; padding: 4px 9px; background: var(--bg3); color: var(--fg-dim); font-size: 11px; cursor: pointer; }
   #draftStrip.on { display: block; }
-  #sendActions { position: relative; flex: 0 0 38px; touch-action: manipulation; -webkit-touch-callout: none; user-select: none; }
+  #sendActions { position: relative; flex: 0 0 34px; touch-action: manipulation; -webkit-touch-callout: none; user-select: none; }
   #sendActions #sendBtn { position: relative; z-index: 2; }
   .send-popover { display: none; position: absolute; z-index: 12; right: 0; bottom: calc(100% - 2px); min-width: 132px; padding: 5px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg3); box-shadow: 0 10px 28px #0008; }
   .send-popover button { width: 100%; border: 0; border-radius: 7px; padding: 8px 9px; background: transparent; color: var(--fg); font-size: 12px; text-align: left; cursor: pointer; }
@@ -549,8 +552,8 @@
       margin-left: auto;
       margin-right: auto;
     }
-    body.thread-open #controls { margin-bottom: 10px; }
-    body.thread-open #input { min-height: 42px; padding: 10px 16px; }
+    body.thread-open #controls { margin: 0; }
+    body.thread-open #input { min-height: 70px; padding: 10px 14px 42px; }
     body.thread-open .msg.agent { font-size: 15px; line-height: 1.58; }
     body.thread-open .msg.user { max-width: 72%; }
     body.thread-open .row:hover,
@@ -650,26 +653,28 @@
       </div>
     </div>
     <div id="composerWrap">
-      <div id="controls">
-        <button class="ctl" id="modelEffortCtl" aria-label="Select model and reasoning effort" aria-haspopup="dialog" aria-expanded="false"><b id="modelName">—</b><span aria-hidden="true">·</span><b id="effortName">—</b> <span class="ck">▾</span></button>
-        <button class="ctl" id="modeCtl" aria-haspopup="dialog" aria-expanded="false"><span id="modeName">Agent</span> <span class="ck">▾</span></button>
-        <button class="ctl" id="lockCtl" aria-haspopup="dialog" aria-expanded="false" style="display:none"><span>Lock</span> <b id="lockName">Not held here</b> <span class="ck">▾</span></button>
-        <span class="settings-truth" id="settingsTruth" data-state="loading" role="status">Checking settings…</span>
-      </div>
       <div class="control-popover" id="controlPopover" role="dialog" aria-modal="false" aria-hidden="true"></div>
+      <span class="settings-truth" id="settingsTruth" data-state="loading" role="status">Checking settings…</span>
       <div id="attachmentStrip"></div>
       <button id="draftStrip" type="button" aria-label="Open saved drafts"></button>
       <div id="composer">
         <input id="imageInput" type="file" accept="image/*" multiple hidden>
-        <button id="attachBtn" aria-label="Attach images" title="Attach images">＋</button>
         <textarea id="input" rows="1" placeholder="Message Codex…"></textarea>
-        <button id="stopBtn" aria-label="Stop">■</button>
-        <div id="sendActions">
-          <button id="sendBtn" aria-label="Send">➤</button>
-          <div class="send-popover" id="sendPopover">
-            <button type="button" id="steerAction">Steer</button>
-            <button type="button" id="queueAction">Queue</button>
-            <button type="button" id="saveDraftAction">Save as draft</button>
+        <div id="composerToolbar">
+          <button id="attachBtn" aria-label="Attach images" title="Attach images">＋</button>
+          <div id="controls">
+            <button class="ctl" id="modeCtl" aria-haspopup="dialog" aria-expanded="false"><span id="modeName">Agent</span> <span class="ck">▾</span></button>
+            <button class="ctl" id="modelEffortCtl" aria-label="Select model and reasoning effort" aria-haspopup="dialog" aria-expanded="false"><b id="modelName">—</b><span aria-hidden="true">·</span><b id="effortName">—</b> <span class="ck">▾</span></button>
+            <button class="ctl" id="lockCtl" aria-haspopup="dialog" aria-expanded="false" style="display:none"><span>Lock</span> <b id="lockName">Not held here</b> <span class="ck">▾</span></button>
+          </div>
+          <button id="stopBtn" aria-label="Stop">■</button>
+          <div id="sendActions">
+            <button id="sendBtn" aria-label="Send">➤</button>
+            <div class="send-popover" id="sendPopover">
+              <button type="button" id="steerAction">Steer</button>
+              <button type="button" id="queueAction">Queue</button>
+              <button type="button" id="saveDraftAction">Save as draft</button>
+            </div>
           </div>
         </div>
       </div>
