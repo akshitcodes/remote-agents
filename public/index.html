@@ -295,12 +295,23 @@
   .settings-truth[data-state="override"]::before { background: var(--accent2); box-shadow: 0 0 0 3px #58a6ff18; }
   #composer { display: flex; gap: 8px; align-items: flex-end; min-width: 0; }
   #input { flex: 1; min-width: 0; background: var(--bg3); border: 1px solid var(--border); color: var(--fg); border-radius: 18px; padding: 9px 14px; font-size: 16px; outline: none; resize: none; max-height: 120px; font-family: inherit; line-height: 1.4; }
-  #sendBtn, #stopBtn, #attachBtn { width: 38px; height: 38px; border-radius: 50%; border: none; font-size: 17px; cursor: pointer; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
+  #sendBtn, #stopBtn, #attachBtn, #draftBtn { width: 38px; height: 38px; border-radius: 50%; border: none; font-size: 17px; cursor: pointer; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
   #sendBtn { background: var(--accent); color: #04260f; }
   #sendBtn:disabled { opacity: .4; }
   #stopBtn { background: var(--danger); color: #fff; display: none; }
-  #attachBtn { background: var(--bg3); color: var(--fg-dim); border: 1px solid var(--border); }
+  #attachBtn, #draftBtn { background: var(--bg3); color: var(--fg-dim); border: 1px solid var(--border); }
   #attachBtn:disabled { opacity: .35; }
+  #draftBtn { position: relative; font-size: 16px; }
+  #draftCount { display: none; position: absolute; right: -4px; top: -5px; min-width: 17px; height: 17px; padding: 0 4px; border-radius: 9px; align-items: center; justify-content: center; background: var(--accent2); color: #07111d; border: 2px solid var(--bg2); font-size: 10px; font-weight: 750; }
+  #draftCount.on { display: inline-flex; }
+  .draft-list { display: grid; gap: 9px; margin-top: 12px; }
+  .draft-card { padding: 11px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg3); }
+  .draft-text { color: var(--fg); font-size: 13px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 86px; overflow: hidden; }
+  .draft-meta { color: var(--fg-faint); font-size: 11px; margin-top: 6px; }
+  .draft-actions, .draft-bulk { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 9px; }
+  .draft-action { border: 1px solid var(--border); border-radius: 8px; padding: 6px 9px; background: var(--bg2); color: var(--fg-dim); font-size: 12px; cursor: pointer; }
+  .draft-action.primary { color: var(--accent2); }
+  .draft-action.danger { color: var(--danger); margin-left: auto; }
   #attachmentStrip { display: none; gap: 8px; overflow-x: auto; padding: 0 0 8px; }
   #attachmentStrip.on { display: flex; }
   .attachment-preview { width: 58px; height: 58px; position: relative; flex: 0 0 58px; border-radius: 10px; overflow: hidden; border: 1px solid var(--border); background: var(--bg3); }
@@ -628,6 +639,7 @@
       <div id="composer">
         <input id="imageInput" type="file" accept="image/*" multiple hidden>
         <button id="attachBtn" aria-label="Attach images" title="Attach images">＋</button>
+        <button id="draftBtn" aria-label="Drafts" title="Drafts">▱<span id="draftCount"></span></button>
         <textarea id="input" rows="1" placeholder="Message Codex…"></textarea>
         <button id="stopBtn" aria-label="Stop">■</button>
         <button id="sendBtn" aria-label="Send">➤</button>
@@ -1020,7 +1032,9 @@ const state = {
   activityGroup: null,    // newest contiguous Codex activity run
   lock: { state: "unknown", label: "Checking…" },
   sendStage: null,        // { requestId, threadId, text, bubble, chip }
+  threadUserProgress: null, // canonical user-message cursor from the last successful read
   composerAttachments: [], // uploaded server refs safe to persist in queues
+  composerDraftMemory: new Map(), // in-page fallback if browser storage is unavailable/full
   uploadingAttachments: 0,
   notificationRules: new Map(), // "provider:threadId" -> once | follow, for this device
   expandedSubagents: new Set(),
@@ -3140,8 +3154,11 @@ function onNotify(method, params, provider) {
 
 // ---------- navigation ----------
 async function openThread(t) {
+  saveComposerDraft();
+  if ($("sheet")?.classList.contains("show")) { closeSheet(); }
   resetActivityGroup();
   state.active = t;
+  restoreComposerDraft(t);
   state.threadMode = null;
   state.threadModeUnknown = false;
   state.threadApprovalPolicy = null;
@@ -3166,10 +3183,9 @@ async function openThread(t) {
   await loadThreadSettings(t);
   if (state.active !== t) { return; }
   state.activeTurnId = null;
+  state.threadUserProgress = null;
   state.items = new Map();
   state.pending = [];
-  state.composerAttachments = [];
-  renderComposerAttachments();
   state.lastDiff = "";
   state.threadFiles = new Map();
   $("filesBtn").style.display = "none";
@@ -3245,6 +3261,7 @@ async function openThread(t) {
     if (state.active !== t) { return; }
 
     renderHistory(res.thread, res.itemWindow);
+    state.threadUserProgress = res.userProgress ?? null;
     scrollDown({ force: true });
     loadUsageRetryState(t);
     state.fetching = false;
@@ -3323,6 +3340,7 @@ async function openThread(t) {
 }
 
 function backToList() {
+  saveComposerDraft();
   finishSendProgress();
   state.active = null;
   state.threadMode = null;
@@ -3393,6 +3411,7 @@ function renderComposerAttachments() {
     remove.onclick = () => {
       state.composerAttachments = state.composerAttachments.filter((item) => item.id !== attachment.id);
       renderComposerAttachments();
+      saveComposerDraft();
     };
     preview.append(img, remove);
     strip.appendChild(preview);
@@ -3451,7 +3470,10 @@ async function uploadImages(files) {
     return;
   }
 
-  const remaining = MAX_ATTACHMENTS - state.composerAttachments.length;
+  const target = state.active;
+  const targetKey = localThreadKey(target);
+  const targetAttachments = state.composerAttachments.slice();
+  const remaining = MAX_ATTACHMENTS - targetAttachments.length;
 
   if (remaining <= 0) { chip("⚠️", `Attach at most ${MAX_ATTACHMENTS} images`); return; }
 
@@ -3462,13 +3484,22 @@ async function uploadImages(files) {
     for (const original of [...files].slice(0, remaining)) {
       const file = await normalizedImage(original);
 
-      if (state.composerAttachments.reduce((sum, item) => sum + (item.size || 0), 0) + file.size > MAX_ATTACHMENTS_TOTAL_BYTES) {
+      if (targetAttachments.reduce((sum, item) => sum + (item.size || 0), 0) + file.size > MAX_ATTACHMENTS_TOTAL_BYTES) {
         throw new Error("Attached images must be 8 MB or less in total");
       }
 
       const attachment = await api("/api/attachment", { name: file.name, data: await base64Of(file) });
-      state.composerAttachments.push(attachment);
-      renderComposerAttachments();
+      targetAttachments.push(attachment);
+      if (state.active === target) {
+        state.composerAttachments = targetAttachments.slice();
+        renderComposerAttachments();
+        saveComposerDraft();
+      } else if (targetKey) {
+        const all = composerDraftStore();
+        const saved = all[targetKey] ?? { text: "", attachments: [] };
+        all[targetKey] = { ...saved, attachments: targetAttachments.slice(), updatedAt: Date.now() };
+        writeLocalObjectStore(COMPOSER_DRAFTS_KEY, all);
+      }
     }
 
     if (files.length > remaining) { chip("⚠️", `Only the first ${remaining} image${remaining === 1 ? " was" : "s were"} attached`); }
@@ -3497,6 +3528,7 @@ async function send() {
   $("input").style.height = "auto";
   state.composerAttachments = [];
   renderComposerAttachments();
+  saveComposerDraft();
 
   if (state.busy) {
     enqueue(text, attachments);
@@ -3512,6 +3544,173 @@ async function send() {
 // silently dropped, with no bubble, no chip and no record anywhere. Persist the
 // queue per thread so nothing you typed can disappear.
 const PENDING_KEY = "cxp_pending";
+const COMPOSER_DRAFTS_KEY = "cxp_composer_drafts";
+const SAVED_DRAFTS_KEY = "cxp_saved_drafts";
+const MAX_SAVED_DRAFTS_PER_THREAD = 50;
+let composerSaveTimer = null;
+
+function localThreadKey(thread = state.active) {
+  return thread?.id ? runKey(thread.provider || activeProvider(), thread.id) : null;
+}
+
+function localObjectStore(key) {
+  try {
+    const value = JSON.parse(localStorage.getItem(key));
+    return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  } catch { return {}; }
+}
+
+function writeLocalObjectStore(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); return true; } catch { return false; }
+}
+
+function composerDraftStore() { return localObjectStore(COMPOSER_DRAFTS_KEY); }
+function savedDraftStore() { return localObjectStore(SAVED_DRAFTS_KEY); }
+
+function saveComposerDraft() {
+  clearTimeout(composerSaveTimer);
+  composerSaveTimer = null;
+  const key = localThreadKey();
+  if (!key || !$('input')) { return; }
+  const all = composerDraftStore();
+  const text = $('input').value;
+  const attachments = state.composerAttachments ?? [];
+  if (text || attachments.length) {
+    const value = { text, attachments, updatedAt: Date.now() };
+    all[key] = value;
+    state.composerDraftMemory.set(key, value);
+  } else {
+    delete all[key];
+    state.composerDraftMemory.delete(key);
+  }
+  writeLocalObjectStore(COMPOSER_DRAFTS_KEY, all);
+}
+
+function scheduleComposerDraftSave() {
+  clearTimeout(composerSaveTimer);
+  composerSaveTimer = setTimeout(saveComposerDraft, 150);
+}
+
+function restoreComposerDraft(thread = state.active) {
+  const key = localThreadKey(thread);
+  const draft = key ? (state.composerDraftMemory.get(key) ?? composerDraftStore()[key]) : null;
+  $('input').value = draft?.text ?? "";
+  $('input').style.height = "auto";
+  $('input').style.height = Math.min($('input').scrollHeight, 120) + "px";
+  state.composerAttachments = Array.isArray(draft?.attachments) ? draft.attachments : [];
+  renderComposerAttachments();
+  syncDraftButton();
+}
+
+function draftsForActiveThread() {
+  const key = localThreadKey();
+  const rows = key ? savedDraftStore()[key] : null;
+  return Array.isArray(rows) ? rows : [];
+}
+
+function writeDraftsForActiveThread(rows) {
+  const key = localThreadKey();
+  if (!key) { return; }
+  const all = savedDraftStore();
+  if (rows.length) { all[key] = rows.slice(-MAX_SAVED_DRAFTS_PER_THREAD); }
+  else { delete all[key]; }
+  const saved = writeLocalObjectStore(SAVED_DRAFTS_KEY, all);
+  syncDraftButton();
+  return saved;
+}
+
+function syncDraftButton() {
+  const count = draftsForActiveThread().length;
+  const badge = $('draftCount');
+  if (!badge) { return; }
+  badge.textContent = count > 99 ? "99+" : String(count);
+  badge.classList.toggle("on", count > 0);
+  $('draftBtn').title = count ? `${count} saved draft${count === 1 ? "" : "s"}` : "Save or open drafts";
+  $('draftBtn').setAttribute('aria-label', count ? `Drafts, ${count} saved` : 'Drafts');
+}
+
+function saveCurrentAsDraft() {
+  const text = $('input').value.trim();
+  const attachments = state.composerAttachments.slice();
+  if (!text && !attachments.length) { return false; }
+  const rows = draftsForActiveThread();
+  if (rows.length >= MAX_SAVED_DRAFTS_PER_THREAD) {
+    chip("⚠️", `This chat already has ${MAX_SAVED_DRAFTS_PER_THREAD} drafts. Delete one before saving another.`);
+    return false;
+  }
+  rows.push({ id: newRequestId(), text, attachments, createdAt: Date.now() });
+  if (!writeDraftsForActiveThread(rows)) {
+    chip("⚠️", "Could not save this draft on the device. The composer was not cleared.");
+    return false;
+  }
+  $('input').value = "";
+  $('input').style.height = "auto";
+  state.composerAttachments = [];
+  renderComposerAttachments();
+  saveComposerDraft();
+  return true;
+}
+
+function removeSavedDraft(id) {
+  writeDraftsForActiveThread(draftsForActiveThread().filter((draft) => draft.id !== id));
+}
+
+function dispatchSavedDraft(draft, intent) {
+  const before = state.pending.length;
+  const entry = enqueue(draft.text || "", draft.attachments ?? [], { intent });
+  if (state.pending.length > before) { removeSavedDraft(draft.id); }
+  if (!state.busy) { queueMicrotask(flushPending); }
+  return entry?.deliveryPromise;
+}
+
+function openDraftsSheet() {
+  const sheetThreadKey = localThreadKey();
+  const rows = draftsForActiveThread();
+  const hasCurrent = !!$('input').value.trim() || state.composerAttachments.length > 0;
+  openSheet(`<h2>Drafts</h2>
+    <div class="hint">Saved only on this device for this chat. Queue sends in order; Steer tries the active turn and safely falls back to the queue.</div>
+    ${hasCurrent ? '<button class="primary-btn" id="saveCurrentDraft">Save current message as draft</button>' : ''}
+    ${rows.length ? '<div class="draft-bulk"><button class="draft-action" id="queueAllDrafts">Queue all</button><button class="draft-action" id="steerAllDrafts">Steer all</button><button class="draft-action danger" id="deleteAllDrafts">Delete all</button></div><div class="draft-list" id="draftList"></div>' : '<div class="empty">No saved drafts in this chat.</div>'}`);
+  if (hasCurrent) { $('saveCurrentDraft').onclick = () => { saveCurrentAsDraft(); openDraftsSheet(); }; }
+  if (!rows.length) { return; }
+  const list = $('draftList');
+  for (const draft of rows) {
+    const card = document.createElement('div');
+    card.className = 'draft-card';
+    const text = document.createElement('div');
+    text.className = 'draft-text';
+    text.textContent = draft.text || `${draft.attachments?.length ?? 0} image attachment${draft.attachments?.length === 1 ? '' : 's'}`;
+    const meta = document.createElement('div');
+    meta.className = 'draft-meta';
+    meta.textContent = `${draft.attachments?.length ? `${draft.attachments.length} image${draft.attachments.length === 1 ? '' : 's'} · ` : ''}${new Date(draft.createdAt || Date.now()).toLocaleString()}`;
+    const actions = document.createElement('div');
+    actions.className = 'draft-actions';
+    for (const [label, intent, className] of [['Queue', 'queue', 'primary'], ['Steer', 'steer', 'primary'], ['Delete', 'delete', 'danger']]) {
+      const button = document.createElement('button');
+      button.className = `draft-action ${className}`;
+      button.textContent = label;
+      button.onclick = () => {
+        if (intent === 'delete') { removeSavedDraft(draft.id); }
+        else { dispatchSavedDraft(draft, intent); }
+        openDraftsSheet();
+      };
+      actions.appendChild(button);
+    }
+    card.append(text, meta, actions);
+    list.appendChild(card);
+  }
+  $('queueAllDrafts').onclick = () => { for (const draft of rows) { dispatchSavedDraft(draft, 'queue'); } closeSheet(); };
+  $('steerAllDrafts').onclick = async () => {
+    closeSheet();
+    for (const draft of rows) {
+      if (localThreadKey() !== sheetThreadKey) { break; }
+      await dispatchSavedDraft(draft, 'steer');
+    }
+  };
+  $('deleteAllDrafts').onclick = () => {
+    if (confirm(`Delete all ${rows.length} saved drafts in this chat?`)) { writeDraftsForActiveThread([]); openDraftsSheet(); }
+  };
+}
 
 function pendingStore() {
   try { return JSON.parse(localStorage.getItem(PENDING_KEY)) || {}; } catch { return {}; }
@@ -3523,6 +3722,11 @@ function migrateThreadLocalState(provider, fromId, toId) {
   const fromKey = runKey(provider, fromId);
   const toKey = runKey(provider, toId);
   const pending = pendingStore();
+
+  if (state.composerDraftMemory.has(fromKey)) {
+    state.composerDraftMemory.set(toKey, state.composerDraftMemory.get(fromKey));
+    state.composerDraftMemory.delete(fromKey);
+  }
 
   if (pending[fromKey]?.length) {
     const byId = new Map();
@@ -3548,6 +3752,20 @@ function migrateThreadLocalState(provider, fromId, toId) {
   }
 
   if (changed) { saveFailedSends(); }
+
+  for (const storageKey of [COMPOSER_DRAFTS_KEY, SAVED_DRAFTS_KEY]) {
+    const local = localObjectStore(storageKey);
+    if (local[fromKey] != null) {
+      if (storageKey === SAVED_DRAFTS_KEY && Array.isArray(local[toKey])) {
+        const merged = [...local[toKey], ...(Array.isArray(local[fromKey]) ? local[fromKey] : [])];
+        local[toKey] = [...new Map(merged.map((draft) => [draft.id, draft])).values()].slice(-MAX_SAVED_DRAFTS_PER_THREAD);
+      } else {
+        local[toKey] = local[fromKey];
+      }
+      delete local[fromKey];
+      writeLocalObjectStore(storageKey, local);
+    }
+  }
 
   const prefs = threadPrefsStore();
 
@@ -3581,11 +3799,12 @@ function savePending() {
       nativeQueue: !!e.nativeQueue,
       nativeQueueId: e.nativeQueueId ?? null,
       errorMessage: cleanFailureReason(e.errorMessage),
+      baseline: e.baseline ?? null,
     }));
 
   if (entries.length) { all[key] = entries; } else { delete all[key]; }
 
-  try { localStorage.setItem(PENDING_KEY, JSON.stringify(all)); } catch {}
+  try { localStorage.setItem(PENDING_KEY, JSON.stringify(all)); return true; } catch { return false; }
 }
 
 async function removePendingEntry(entry, { flush = true, allowUncertain = false } = {}) {
@@ -3809,6 +4028,7 @@ function restorePending() {
     const nativeQueue = !!raw?.nativeQueue;
     const nativeQueueId = raw?.nativeQueueId ?? null;
     const errorMessage = cleanFailureReason(raw?.errorMessage);
+    const baseline = raw?.baseline ?? null;
     const mayHaveDispatched = !!raw?.mayHaveDispatched || (savedRetryRequired && legacyRetryWithNewId);
     const retryRequired = savedRetryRequired || (mayHaveDispatched && !nativeQueue);
 
@@ -3850,10 +4070,11 @@ function restorePending() {
       existing.nativeQueue = nativeQueue;
       existing.nativeQueueId = nativeQueueId;
       existing.errorMessage = errorMessage;
+      existing.baseline = baseline;
       existing.provider = state.active.provider;
       existing.threadId = tid;
     } else {
-      state.pending.push({ text, attachments, requestId, chip: c, bubble, retryRequired, retryWithNewId, retryAsSteer, awaitingOwnership, intendedSendMode, viaCodexQueue, mayHaveDispatched, nativeQueue, nativeQueueId, errorMessage, provider: state.active.provider, threadId: tid });
+      state.pending.push({ text, attachments, requestId, chip: c, bubble, retryRequired, retryWithNewId, retryAsSteer, awaitingOwnership, intendedSendMode, viaCodexQueue, mayHaveDispatched, nativeQueue, nativeQueueId, errorMessage, baseline, provider: state.active.provider, threadId: tid });
     }
 
     const entry = existing || state.pending.at(-1);
@@ -3988,7 +4209,15 @@ async function checkPendingDelivery(entry) {
       requestId: entry.requestId,
       threadId: entry.threadId || state.active?.id || "",
     });
-    const result = await api(`/api/send/status?${query}`);
+    let result = await api(`/api/send/status?${query}`);
+    if (["uncertain", "dispatching", "not_found"].includes(result.state) && entry.baseline) {
+      const canonical = await api("/api/send/reconcile", {
+        provider: entry.provider || activeProvider(), threadId: entry.threadId || state.active?.id,
+        baseline: entry.baseline, text: entry.text,
+      });
+      if (canonical.state === "accepted") { result = { state: "accepted", source: "canonical_transcript" }; }
+      if (canonical.progress && (entry.threadId || state.active?.id) === state.active?.id) { state.threadUserProgress = canonical.progress; }
+    }
     entry.deliveryProofChecked = true;
 
     if (result.state === "accepted") {
@@ -4053,9 +4282,9 @@ async function reconcilePendingDeliveryProof() {
   await Promise.allSettled(candidates.map((entry) => checkPendingDelivery(entry)));
 }
 
-function enqueue(text, attachments = []) {
+function enqueue(text, attachments = [], { intent = state.sendMode } = {}) {
   const bubble = addUser(text, { own: true, attachments });
-  const steering = state.sendMode === "steer" && state.turnOwnership === "bridge";
+  const steering = intent === "steer" && state.turnOwnership === "bridge";
   const nativeExternalCodex = state.turnOwnership === "external" && activeProvider() === "codex";
   const ownershipUnknown = state.turnOwnership === "checking" || state.turnOwnership === "unknown";
   const c = chip("⏳", steering
@@ -4074,18 +4303,26 @@ function enqueue(text, attachments = []) {
     bubble,
     viaCodexQueue: nativeExternalCodex,
     awaitingOwnership: ownershipUnknown,
-    intendedSendMode: state.sendMode,
+    intendedSendMode: intent,
+    baseline: steering && state.threadUserProgress ? { ...state.threadUserProgress } : null,
     provider: activeProvider(),
     threadId: state.active?.id,
   };
   state.pending.push(entry);
-  savePending();
+  if (!savePending()) {
+    state.pending.pop();
+    c.remove();
+    bubble.remove();
+    chip("⚠️", "Could not save this queued message on the device. It was not sent.");
+    return null;
+  }
   syncPendingActions(entry);
 
   // Queued messages wait for the turn to end. Steering does not: it goes into
   // the turn that is already running.
-  if (steering) { trySteer(entry); }
+  if (steering) { entry.deliveryPromise = trySteer(entry); }
   else if (nativeExternalCodex) { persistExternalCodexQueue(entry); }
+  return entry;
 }
 
 async function persistExternalCodexQueue(entry) {
@@ -4257,6 +4494,7 @@ async function trySteer(entry) {
   }
 
   // It is part of the running turn now, so it must not also be sent later.
+  advanceThreadUserProgress();
   const at = state.pending.indexOf(entry);
 
   if (at >= 0) { state.pending.splice(at, 1); savePending(); }
@@ -4352,9 +4590,9 @@ function loadFailedSends() {
   } catch { return []; }
 }
 
-function recordFailedSend(threadId, text, requestId, provider = activeProvider(), attachments = [], retryWithNewId = false, errorMessage = null) {
+function recordFailedSend(threadId, text, requestId, provider = activeProvider(), attachments = [], retryWithNewId = false, errorMessage = null, baseline = null) {
   dropFailedSend(requestId);
-  state.failedSends.push({ provider, threadId, text, requestId, attachments, retryWithNewId, errorMessage: cleanFailureReason(errorMessage), createdAt: Date.now() });
+  state.failedSends.push({ provider, threadId, text, requestId, attachments, retryWithNewId, errorMessage: cleanFailureReason(errorMessage), baseline, createdAt: Date.now() });
   saveFailedSends();
 }
 
@@ -4413,7 +4651,16 @@ async function checkStandaloneDelivery(failed, bubble, { announce = true } = {})
     requestId: failed.requestId,
     threadId: failed.threadId || state.active?.id || "",
   });
-  const result = await api(`/api/send/status?${query}`);
+  let result = await api(`/api/send/status?${query}`);
+
+  if (["uncertain", "dispatching", "not_found"].includes(result.state) && failed.baseline) {
+    const canonical = await api("/api/send/reconcile", {
+      provider: failed.provider || activeProvider(), threadId: failed.threadId,
+      baseline: failed.baseline, text: failed.text,
+    });
+    if (canonical.state === "accepted") { result = { state: "accepted", source: "canonical_transcript" }; }
+    if (canonical.progress && failed.threadId === state.active?.id) { state.threadUserProgress = canonical.progress; }
+  }
 
   if (result.state === "accepted") {
     dropFailedSend(failed.requestId);
@@ -4547,6 +4794,13 @@ async function doSend(text, { attachments = [], bubble, requestId, pendingEntry 
   };
   const id = requestId || newRequestId();
   const threadId = target.id;
+  const baseline = pendingEntry?.mayHaveDispatched && pendingEntry.baseline
+    ? pendingEntry.baseline
+    : (state.threadUserProgress ? { ...state.threadUserProgress } : null);
+  if (pendingEntry && baseline) {
+    pendingEntry.baseline = baseline;
+    savePending();
+  }
   startSendProgress(id, threadId, text, bubble);
   if (pendingEntry) {
     pendingEntry.dispatching = true;
@@ -4609,6 +4863,7 @@ async function doSend(text, { attachments = [], bubble, requestId, pendingEntry 
     }
     finishSendProgress();
     dropFailedSend(id);
+    advanceThreadUserProgress();
     if (pendingEntry) {
       const at = state.pending.indexOf(pendingEntry);
 
@@ -4702,7 +4957,7 @@ async function doSend(text, { attachments = [], bubble, requestId, pendingEntry 
       }
     } else if (e.code !== "thread_locked_elsewhere") {
       const uncertain = deliveryMayBeAmbiguous;
-      recordFailedSend(threadId, text, id, activeProvider(), attachments, uncertain, e.message);
+      recordFailedSend(threadId, text, id, activeProvider(), attachments, uncertain, e.message, baseline);
       markSendFailed(bubble, retry, {
         uncertain,
         reason: e.message,
@@ -4724,6 +4979,11 @@ async function doSend(text, { attachments = [], bubble, requestId, pendingEntry 
 
 function newRequestId() {
   return crypto.randomUUID?.() ?? (String(Date.now()) + Math.random().toString(16).slice(2));
+}
+
+function advanceThreadUserProgress() {
+  const count = Number(state.threadUserProgress?.userCount);
+  state.threadUserProgress = { userCount: Number.isSafeInteger(count) && count >= 0 ? count + 1 : 1, lastUserId: null };
 }
 
 function cleanFailureReason(value) {
@@ -6976,6 +7236,7 @@ async function resyncOpenThread({ force = false } = {}) {
     const res = await api("/api/thread?id=" + encodeURIComponent(t.id) + "&provider=" + encodeURIComponent(t.provider || "codex"));
     state.items = new Map();
     renderHistory(res.thread, res.itemWindow);
+    state.threadUserProgress = res.userProgress ?? state.threadUserProgress;
     state.fetching = false;
     setCursor(res);
     reconcileNativeCodexQueue(t);
@@ -7165,6 +7426,7 @@ $("attachBtn").onclick = () => {
   if (!supportsInput("image")) { chip("⚠️", `${providerLabel()} does not advertise image prompt support`); return; }
   $("imageInput").click();
 };
+$("draftBtn").onclick = openDraftsSheet;
 $("imageInput").onchange = () => uploadImages($("imageInput").files);
 let composerDragDepth = 0;
 const composerWrap = $("composerWrap");
@@ -7255,6 +7517,7 @@ $("jumpBtn").onclick = () => scrollDown({ force: true });
 $("input").addEventListener("input", function () {
   this.style.height = "auto";
   this.style.height = Math.min(this.scrollHeight, 120) + "px";
+  scheduleComposerDraftSave();
 });
 $("input").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey && !("ontouchstart" in window)) { e.preventDefault(); send(); }
@@ -7263,6 +7526,7 @@ $("search").addEventListener("input", () => {
   clearTimeout(state.searchTimer);
   state.searchTimer = setTimeout(() => loadThreads(false), 350);
 });
+window.addEventListener("pagehide", saveComposerDraft);
 
 // Desktop-native navigation: jump to the persistent sidebar without reaching
 // for the pointer, and dismiss centered dialogs with the conventional key.

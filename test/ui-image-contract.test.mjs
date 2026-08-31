@@ -17,7 +17,7 @@ test("image references survive queue, steer, send, retry, and reload paths", () 
   assert.match(html, /attachmentIds: \(entry\.attachments \?\? \[\]\)\.map/);
   assert.match(html, /attachmentIds: attachments\.map/);
   assert.match(html, /doSend\(entry\.text, \{ attachments: entry\.attachments/);
-  assert.match(html, /state\.failedSends\.push\(\{ provider, threadId, text, requestId, attachments, retryWithNewId, errorMessage: cleanFailureReason\(errorMessage\), createdAt: Date\.now\(\) \}\)/);
+  assert.match(html, /state\.failedSends\.push\(\{ provider, threadId, text, requestId, attachments, retryWithNewId, errorMessage: cleanFailureReason\(errorMessage\), baseline, createdAt: Date\.now\(\) \}\)/);
   assert.match(html, /autoCheckStandaloneDelivery\(f, bubble, 250\)/);
   assert.match(html, /checkStandaloneDelivery\(failed, bubble, \{ announce = true \} = \{\}\)/);
   assert.doesNotMatch(html, /const freshNotFound = result\.state === "not_found"/);
@@ -28,6 +28,9 @@ test("image references survive queue, steer, send, retry, and reload paths", () 
   assert.match(html, /id="imageViewer"/);
   assert.match(html, /composerWrap\.addEventListener\("drop"/);
   assert.match(html, /event\.dataTransfer\?\.files/);
+  assert.match(html, /const targetKey = localThreadKey\(target\)/);
+  assert.match(html, /state\.active === target/);
+  assert.match(html, /all\[targetKey\] = \{ \.\.\.saved, attachments: targetAttachments\.slice\(\), updatedAt: Date\.now\(\) \}/);
   assert.match(html, /Drop images to attach/);
   assert.match(html, /document\.addEventListener\("drop"/);
 });
@@ -53,6 +56,11 @@ test("failed delivery recovery distinguishes pre-dispatch failures and remains a
   assert.match(html, /legacyRetryWithNewId/);
   assert.match(html, /retryWithNewId = false/);
   assert.match(html, /this app will not resend it and risk a duplicate/);
+  assert.match(html, /\/api\/send\/reconcile/);
+  assert.match(html, /canonical\.state === "accepted"/);
+  assert.match(server, /baseline\.lastUserId/);
+  assert.match(server, /userMessageText\(users\[before\]\) === expected/);
+  assert.match(server, /expected\) \{ return \{ state: "unconfirmed"/);
   assert.match(claudeProvider, /code: "delivery_uncertain"/);
   assert.match(codexProvider, /p\.method === "turn\/start" \|\| p\.method === "turn\/steer"/);
   assert.match(codexProvider, /client\.pending\.set\(id, \{ resolve, reject, timer, method \}\)/);
@@ -62,6 +70,30 @@ test("failed delivery recovery distinguishes pre-dispatch failures and remains a
   assert.match(html, /steer\.textContent = activeProvider\(\) === "grok" \? "Interrupt & send now" : "Steer now"/);
   assert.match(html, /async function steerPendingEntry\(entry\)[\s\S]*?entry\.intendedSendMode = "steer"[\s\S]*?await trySteer\(entry\)/);
   assert.match(html, /for \(const entry of state\.pending\) \{ syncPendingActions\(entry\); \}/);
+});
+
+test("composer scratch text and saved prompt drafts are thread scoped", () => {
+  assert.match(html, /const COMPOSER_DRAFTS_KEY = "cxp_composer_drafts"/);
+  assert.match(html, /const SAVED_DRAFTS_KEY = "cxp_saved_drafts"/);
+  assert.match(html, /function saveComposerDraft\(\)/);
+  assert.match(html, /function restoreComposerDraft\(thread = state\.active\)/);
+  assert.match(html, /async function openThread\(t\) \{\s*saveComposerDraft\(\);[\s\S]*?resetActivityGroup\(\)/);
+  assert.match(html, /restoreComposerDraft\(t\)/);
+  assert.match(html, /window\.addEventListener\("pagehide", saveComposerDraft\)/);
+  assert.match(html, /id="draftBtn"/);
+  assert.match(html, /Save current message as draft/);
+  assert.match(html, /Queue all/);
+  assert.match(html, /Steer all/);
+  assert.match(html, /Delete all/);
+  assert.match(html, /enqueue\(draft\.text \|\| "", draft\.attachments \?\? \[\], \{ intent \}\)/);
+  assert.match(html, /entry\.deliveryPromise = trySteer\(entry\)/);
+  assert.match(html, /for \(const draft of rows\) \{[\s\S]*?localThreadKey\(\) !== sheetThreadKey[\s\S]*?await dispatchSavedDraft\(draft, 'steer'\)/);
+  assert.match(html, /\[COMPOSER_DRAFTS_KEY, SAVED_DRAFTS_KEY\]/);
+  assert.match(html, /const baseline = raw\?\.baseline \?\? null/);
+  assert.match(html, /existing\.baseline = baseline/);
+  assert.match(html, /\["uncertain", "dispatching", "not_found"\]\.includes\(result\.state\)/);
+  assert.match(html, /state\.threadUserProgress = res\.userProgress \?\? state\.threadUserProgress/);
+  assert.match(html, /Could not save this draft on the device\. The composer was not cleared/);
 });
 
 test("image UI follows provider metadata and Grok cancel-before-send requires owned active work", () => {
@@ -382,7 +414,7 @@ test("composer settings fail closed and distinguish confirmed values from next-t
   assert.match(html, /const accepted = await api\("\/api\/message"/);
   assert.match(html, /const dispatch = \{[\s\S]*?model: state\.model,[\s\S]*?approvalPolicy: m\.approvalPolicy/);
   assert.match(html, /Current turn accepted · next override saved/);
-  assert.match(html, /state\.sendMode === "steer" && state\.turnOwnership === "bridge"/);
+  assert.match(html, /intent === "steer" && state\.turnOwnership === "bridge"/);
   assert.match(html, /Codex queue/);
   assert.match(html, /state\.uploadingAttachments > 0 \|\| !readiness\.ready/);
   assert.match(html, /Nothing was queued or sent/);

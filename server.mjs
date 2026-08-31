@@ -949,6 +949,35 @@ async function threadUserProgress(provider, threadId) {
   return userProgressFromThread(full);
 }
 
+function userMessageText(item) {
+  if (!item || item.type !== "userMessage") { return ""; }
+  if (typeof item.text === "string") { return item.text.trim(); }
+  return (Array.isArray(item.content) ? item.content : [])
+    .filter((part) => part?.type === "text" && typeof part.text === "string")
+    .map((part) => part.text)
+    .join("\n")
+    .trim();
+}
+
+export async function reconcileUserIntent(provider, threadId, baseline, text) {
+  const full = await provider.readThread(threadId);
+  const users = (full?.thread?.turns ?? []).flatMap((turn) => turn.items ?? []).filter((item) => item?.type === "userMessage");
+  const before = Number(baseline?.userCount);
+  if (!Number.isSafeInteger(before) || before < 0 || before >= users.length) {
+    return { state: "unconfirmed", progress: userProgressFromThread(full) };
+  }
+  if (baseline?.lastUserId && before > 0 && String(users[before - 1]?.id ?? "") !== String(baseline.lastUserId)) {
+    return { state: "unconfirmed", progress: userProgressFromThread(full) };
+  }
+  const expected = String(text ?? "").trim();
+  if (!expected) { return { state: "unconfirmed", progress: userProgressFromThread(full) }; }
+  // Only the immediate next canonical user message can satisfy this attempt.
+  // A wider search makes repeated prompts such as "continue" falsely prove a
+  // later failed send merely because an older identical message exists.
+  const matched = userMessageText(users[before]) === expected;
+  return { state: matched ? "accepted" : "unconfirmed", progress: userProgressFromThread(full) };
+}
+
 async function autoQueueUsageResume({ provider: providerName, threadId, triggerId }) {
   if (!usageRetryPolicies.get(providerName, threadId).enabled) { return null; }
   if (usageRetryStore.list({ provider: providerName, threadId, activeOnly: true }).length) { return null; }
@@ -1860,7 +1889,7 @@ const routes = {
       ? seedSnapshot(p.name, id, (full?.thread?.turns ?? []).flatMap((t) => t.items ?? []))
       : { generation: snapshots.get(metaKey(p.name, id))?.generation ?? null, revision: snapshots.get(metaKey(p.name, id))?.revision ?? 0 };
 
-    json(res, 200, { ...tailOfThread(full, before), ...cursor, runtime });
+    json(res, 200, { ...tailOfThread(full, before), ...cursor, runtime, userProgress: userProgressFromThread(full) });
   },
 
   "GET /api/thread/runtime": async (req, res, url) => {
@@ -1893,6 +1922,16 @@ const routes = {
       requestId: url.searchParams.get("requestId"),
       threadId: url.searchParams.get("threadId") || null,
     }));
+  },
+
+  "POST /api/send/reconcile": async (req, res) => {
+    const body = await readBody(req, 1024 * 1024);
+    const p = pickProvider(body.provider);
+    if (!p) { return json(res, 400, { error: "unknown provider", code: "unknown_provider" }); }
+    if (!body.threadId || !body.baseline || typeof body.text !== "string" || !Number.isSafeInteger(Number(body.baseline.userCount))) {
+      return json(res, 400, { error: "threadId, baseline, and text required", code: "invalid_reconcile_request" });
+    }
+    json(res, 200, await reconcileUserIntent(p, body.threadId, body.baseline, body.text));
   },
 
   "GET /api/models": async (req, res, url) => {
