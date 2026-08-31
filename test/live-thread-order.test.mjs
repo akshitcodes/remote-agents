@@ -25,7 +25,6 @@ function extractFunction(name) {
 }
 
 const rankLiveThreads = extractFunction("rankLiveThreads");
-const effectiveSendBehavior = extractFunction("effectiveSendBehavior");
 
 test("a newly running task is promoted immediately from below the fold", () => {
   const threads = [
@@ -92,25 +91,4 @@ test("live ranking does not mutate the cached input order", () => {
   rankLiveThreads(threads, new Set(["grok:running"]));
 
   assert.deepEqual(threads.map((thread) => thread.id), ["idle", "running"]);
-});
-
-test("external Codex work is labeled as the native Codex queue in every send mode", () => {
-  globalThis.state = { busy: true, turnOwnership: "external", externalTurn: true, sendMode: "queue" };
-  globalThis.SEND_MODES = { queue: { name: "Queue" } };
-  globalThis.activeProvider = () => "codex";
-  globalThis.sendModesFor = () => ({ steer: { name: "Steer" } });
-
-  const behavior = effectiveSendBehavior();
-
-  assert.equal(behavior.name, "Codex queue");
-  assert.match(behavior.desc, /interrupt the current turn in Codex Desktop/i);
-});
-
-test("unknown turn ownership promises only a local unsent queue", () => {
-  globalThis.state = { busy: true, turnOwnership: "unknown", externalTurn: true, sendMode: "steer" };
-
-  const behavior = effectiveSendBehavior();
-
-  assert.equal(behavior.name, "Queue (syncing)");
-  assert.match(behavior.desc, /stays local and unsent/i);
 });

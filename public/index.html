@@ -286,6 +286,21 @@
   .ctl:active { background: var(--bg); }
   .ctl b { color: var(--fg); font-weight: 600; }
   .ctl .ck { color: var(--fg-faint); font-size: 10px; }
+  .control-popover { display: none; position: fixed; z-index: 31; width: min(320px, calc(100vw - 16px)); max-height: min(52dvh, 430px); overflow-y: auto; overscroll-behavior: contain; padding: 7px; border: 1px solid var(--border); border-radius: 13px; background: var(--bg3); box-shadow: 0 14px 42px #000a; }
+  .control-popover.show { display: block; }
+  .control-menu-title { padding: 7px 9px 6px; color: var(--fg-faint); font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+  .control-menu-row { display: flex; width: 100%; min-height: 40px; align-items: center; gap: 10px; border: 0; border-radius: 9px; padding: 8px 9px; background: transparent; color: var(--fg); font: inherit; text-align: left; cursor: pointer; }
+  .control-menu-row:hover, .control-menu-row:focus-visible { background: var(--bg2); outline: none; }
+  .control-menu-row:disabled { cursor: default; opacity: .4; }
+  .control-menu-row .menu-label { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; }
+  .control-menu-row .menu-value { max-width: 55%; overflow: hidden; color: var(--fg-dim); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+  .control-menu-row .menu-check { width: 16px; color: var(--accent); text-align: center; }
+  .control-menu-row .menu-arrow { color: var(--fg-faint); }
+  .control-menu-back { color: var(--fg-dim); }
+  .control-menu-note { padding: 5px 9px 8px; color: var(--fg-faint); font-size: 11px; line-height: 1.35; }
+  .control-popover h2 { margin: 4px 8px 2px; font-size: 14px; }
+  .control-popover .hint { margin: 3px 8px 8px; font-size: 11px; line-height: 1.35; }
+  .control-popover .primary-btn { margin-top: 7px; }
   .settings-truth { display: inline-flex; align-items: center; gap: 6px; min-height: 29px; margin-left: auto; color: var(--fg-dim); font-size: 11px; white-space: nowrap; }
   .settings-truth[hidden] { display: none; }
   .settings-truth::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px #3fb95018; }
@@ -636,12 +651,12 @@
     </div>
     <div id="composerWrap">
       <div id="controls">
-        <button class="ctl" id="modelEffortCtl" aria-label="Select model and reasoning effort"><b id="modelName">—</b><span aria-hidden="true">·</span><b id="effortName">—</b> <span class="ck">▾</span></button>
-        <button class="ctl" id="modeCtl"><span id="modeName">Agent</span> <span class="ck">▾</span></button>
-        <button class="ctl" id="steerCtl"><span>Send</span> <b id="steerName">Queue</b> <span class="ck">▾</span></button>
-        <button class="ctl" id="lockCtl" style="display:none"><span>Lock</span> <b id="lockName">Not held here</b> <span class="ck">▾</span></button>
+        <button class="ctl" id="modelEffortCtl" aria-label="Select model and reasoning effort" aria-haspopup="dialog" aria-expanded="false"><b id="modelName">—</b><span aria-hidden="true">·</span><b id="effortName">—</b> <span class="ck">▾</span></button>
+        <button class="ctl" id="modeCtl" aria-haspopup="dialog" aria-expanded="false"><span id="modeName">Agent</span> <span class="ck">▾</span></button>
+        <button class="ctl" id="lockCtl" aria-haspopup="dialog" aria-expanded="false" style="display:none"><span>Lock</span> <b id="lockName">Not held here</b> <span class="ck">▾</span></button>
         <span class="settings-truth" id="settingsTruth" data-state="loading" role="status">Checking settings…</span>
       </div>
+      <div class="control-popover" id="controlPopover" role="dialog" aria-modal="false" aria-hidden="true"></div>
       <div id="attachmentStrip"></div>
       <button id="draftStrip" type="button" aria-label="Open saved drafts"></button>
       <div id="composer">
@@ -1027,7 +1042,6 @@ const state = {
   settingsTruth: { state: "loading", sources: {}, message: "Checking settings…" },
   modelsReady: false,
   settingsSave: Promise.resolve(),
-  sendMode: "queue",         // queue | steer — what happens when you send mid-turn
   busy: false,               // is a turn currently running
   turnOwnership: "idle",     // idle | checking | unknown | bridge | external
   pending: [],               // [{ text, chip }] messages waiting to send
@@ -1086,43 +1100,6 @@ const MODE_SETS = {
 };
 
 const DEFAULT_MODE = { codex: "auto", claude: "auto", grok: "bypass" };
-
-const SEND_MODES = {
-  queue: { name: "Queue", desc: "Held and sent automatically when the current turn finishes." },
-  steer: { name: "Steer", desc: "Adds guidance to a turn this bridge owns at the next safe boundary; otherwise it stays queued." },
-};
-
-function sendModesFor(provider) {
-  if (provider === "grok") {
-    return {
-      queue: SEND_MODES.queue,
-      steer: { name: "Interrupt & send", desc: "Stops a Grok turn owned by this bridge, waits for confirmed cancellation, then sends your message." },
-    };
-  }
-
-  return SEND_MODES;
-}
-
-function effectiveSendBehavior() {
-  if (!state.busy) { return { name: "Now", desc: "Starts a new turn immediately." }; }
-  if (state.turnOwnership === "checking") {
-    return { name: "Checking…", desc: "Confirming which app owns this running turn before accepting a message." };
-  }
-  if (state.turnOwnership === "unknown") {
-    return { name: "Queue (syncing)", desc: "Ownership could not be confirmed. Your message stays local and unsent until sync recovers." };
-  }
-  if (state.externalTurn) {
-    if (activeProvider() === "codex") {
-      return {
-        name: "Codex queue",
-        desc: "Codex Desktop owns this turn. This follow-up is saved in Codex's native queue and starts automatically after the turn finishes; interrupt the current turn in Codex Desktop.",
-      };
-    }
-    return { name: "Queue (external)", desc: "This turn is owned elsewhere, so the message waits for confirmed completion." };
-  }
-  if (state.sendMode === "queue") { return SEND_MODES.queue; }
-  return sendModesFor(activeProvider()).steer;
-}
 
 function modeSetFor(provider) {
   const base = MODE_SETS[provider] || MODE_SETS.codex;
@@ -3169,6 +3146,7 @@ function onNotify(method, params, provider) {
 // ---------- navigation ----------
 async function openThread(t) {
   saveComposerDraft();
+  closeControlPopover();
   if ($("sheet")?.classList.contains("show")) { closeSheet(); }
   resetActivityGroup();
   state.active = t;
@@ -3545,7 +3523,7 @@ async function send(intent = null) {
   saveComposerDraft();
 
   if (state.busy) {
-    enqueue(text, attachments, { intent: intent ?? state.sendMode });
+    enqueue(text, attachments, { intent: intent ?? "queue" });
     return;
   }
 
@@ -4296,7 +4274,7 @@ async function reconcilePendingDeliveryProof() {
   await Promise.allSettled(candidates.map((entry) => checkPendingDelivery(entry)));
 }
 
-function enqueue(text, attachments = [], { intent = state.sendMode } = {}) {
+function enqueue(text, attachments = [], { intent = "queue" } = {}) {
   const bubble = addUser(text, { own: true, attachments });
   const steering = intent === "steer" && state.turnOwnership === "bridge";
   const nativeExternalCodex = state.turnOwnership === "external" && activeProvider() === "codex";
@@ -5219,8 +5197,65 @@ async function answerApproval(decision) {
   try { await api("/api/approval", { requestId: id, decision, provider: activeProvider() }); } catch (e) { chip("⚠️", "approval failed: " + e.message); }
 }
 
-// ---------- sheets ----------
+// ---------- anchored control menus + sheets ----------
+let controlPopoverAnchor = null;
+
+function positionControlPopover() {
+  const popover = $("controlPopover");
+  const anchor = controlPopoverAnchor;
+  if (!anchor || !popover.classList.contains("show")) { return; }
+
+  const anchorRect = anchor.getBoundingClientRect();
+  const availableAbove = Math.max(140, anchorRect.top - 16);
+  popover.style.maxHeight = `${Math.min(window.innerHeight * .52, 430, availableAbove)}px`;
+  const menuRect = popover.getBoundingClientRect();
+  const left = Math.max(8, Math.min(anchorRect.right - menuRect.width, window.innerWidth - menuRect.width - 8));
+  const top = Math.max(8, anchorRect.top - menuRect.height - 7);
+  popover.style.left = `${left}px`;
+  popover.style.top = `${top}px`;
+}
+
+function openControlPopover(anchor, html, kind) {
+  const popover = $("controlPopover");
+  if (controlPopoverAnchor && controlPopoverAnchor !== anchor) {
+    controlPopoverAnchor.setAttribute("aria-expanded", "false");
+  }
+  controlPopoverAnchor = anchor;
+  anchor.setAttribute("aria-expanded", "true");
+  popover.dataset.kind = kind || "";
+  popover.innerHTML = html;
+  popover.classList.add("show");
+  popover.setAttribute("aria-hidden", "false");
+  positionControlPopover();
+  requestAnimationFrame(() => {
+    positionControlPopover();
+    popover.querySelector("button:not(:disabled)")?.focus();
+  });
+}
+
+function closeControlPopover({ restoreFocus = false } = {}) {
+  const popover = $("controlPopover");
+  if (!popover?.classList.contains("show")) { return; }
+  const anchor = controlPopoverAnchor;
+  popover.classList.remove("show");
+  popover.setAttribute("aria-hidden", "true");
+  popover.innerHTML = "";
+  popover.dataset.kind = "";
+  anchor?.setAttribute("aria-expanded", "false");
+  controlPopoverAnchor = null;
+  if (restoreFocus) { anchor?.focus(); }
+}
+
+function toggleControlPopover(anchor, opener) {
+  if ($("controlPopover").classList.contains("show") && controlPopoverAnchor === anchor) {
+    closeControlPopover({ restoreFocus: true });
+    return;
+  }
+  opener();
+}
+
 function openSheet(html) {
+  closeControlPopover();
   if (!$("sheet").classList.contains("show")) { state.sheetReturnFocus = document.activeElement; }
   $("sheet").removeAttribute("inert");
   $("app").setAttribute("inert", "");
@@ -5804,12 +5839,11 @@ function setLockStatus(lock) {
 }
 
 function openLockContent(html) {
-  openSheet(html);
-  $("sheetBody").dataset.sheetKind = "lock";
+  openControlPopover($("lockCtl"), html, "lock");
 }
 
 function isLockSheetOpen() {
-  return $("sheet").classList.contains("show") && $("sheetBody").dataset.sheetKind === "lock";
+  return $("controlPopover").classList.contains("show") && $("controlPopover").dataset.kind === "lock";
 }
 
 function syncLockControl() {
@@ -5881,7 +5915,7 @@ function renderLockSheet() {
       <button class="primary-btn" id="retryTakeLockBtn">Try again</button>
       <button type="button" class="opt opt-button" id="escapeLockBtn" style="width:100%;margin-top:8px">Start another session</button>`);
     $("retryTakeLockBtn").onclick = () => tryTakeLock($("retryTakeLockBtn"));
-    $("escapeLockBtn").onclick = () => { closeSheet(); openNewSheet(); };
+    $("escapeLockBtn").onclick = () => { closeControlPopover(); openNewSheet(); };
     return;
   }
 
@@ -5935,13 +5969,16 @@ async function openLockSheet() {
 
 function openModelSheet(returnToPair = false) {
   const html = state.models.filter((m) => !m.hidden).map((m) => `
-    <button type="button" class="opt opt-button ${m.id === state.model ? "sel" : ""}" data-model="${m.id}">
-      <div class="radio"></div>
-      <div><div class="on">${esc(m.displayName || m.id)}</div><div class="od">${esc(m.description || "")}</div></div>
+    <button type="button" class="control-menu-row" data-model="${m.id}">
+      <span class="menu-check">${m.id === state.model ? "✓" : ""}</span>
+      <span class="menu-label">${esc(m.displayName || m.id)}</span>
     </button>`).join("");
-  openSheet(`<h2>Model</h2><div class="hint">Which model runs your next message.</div>${html}`);
-  $("sheetBody").querySelectorAll("[data-model]").forEach((el) => {
-    el.onclick = () => { setModel(el.dataset.model); returnToPair ? openModelEffortSheet() : closeSheet(); };
+  openControlPopover($("modelEffortCtl"), `
+    ${returnToPair ? '<button type="button" class="control-menu-row control-menu-back" id="backToModelEffort"><span class="menu-arrow">‹</span><span class="menu-label">Model and effort</span></button>' : ""}
+    <div class="control-menu-title">Model</div>${html}`, "model");
+  $("controlPopover").querySelector("#backToModelEffort")?.addEventListener("click", openModelEffortSheet);
+  $("controlPopover").querySelectorAll("[data-model]").forEach((el) => {
+    el.onclick = () => { setModel(el.dataset.model); returnToPair ? openModelEffortSheet() : closeControlPopover(); };
   });
 }
 
@@ -5957,19 +5994,23 @@ function openEffortSheet(returnToPair = false) {
   }
 
   const html = efforts.map((e) => `
-    <button type="button" class="opt opt-button ${e.reasoningEffort === state.effort ? "sel" : ""}" data-effort="${e.reasoningEffort}">
-      <div class="radio"></div>
-      <div><div class="on">${esc(e.reasoningEffort)}</div><div class="od">${esc(e.description || "")}</div></div>
+    <button type="button" class="control-menu-row" data-effort="${e.reasoningEffort}">
+      <span class="menu-check">${e.reasoningEffort === state.effort ? "✓" : ""}</span>
+      <span class="menu-label">${esc(e.reasoningEffort)}</span>
     </button>`).join("");
-  openSheet(`<h2>Reasoning effort</h2><div class="hint">Higher effort thinks longer and uses more of your quota.</div>${html}`);
-  $("sheetBody").querySelectorAll("[data-effort]").forEach((el) => {
+  openControlPopover($("modelEffortCtl"), `
+    ${returnToPair ? '<button type="button" class="control-menu-row control-menu-back" id="backToModelEffort"><span class="menu-arrow">‹</span><span class="menu-label">Model and effort</span></button>' : ""}
+    <div class="control-menu-title">Effort</div>${html}
+    <div class="control-menu-note">Higher effort thinks longer and uses more quota.</div>`, "effort");
+  $("controlPopover").querySelector("#backToModelEffort")?.addEventListener("click", openModelEffortSheet);
+  $("controlPopover").querySelectorAll("[data-effort]").forEach((el) => {
     el.onclick = () => {
       state.effort = el.dataset.effort;
       setSettingsTruth({ state: "override", message: "Exact override for next turn" });
       persistPrefs();
       saveThreadSettings().catch((e) => chip("⚠️", "Could not save thread settings: " + e.message));
       syncControls();
-      returnToPair ? openModelEffortSheet() : closeSheet();
+      returnToPair ? openModelEffortSheet() : closeControlPopover();
     };
   });
 }
@@ -5977,9 +6018,9 @@ function openEffortSheet(returnToPair = false) {
 function openModelEffortSheet() {
   const model = currentModel();
   const effort = state.effort === "provider-default" ? "Provider default" : (state.effort || "Unavailable");
-  openSheet(`<h2>Model and effort</h2>
-    <button type="button" class="opt opt-button" id="chooseModel"><div><div class="od">Model</div><div class="on">${esc(model?.displayName || state.model || "Unavailable")}</div></div><span class="ck">›</span></button>
-    <button type="button" class="opt opt-button" id="chooseEffort"><div><div class="od">Effort</div><div class="on">${esc(effort)}</div></div><span class="ck">›</span></button>`);
+  openControlPopover($("modelEffortCtl"), `<div class="control-menu-title">Run settings</div>
+    <button type="button" class="control-menu-row" id="chooseModel"><span class="menu-label">Model</span><span class="menu-value">${esc(model?.displayName || state.model || "Unavailable")}</span><span class="menu-arrow">›</span></button>
+    <button type="button" class="control-menu-row" id="chooseEffort"><span class="menu-label">Effort</span><span class="menu-value">${esc(effort)}</span><span class="menu-arrow">›</span></button>`, "model-effort");
   $('chooseModel').onclick = () => openModelSheet(true);
   $('chooseEffort').onclick = () => openEffortSheet(true);
 }
@@ -5988,36 +6029,32 @@ function openModeSheet() {
   const provider = activeProvider();
   const set = modeSetFor(provider);
   const cur = currentMode().key;
-  const who = PROVIDER_LABELS[provider] || "the agent";
-  const unknown = currentMode().providerExact
-    ? `<div class="hint">This thread uses an exact provider-managed policy. Leave it unchanged, or choose a preset below to replace it for the next turn.</div>`
-    : (currentMode().unknown
-      ? `<div class="hint">${esc(currentMode().desc)} The existing policy will not be approximated silently.</div>`
-      : "");
+  const unknown = currentMode().providerExact || currentMode().unknown
+    ? `<div class="control-menu-note">${esc(currentMode().desc)} Choose a preset only if you want to replace it for the next turn.</div>`
+    : "";
   const providerPolicy = state.threadApprovalPolicy || state.threadSandboxPolicy
-    ? `<button type="button" class="opt opt-button ${currentMode().providerExact ? "sel" : ""}" data-provider-policy="true">
-        <div class="radio"></div><div><div class="on">Keep provider-managed policy</div><div class="od">Use the exact policy Codex records for this thread.</div></div>
+    ? `<button type="button" class="control-menu-row" data-provider-policy="true">
+        <span class="menu-check">${currentMode().providerExact ? "✓" : ""}</span><span class="menu-label">Provider-managed</span>
       </button>`
     : "";
   const html = Object.entries(set).map(([k, v]) => `
-    <button type="button" class="opt opt-button ${k === cur ? "sel" : ""}" data-mode="${k}">
-      <div class="radio"></div>
-      <div><div class="on">${esc(v.name)}</div><div class="od">${esc(v.desc)}</div></div>
+    <button type="button" class="control-menu-row" data-mode="${k}" title="${esc(v.desc)}">
+      <span class="menu-check">${k === cur ? "✓" : ""}</span><span class="menu-label">${esc(v.name)}</span>
     </button>`).join("");
-  openSheet(`<h2>Permissions</h2><div class="hint">How much ${esc(who)} can do before asking you.</div>${unknown}${providerPolicy}${html}`);
-  $("sheetBody").querySelector("[data-provider-policy]")?.addEventListener("click", async () => {
+  openControlPopover($("modeCtl"), `<div class="control-menu-title">Permissions</div>${unknown}${providerPolicy}${html}`, "permissions");
+  $("controlPopover").querySelector("[data-provider-policy]")?.addEventListener("click", async () => {
     const active = state.active;
     setSettingsTruth({ state: "loading", message: "Restoring provider-managed policy…" });
     try {
       await saveThreadSettings({ mode: null });
       if (state.active === active) { await loadThreadSettings(active); }
-      closeSheet();
+      closeControlPopover();
     } catch (error) {
       setSettingsTruth({ state: "error", message: "Could not restore provider policy" });
       chip("⚠️", "Could not restore provider policy: " + error.message);
     }
   });
-  $("sheetBody").querySelectorAll("[data-mode]").forEach((el) => {
+  $("controlPopover").querySelectorAll("[data-mode]").forEach((el) => {
     el.onclick = () => {
       if (state.active) {
         state.threadMode = el.dataset.mode;
@@ -6030,21 +6067,8 @@ function openModeSheet() {
 
       persistPrefs();
       syncControls();
-      closeSheet();
+      closeControlPopover();
     };
-  });
-}
-
-function openSendModeSheet() {
-  const modes = sendModesFor(activeProvider());
-  const html = Object.entries(modes).map(([k, v]) => `
-    <button type="button" class="opt opt-button ${k === state.sendMode ? "sel" : ""}" data-send="${k}">
-      <div class="radio"></div>
-      <div><div class="on">${esc(v.name)}</div><div class="od">${esc(v.desc)}</div></div>
-    </button>`).join("");
-  openSheet(`<h2>Sending mid-turn</h2><div class="hint">What happens when you send while the agent is working. Stop is offered only when this bridge owns the exact active turn.</div>${html}`);
-  $("sheetBody").querySelectorAll("[data-send]").forEach((el) => {
-    el.onclick = () => { state.sendMode = el.dataset.send; persistPrefs(); syncControls(); closeSheet(); };
   });
 }
 
@@ -6069,9 +6093,6 @@ function syncControls() {
   $("modelName").textContent = m?.displayName || state.model || "—";
   $("effortName").textContent = state.effort === "provider-default" ? "Provider default" : state.effort || "—";
   $("modeName").textContent = currentMode().name;
-  const sendBehavior = effectiveSendBehavior();
-  $("steerName").textContent = sendBehavior.name;
-  $("steerCtl").title = sendBehavior.desc;
   const imagesSupported = supportsInput("image");
   $("attachBtn").disabled = !imagesSupported || state.uploadingAttachments > 0;
   $("attachBtn").title = imagesSupported ? "Attach images" : `${providerLabel()} does not advertise image prompt support`;
@@ -6280,7 +6301,6 @@ function persistPrefs() {
     model: saveComposerDefaults ? state.model : previous.model,
     effort: saveComposerDefaults ? state.effort : previous.effort,
     modeByProvider: state.modeByProvider,
-    sendMode: state.sendMode,
     sidebarCollapsed: state.sidebarCollapsed,
   }));
 }
@@ -7427,8 +7447,6 @@ async function initModels(provider = state.provider, threadId = null) {
 
     if (prefs.modeByProvider) { state.modeByProvider = { ...state.modeByProvider, ...prefs.modeByProvider }; }
 
-    if (prefs.sendMode && SEND_MODES[prefs.sendMode]) { state.sendMode = prefs.sendMode; }
-
     syncControls();
     return state.modelsReady;
   } catch (error) {
@@ -7450,16 +7468,16 @@ $("sidebarToggleBtn").onclick = () => toggleSidebar();
 $("loadMore").onclick = () => loadThreads(true);
 let sendHoldTimer = null;
 let suppressSendClickUntil = 0;
-function openSendActionsSheet() {
+function openSendActionsMenu() {
   const hasMessage = !!$('input').value.trim() || state.composerAttachments.length > 0;
   const canSend = hasMessage && !$('sendBtn').disabled;
-  openSheet(`<h2>Message action</h2>
-    <button type="button" class="primary-btn" id="steerActionMobile"${canSend ? "" : " disabled"}>Steer</button>
-    <button type="button" class="secondary-btn" id="queueActionMobile"${canSend ? "" : " disabled"}>Queue</button>
-    <button type="button" class="secondary-btn" id="saveActionDraft"${hasMessage ? "" : " disabled"}>Save as draft</button>`);
-  $('steerActionMobile').onclick = () => { closeSheet(); send("steer"); };
-  $('queueActionMobile').onclick = () => { closeSheet(); send("queue"); };
-  $('saveActionDraft').onclick = () => { if (saveCurrentAsDraft()) { closeSheet(); } };
+  openControlPopover($("sendBtn"), `<div class="control-menu-title">Message action</div>
+    <button type="button" class="control-menu-row" id="steerActionMobile"${canSend ? "" : " disabled"}><span class="menu-label">Steer</span></button>
+    <button type="button" class="control-menu-row" id="queueActionMobile"${canSend ? "" : " disabled"}><span class="menu-label">Queue</span></button>
+    <button type="button" class="control-menu-row" id="saveActionDraft"${hasMessage ? "" : " disabled"}><span class="menu-label">Save as draft</span></button>`, "send-actions");
+  $('steerActionMobile').onclick = () => { closeControlPopover(); send("steer"); };
+  $('queueActionMobile').onclick = () => { closeControlPopover(); send("queue"); };
+  $('saveActionDraft').onclick = () => { if (saveCurrentAsDraft()) { closeControlPopover(); } };
 }
 $("sendBtn").onclick = () => {
   if (Date.now() < suppressSendClickUntil) { return; }
@@ -7471,7 +7489,7 @@ $("sendActions").addEventListener("pointerdown", (event) => {
   sendHoldTimer = setTimeout(() => {
     suppressSendClickUntil = Date.now() + 1000;
     navigator.vibrate?.(15);
-    openSendActionsSheet();
+    openSendActionsMenu();
   }, 500);
 });
 for (const eventName of ["pointerup", "pointercancel", "pointerleave"]) {
@@ -7537,10 +7555,9 @@ $("stopBtn").onclick = stopAgent;
 $("okBtn").onclick = () => answerApproval("approve");
 $("sessBtn").onclick = () => answerApproval("session");
 $("noBtn").onclick = () => answerApproval("deny");
-$("modelEffortCtl").onclick = openModelEffortSheet;
-$("modeCtl").onclick = openModeSheet;
-$("steerCtl").onclick = openSendModeSheet;
-$("lockCtl").onclick = openLockSheet;
+$("modelEffortCtl").onclick = () => toggleControlPopover($("modelEffortCtl"), openModelEffortSheet);
+$("modeCtl").onclick = () => toggleControlPopover($("modeCtl"), openModeSheet);
+$("lockCtl").onclick = () => toggleControlPopover($("lockCtl"), openLockSheet);
 $("newBtn").onclick = openNewSession;
 $("usageBtn").onclick = openUsageSheet;
 $("notifyBtn").onclick = () => state.active && openTaskNotificationSheet(state.active);
@@ -7595,10 +7612,20 @@ document.addEventListener("keydown", (event) => {
     $("search").select();
   } else if (event.key === "Escape" && $("imageViewer").classList.contains("show")) {
     closeAttachmentViewer();
+  } else if (event.key === "Escape" && $("controlPopover").classList.contains("show")) {
+    closeControlPopover({ restoreFocus: true });
   } else if (event.key === "Escape" && $("sheet").classList.contains("show")) {
     closeSheet();
   }
 });
+
+document.addEventListener("pointerdown", (event) => {
+  const popover = $("controlPopover");
+  if (!popover.classList.contains("show")) { return; }
+  if (popover.contains(event.target) || controlPopoverAnchor?.contains(event.target)) { return; }
+  closeControlPopover();
+});
+window.addEventListener("resize", positionControlPopover);
 
 // Local-path links (see localFileTarget) open in the file viewer instead of
 // navigating the browser to a path this server does not serve.
