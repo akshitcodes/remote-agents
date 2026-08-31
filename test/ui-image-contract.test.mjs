@@ -81,9 +81,17 @@ test("composer scratch text and saved prompt drafts are thread scoped", () => {
   assert.match(html, /restoreComposerDraft\(t\)/);
   assert.match(html, /window\.addEventListener\("pagehide", saveComposerDraft\)/);
   assert.match(html, /id="draftStrip"/);
+  assert.match(html, /id="steerAction">Steer/);
+  assert.match(html, /id="queueAction">Queue/);
   assert.match(html, /id="saveDraftAction"/);
   assert.match(html, /openSendActionsSheet/);
+  assert.match(html, /id="steerActionMobile"/);
+  assert.match(html, /id="queueActionMobile"/);
+  assert.match(html, /send\("steer"\)/);
+  assert.match(html, /send\("queue"\)/);
+  assert.match(html, /enqueue\(text, attachments, \{ intent: intent \?\? state\.sendMode \}\)/);
   assert.match(html, /sendHoldTimer = setTimeout/);
+  assert.match(html, /suppressSendClickUntil = Date\.now\(\) \+ 1000/);
   assert.match(html, /const canSend = hasMessage && !\$\('sendBtn'\)\.disabled/);
   assert.match(html, /\$\("sendActions"\)\.title = readiness\.ready/);
   assert.doesNotMatch(html, /id="draftBtn"/);

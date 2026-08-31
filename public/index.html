@@ -651,7 +651,11 @@
         <button id="stopBtn" aria-label="Stop">■</button>
         <div id="sendActions">
           <button id="sendBtn" aria-label="Send">➤</button>
-          <div class="send-popover" id="sendPopover"><button type="button" id="saveDraftAction">Save as draft</button></div>
+          <div class="send-popover" id="sendPopover">
+            <button type="button" id="steerAction">Steer</button>
+            <button type="button" id="queueAction">Queue</button>
+            <button type="button" id="saveDraftAction">Save as draft</button>
+          </div>
         </div>
       </div>
     </div>
@@ -3522,7 +3526,7 @@ async function uploadImages(files) {
   }
 }
 
-async function send() {
+async function send(intent = null) {
   const text = $("input").value.trim();
   const attachments = state.composerAttachments.slice();
 
@@ -3541,7 +3545,7 @@ async function send() {
   saveComposerDraft();
 
   if (state.busy) {
-    enqueue(text, attachments);
+    enqueue(text, attachments, { intent: intent ?? state.sendMode });
     return;
   }
 
@@ -7445,20 +7449,27 @@ $("backBtn").onclick = backToList;
 $("sidebarToggleBtn").onclick = () => toggleSidebar();
 $("loadMore").onclick = () => loadThreads(true);
 let sendHoldTimer = null;
+let suppressSendClickUntil = 0;
 function openSendActionsSheet() {
   const hasMessage = !!$('input').value.trim() || state.composerAttachments.length > 0;
   const canSend = hasMessage && !$('sendBtn').disabled;
   openSheet(`<h2>Message action</h2>
-    <button type="button" class="primary-btn" id="sendActionNow"${canSend ? "" : " disabled"}>Send</button>
+    <button type="button" class="primary-btn" id="steerActionMobile"${canSend ? "" : " disabled"}>Steer</button>
+    <button type="button" class="secondary-btn" id="queueActionMobile"${canSend ? "" : " disabled"}>Queue</button>
     <button type="button" class="secondary-btn" id="saveActionDraft"${hasMessage ? "" : " disabled"}>Save as draft</button>`);
-  $('sendActionNow').onclick = () => { closeSheet(); send(); };
+  $('steerActionMobile').onclick = () => { closeSheet(); send("steer"); };
+  $('queueActionMobile').onclick = () => { closeSheet(); send("queue"); };
   $('saveActionDraft').onclick = () => { if (saveCurrentAsDraft()) { closeSheet(); } };
 }
-$("sendBtn").onclick = send;
+$("sendBtn").onclick = () => {
+  if (Date.now() < suppressSendClickUntil) { return; }
+  send();
+};
 $("sendActions").addEventListener("pointerdown", (event) => {
   if (event.pointerType === "mouse") { return; }
   clearTimeout(sendHoldTimer);
   sendHoldTimer = setTimeout(() => {
+    suppressSendClickUntil = Date.now() + 1000;
     navigator.vibrate?.(15);
     openSendActionsSheet();
   }, 500);
@@ -7466,6 +7477,8 @@ $("sendActions").addEventListener("pointerdown", (event) => {
 for (const eventName of ["pointerup", "pointercancel", "pointerleave"]) {
   $("sendActions").addEventListener(eventName, () => { clearTimeout(sendHoldTimer); sendHoldTimer = null; });
 }
+$("steerAction").onclick = () => send("steer");
+$("queueAction").onclick = () => send("queue");
 $("saveDraftAction").onclick = () => saveCurrentAsDraft();
 $("attachBtn").onclick = () => {
   if (!supportsInput("image")) { chip("⚠️", `${providerLabel()} does not advertise image prompt support`); return; }
