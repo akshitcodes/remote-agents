@@ -91,13 +91,23 @@ test("the loopback setup challenge proves token knowledge without returning the 
 
 test("terminal browser handoffs use a separate one-use loopback listener", async () => {
   let enrollments = 0;
+  let browserBootstraps = 0;
   const handoff = await startLocalTerminalBrowserHandoff({
     provider: "claude",
     threadId: "thread-local-setup",
+    browserSecret: "browser-identity-with-at-least-32-bytes",
     ttlMs: 2_000,
     createEnrollment: () => {
       enrollments += 1;
       return { origin: "https://agents.example.test", secret: "passkey-enrollment-secret" };
+    },
+    createBrowserBootstrap: ({ context, browserSecret, enrollmentSecret, ttlMs }) => {
+      browserBootstraps += 1;
+      assert.deepEqual(context, { provider: "claude", threadId: "thread-local-setup" });
+      assert.equal(browserSecret, "browser-identity-with-at-least-32-bytes");
+      assert.equal(enrollmentSecret, "passkey-enrollment-secret");
+      assert.equal(ttlMs, undefined);
+      return { origin: "https://agents.example.test", secret: "one-use" };
     },
   });
   const handoffUrl = new URL(handoff.url);
@@ -107,7 +117,8 @@ test("terminal browser handoffs use a separate one-use loopback listener", async
   const consumed = await fetch(handoff.url, { redirect: "manual" });
   assert.equal(consumed.status, 302);
   assert.equal(enrollments, 1);
-  assert.match(consumed.headers.get("location"), /^https:\/\/agents\.example\.test\/terminal\?provider=claude&threadId=thread-local-setup#enroll=/);
+  assert.equal(browserBootstraps, 1);
+  assert.equal(consumed.headers.get("location"), "https://agents.example.test/api/terminal/handoff?handoff=one-use");
   await new Promise((resolve) => setTimeout(resolve, 20));
   await assert.rejects(fetch(handoff.url, { redirect: "manual" }));
   assert.equal(enrollments, 1);
@@ -118,6 +129,7 @@ test("an expired terminal browser handoff cannot create an enrollment", async ()
   const handoff = await startLocalTerminalBrowserHandoff({
     provider: "claude",
     threadId: "thread-expired-setup",
+    browserSecret: "browser-identity-with-at-least-32-bytes",
     ttlMs: 15,
     createEnrollment: () => {
       enrollments += 1;
@@ -127,6 +139,120 @@ test("an expired terminal browser handoff cannot create an enrollment", async ()
   await new Promise((resolve) => setTimeout(resolve, 30));
   await assert.rejects(fetch(handoff.url, { redirect: "manual" }));
   assert.equal(enrollments, 0);
+});
+
+test("terminal handoff transfers pairing to the configured HTTPS origin once", async () => {
+  resetAuthRateLimits();
+  configureServer({ host: "127.0.0.1", port: 0, token: TOKEN, publicOrigin: "https://agents.example.test" });
+  const handoff = await startLocalTerminalBrowserHandoff({
+    provider: "codex",
+    threadId: "thread-cross-origin",
+    browserSecret: "existing-browser-identity-with-at-least-32-bytes",
+    ttlMs: 2_000,
+    createEnrollment: () => ({ origin: "https://agents.example.test", secret: "one-use-enrollment-secret" }),
+  });
+
+  const local = await fetch(handoff.url, { redirect: "manual" });
+  const publicTarget = new URL(local.headers.get("location"));
+  assert.equal(publicTarget.origin, "https://agents.example.test");
+  assert.equal(publicTarget.pathname, "/api/terminal/handoff");
+  assert.ok(publicTarget.searchParams.get("handoff"));
+  assert.equal(publicTarget.hash, "");
+  assert.doesNotMatch(local.headers.get("location"), new RegExp(TOKEN));
+
+  const insecure = await request(publicTarget.pathname + publicTarget.search, {
+    headers: { host: "agents.example.test" },
+  });
+  assert.equal(insecure.statusCode, 401);
+  assert.equal(insecure.getHeader("set-cookie"), null);
+
+  const wrongHost = await request(publicTarget.pathname + publicTarget.search, {
+    headers: { host: "other.example.test", "x-forwarded-proto": "https" },
+  });
+  assert.equal(wrongHost.statusCode, 401);
+  assert.equal(wrongHost.getHeader("set-cookie"), null);
+
+  const spoofedProxy = await request(publicTarget.pathname + publicTarget.search, {
+    headers: { host: "agents.example.test", "x-forwarded-proto": "https" },
+    remoteAddress: "203.0.113.12",
+  });
+  assert.equal(spoofedProxy.statusCode, 401);
+  assert.equal(spoofedProxy.getHeader("set-cookie"), null);
+
+  const subresource = await request(publicTarget.pathname + publicTarget.search, {
+    headers: { host: "agents.example.test", "x-forwarded-proto": "https", "sec-fetch-dest": "image" },
+  });
+  assert.equal(subresource.statusCode, 401);
+  assert.equal(subresource.getHeader("set-cookie"), null);
+
+  const redeemed = await request(publicTarget.pathname + publicTarget.search, {
+    headers: { host: "agents.example.test", "x-forwarded-proto": "https" },
+  });
+  assert.equal(redeemed.statusCode, 302);
+  assert.equal(redeemed.getHeader("location"), "https://agents.example.test/terminal?provider=codex&threadId=thread-cross-origin#enroll=one-use-enrollment-secret");
+  assert.match(redeemed.getHeader("set-cookie"), /cxp_session=/);
+  assert.match(redeemed.getHeader("set-cookie"), /cxp_browser=existing-browser-identity/);
+  assert.equal((redeemed.getHeader("set-cookie").match(/SameSite=Lax/g) ?? []).length, 2);
+  assert.equal((redeemed.getHeader("set-cookie").match(/HttpOnly/g) ?? []).length, 2);
+  assert.equal((redeemed.getHeader("set-cookie").match(/Secure/g) ?? []).length, 2);
+  assert.doesNotMatch(redeemed.getHeader("location"), new RegExp(TOKEN));
+
+  const replay = await request(publicTarget.pathname + publicTarget.search, {
+    headers: { host: "agents.example.test", "x-forwarded-proto": "https" },
+  });
+  assert.equal(replay.statusCode, 401);
+  assert.equal(replay.getHeader("set-cookie"), null);
+
+  const authenticatedReplay = await request(publicTarget.pathname + publicTarget.search, {
+    headers: { host: "agents.example.test", "x-forwarded-proto": "https", authorization: `Bearer ${TOKEN}` },
+  });
+  assert.equal(authenticatedReplay.statusCode, 302);
+  assert.equal(authenticatedReplay.getHeader("location"), "/terminal");
+});
+
+test("terminal handoff preserves a browser identity already established at the target origin", async () => {
+  resetAuthRateLimits();
+  configureServer({ host: "127.0.0.1", port: 0, token: TOKEN, publicOrigin: "https://agents.example.test" });
+  const handoff = await startLocalTerminalBrowserHandoff({
+    provider: "claude",
+    threadId: "thread-existing-target",
+    browserSecret: "source-origin-browser-identity-with-32-bytes",
+    createEnrollment: () => ({ origin: "https://agents.example.test", secret: "target-enrollment-secret" }),
+  });
+  const local = await fetch(handoff.url, { redirect: "manual" });
+  const publicTarget = new URL(local.headers.get("location"));
+  const redeemed = await request(publicTarget.pathname + publicTarget.search, {
+    headers: {
+      host: "agents.example.test",
+      "x-forwarded-proto": "https",
+      cookie: "cxp_browser=target-origin-browser-identity-with-32-bytes",
+    },
+  });
+  assert.equal(redeemed.statusCode, 302);
+  assert.match(redeemed.getHeader("set-cookie"), /cxp_browser=target-origin-browser-identity-with-32-bytes/);
+  assert.doesNotMatch(redeemed.getHeader("set-cookie"), /source-origin-browser-identity/);
+});
+
+test("an expired public terminal handoff cannot establish browser cookies", async () => {
+  resetAuthRateLimits();
+  configureServer({ host: "127.0.0.1", port: 0, token: TOKEN, publicOrigin: "https://agents.example.test" });
+  const handoff = await startLocalTerminalBrowserHandoff({
+    provider: "codex",
+    threadId: "thread-expired-public-handoff",
+    browserSecret: "existing-browser-identity-with-at-least-32-bytes",
+    ttlMs: 2_000,
+    browserBootstrapTtlMs: 10,
+    createEnrollment: () => ({ origin: "https://agents.example.test", secret: "expired-enrollment-secret" }),
+  });
+  const local = await fetch(handoff.url, { redirect: "manual" });
+  const publicTarget = new URL(local.headers.get("location"));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  const expired = await request(publicTarget.pathname + publicTarget.search, {
+    headers: { host: "agents.example.test", "x-forwarded-proto": "https" },
+  });
+  assert.equal(expired.statusCode, 401);
+  assert.equal(expired.getHeader("set-cookie"), null);
 });
 
 test("an unauthenticated browser cannot mint a local terminal handoff", async () => {

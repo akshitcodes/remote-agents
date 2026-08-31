@@ -95,6 +95,27 @@ test("disable wins a race with asynchronous passkey registration", async (t) => 
   await assert.rejects(verification, (error) => error.code === "terminal_security_changed");
 });
 
+test("browser handoff bootstraps are one-use, expiring, and cleared by disable", (t) => {
+  let now = 1000;
+  const security = new TerminalSecurity({
+    file: fixture(t), origin: "https://agents.example.test", now: () => now, webauthn: mockWebauthn(),
+  });
+  const enrollment = security.createEnrollment();
+  const first = security.createBrowserBootstrap({
+    browserSecret: "browser-one", enrollmentSecret: enrollment.secret, context: { provider: "codex", threadId: "thread-one" },
+  });
+  assert.equal(security.consumeBrowserBootstrap(first.secret).context.threadId, "thread-one");
+  assert.equal(security.consumeBrowserBootstrap(first.secret), null);
+
+  const expired = security.createBrowserBootstrap({ browserSecret: "browser-one", enrollmentSecret: enrollment.secret, ttlMs: 10 });
+  now += 11;
+  assert.equal(security.consumeBrowserBootstrap(expired.secret), null);
+
+  const disabled = security.createBrowserBootstrap({ browserSecret: "browser-one", enrollmentSecret: enrollment.secret });
+  security.disable();
+  assert.equal(security.consumeBrowserBootstrap(disabled.secret), null);
+});
+
 test("local terminal administration proof covers both nonce and exact body", () => {
   const token = "pairing-secret";
   const nonce = "a".repeat(64);

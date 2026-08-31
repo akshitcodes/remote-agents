@@ -1183,6 +1183,10 @@ function secureRequest(req) {
   return req.socket.encrypted || String(req.headers["x-forwarded-proto"] ?? "").split(",")[0].trim() === "https";
 }
 
+function trustedHttpsRequest(req) {
+  return !!req.socket.encrypted || (isLoopback(req) && String(req.headers["x-forwarded-proto"] ?? "").split(",")[0].trim() === "https");
+}
+
 function cookieHeader(name, value, { maxAge = 31536000, sameSite = "Strict", httpOnly = true, secure = true } = {}) {
   return `${name}=${encodeURIComponent(value)}; Path=/; Max-Age=${maxAge}; SameSite=${sameSite}${httpOnly ? "; HttpOnly" : ""}${secure ? "; Secure" : ""}`;
 }
@@ -1197,7 +1201,7 @@ function ensureBrowserIdentity(req, res) {
   const existing = cookieValue(req, BROWSER_COOKIE_NAME);
   if (existing && existing.length >= 32) { return existing; }
   const created = randomBytes(32).toString("base64url");
-  appendCookies(res, [cookieHeader(BROWSER_COOKIE_NAME, created, { secure: secureRequest(req) })]);
+  appendCookies(res, [cookieHeader(BROWSER_COOKIE_NAME, created, { sameSite: "Lax", secure: secureRequest(req) })]);
   return created;
 }
 
@@ -1629,9 +1633,15 @@ function recentProviderUnavailable(value) {
 export function startLocalTerminalBrowserHandoff({
   provider,
   threadId,
+  browserSecret,
   ttlMs = 60_000,
+  browserBootstrapTtlMs,
   createEnrollment = () => terminalSecurity.createEnrollment(),
+  createBrowserBootstrap = (input) => terminalSecurity.createBrowserBootstrap(input),
 } = {}) {
+  if (typeof browserSecret !== "string" || browserSecret.length < 32) {
+    throw Object.assign(new Error("terminal browser handoff is incomplete"), { status: 409, code: "terminal_handoff_invalid" });
+  }
   if (localTerminalBrowserHandoffCount >= 8) {
     throw Object.assign(new Error("too many terminal setup windows are already open"), { status: 429, code: "terminal_setup_busy" });
   }
@@ -1668,10 +1678,14 @@ export function startLocalTerminalBrowserHandoff({
       consumed = true;
       try {
         const enrollment = createEnrollment();
-        const target = new URL("/terminal", enrollment.origin);
-        target.searchParams.set("provider", provider);
-        target.searchParams.set("threadId", threadId);
-        target.hash = `enroll=${encodeURIComponent(enrollment.secret)}`;
+        const bootstrap = createBrowserBootstrap({
+          browserSecret,
+          enrollmentSecret: enrollment.secret,
+          context: { provider, threadId },
+          ttlMs: browserBootstrapTtlMs,
+        });
+        const target = new URL("/api/terminal/handoff", bootstrap.origin ?? enrollment.origin);
+        target.searchParams.set("handoff", bootstrap.secret);
         response.writeHead(302, { location: target.toString(), "cache-control": "no-store", "referrer-policy": "no-referrer", connection: "close" });
         response.end();
       } catch (error) {
@@ -2198,7 +2212,8 @@ const routes = {
       return json(res, 400, { error: "provider and threadId are required", code: "terminal_context_invalid" });
     }
     await requireReachableTerminalOrigin(PUBLIC_ORIGIN);
-    json(res, 200, await startLocalTerminalBrowserHandoff({ provider, threadId }));
+    const browserSecret = ensureBrowserIdentity(req, res);
+    json(res, 200, await startLocalTerminalBrowserHandoff({ provider, threadId, browserSecret }));
   },
 
   "POST /api/terminal/register/options": async (req, res) => {
@@ -2540,6 +2555,53 @@ export async function handleRequest(req, res) {
     }
   }
 
+  // The localhost-only setup listener redirects here after proving that this
+  // browser is running on the bridge Mac. The capability is short-lived,
+  // stored only as a hash, and consumed before cookies are issued. This lets a
+  // paired browser move from an old/local origin to the configured HTTPS origin
+  // without ever putting the bridge's permanent token in a URL.
+  // This intentionally lives below /api/: every deployed service worker
+  // already bypasses that namespace, so an older cached worker cannot replace
+  // this redirect with the offline app shell and consume the one-use secret.
+  if (url.pathname === "/api/terminal/handoff" && req.method === "GET") {
+    const expectedOrigin = PUBLIC_ORIGIN ? new URL(PUBLIC_ORIGIN) : null;
+    const exactHost = expectedOrigin && String(req.headers.host ?? "") === expectedOrigin.host;
+    const fetchDestination = String(req.headers["sec-fetch-dest"] ?? "");
+    const blocked = authBlock(req);
+    if (blocked) {
+      res.setHeader("retry-after", String(blocked));
+      return json(res, 429, { error: "too_many_attempts" });
+    }
+    if (!expectedOrigin || !trustedHttpsRequest(req) || !exactHost || (fetchDestination && fetchDestination !== "document")) {
+      return rejectAuth(req, res, url, { attempted: true });
+    }
+    const bootstrap = terminalSecurity.consumeBrowserBootstrap(url.searchParams.get("handoff") ?? "");
+    if (!bootstrap) {
+      if (isAuthed(req)) {
+        res.writeHead(302, { location: "/terminal", "cache-control": "no-store", "referrer-policy": "no-referrer" });
+        return res.end();
+      }
+      return rejectAuth(req, res, url, { attempted: true });
+    }
+
+    clearAuthFailures(req);
+    const target = new URL("/terminal", PUBLIC_ORIGIN);
+    target.searchParams.set("provider", bootstrap.context.provider);
+    target.searchParams.set("threadId", bootstrap.context.threadId);
+    target.hash = `enroll=${encodeURIComponent(bootstrap.enrollmentSecret)}`;
+    const browserIdentity = cookieValue(req, BROWSER_COOKIE_NAME) || bootstrap.browserSecret;
+    res.writeHead(302, {
+      "set-cookie": [
+        cookieHeader(COOKIE_NAME, TOKEN, { sameSite: "Lax", secure: true }),
+        cookieHeader(BROWSER_COOKIE_NAME, browserIdentity, { sameSite: "Lax", secure: true }),
+      ],
+      location: target.toString(),
+      "cache-control": "no-store",
+      "referrer-policy": "no-referrer",
+    });
+    return res.end();
+  }
+
   // Internal endpoint for the Claude PreToolUse hook (loopback only, secret-auth
   // inside the provider). No session cookie — the hook has no browser context.
   if (url.pathname === "/internal/claude-approval" && req.method === "POST") {
@@ -2578,7 +2640,7 @@ export async function handleRequest(req, res) {
       res.writeHead(302, {
         "set-cookie": [
           cookieHeader(COOKIE_NAME, TOKEN, { sameSite: "Lax", secure }),
-          cookieHeader(BROWSER_COOKIE_NAME, browserIdentity, { secure }),
+          cookieHeader(BROWSER_COOKIE_NAME, browserIdentity, { sameSite: "Lax", secure }),
         ],
         location: "/",
         "referrer-policy": "no-referrer",

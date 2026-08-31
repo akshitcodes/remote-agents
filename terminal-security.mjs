@@ -23,6 +23,7 @@ const CEREMONY_TTL_MS = 2 * 60 * 1000;
 const UNLOCK_IDLE_TTL_MS = 15 * 60 * 1000;
 const UNLOCK_ABSOLUTE_TTL_MS = 2 * 60 * 60 * 1000;
 const TICKET_TTL_MS = 45 * 1000;
+const BROWSER_BOOTSTRAP_TTL_MS = 30 * 1000;
 const MAX_EPHEMERAL = 128;
 
 function terminalError(message, code, status = 400) {
@@ -138,12 +139,14 @@ export class TerminalSecurity {
     this.authenticationChallenges = new Map();
     this.unlocks = new Map();
     this.tickets = new Map();
+    this.browserBootstraps = new Map();
     this.badEnrollmentAttempts = [];
   }
 
   configureOrigin(origin) {
     this.origin = origin ? new URL(origin).origin : null;
     this.rpId = this.origin ? new URL(this.origin).hostname : null;
+    this.browserBootstraps.clear();
   }
 
   state() {
@@ -157,7 +160,7 @@ export class TerminalSecurity {
 
   prune() {
     const now = this.now();
-    for (const map of [this.enrollments, this.registrationChallenges, this.authenticationChallenges, this.tickets]) {
+    for (const map of [this.enrollments, this.registrationChallenges, this.authenticationChallenges, this.tickets, this.browserBootstraps]) {
       for (const [key, value] of map) {
         if (value.expiresAt <= now) { map.delete(key); }
       }
@@ -218,6 +221,29 @@ export class TerminalSecurity {
     return { secret, code: `${code.slice(0, 4)}-${code.slice(4)}`, expiresAt: enrollment.expiresAt, origin: this.origin };
   }
 
+  createBrowserBootstrap({ browserSecret, enrollmentSecret, context, ttlMs = BROWSER_BOOTSTRAP_TTL_MS } = {}) {
+    if (!browserSecret || !enrollmentSecret) {
+      throw terminalError("terminal browser handoff is incomplete", "terminal_handoff_invalid", 409);
+    }
+    this.prune();
+    const secret = token(32);
+    this.browserBootstraps.set(hash(secret), {
+      browserSecret,
+      enrollmentSecret,
+      context: structuredClone(context ?? {}),
+      expiresAt: this.now() + Math.max(1, Math.min(Number(ttlMs) || BROWSER_BOOTSTRAP_TTL_MS, BROWSER_BOOTSTRAP_TTL_MS)),
+    });
+    return { secret, origin: this.origin };
+  }
+
+  consumeBrowserBootstrap(secret) {
+    this.prune();
+    const key = hash(secret);
+    const bootstrap = this.browserBootstraps.get(key);
+    this.browserBootstraps.delete(key);
+    return bootstrap ?? null;
+  }
+
   listDevices() {
     const state = this.state();
     return { enabled: state.enabled, devices: state.devices.map(publicDevice) };
@@ -245,6 +271,7 @@ export class TerminalSecurity {
     this.authenticationChallenges.clear();
     this.unlocks.clear();
     this.tickets.clear();
+    this.browserBootstraps.clear();
     this.onInvalidate({ deviceIds: ids, all: true, reason: "terminal access disabled" });
     return { enabled: false, devices: [] };
   }
@@ -523,4 +550,5 @@ export const terminalSecurityInternals = {
   CEREMONY_TTL_MS,
   UNLOCK_IDLE_TTL_MS,
   TICKET_TTL_MS,
+  BROWSER_BOOTSTRAP_TTL_MS,
 };
