@@ -991,6 +991,15 @@ export async function reconcileUserIntent(provider, threadId, baseline, text) {
   return { state: matched ? "accepted" : "unconfirmed", progress: userProgressFromThread(full) };
 }
 
+export function confirmCanonicalNonDelivery(reconciliation, baseline, runtime) {
+  if (reconciliation?.state !== "unconfirmed" || runtime?.running) { return false; }
+  if (!["marker", "bridge_terminal", "provider"].includes(runtime?.confidence)) { return false; }
+  const before = Number(baseline?.userCount);
+  return Number.isSafeInteger(before)
+    && reconciliation.progress?.userCount === before
+    && String(reconciliation.progress?.lastUserId ?? "") === String(baseline?.lastUserId ?? "");
+}
+
 const autoQueueUsageLocks = new Map();
 
 async function autoQueueUsageResumeInner({ provider: providerName, threadId, triggerId, terminalId = null }) {
@@ -2070,7 +2079,11 @@ const routes = {
     if (!body.threadId || !body.baseline || typeof body.text !== "string" || !Number.isSafeInteger(Number(body.baseline.userCount))) {
       return json(res, 400, { error: "threadId, baseline, and text required", code: "invalid_reconcile_request" });
     }
-    json(res, 200, await reconcileUserIntent(p, body.threadId, body.baseline, body.text));
+    const reconciliation = await reconcileUserIntent(p, body.threadId, body.baseline, body.text);
+    const runtime = threadRuntime(p, body.threadId);
+    json(res, 200, confirmCanonicalNonDelivery(reconciliation, body.baseline, runtime)
+      ? { ...reconciliation, state: "not_sent" }
+      : reconciliation);
   },
 
   "GET /api/models": async (req, res, url) => {

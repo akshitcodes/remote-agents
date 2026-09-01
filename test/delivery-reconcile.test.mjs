@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { reconcileUserIntent } from "../server.mjs";
+import { confirmCanonicalNonDelivery, reconcileUserIntent } from "../server.mjs";
 
 function provider(items) {
   return { readThread: async () => ({ thread: { turns: [{ items }] } }) };
@@ -32,4 +32,13 @@ test("canonical reconciliation never searches past the immediate next user messa
   const p = provider([user("u1", "earlier"), user("u2", "different"), user("u3", "continue")]);
   const result = await reconcileUserIntent(p, "thread", { userCount: 1, lastUserId: "u1" }, "continue");
   assert.equal(result.state, "unconfirmed");
+});
+
+test("unchanged canonical progress proves non-delivery only after a confirmed idle state", () => {
+  const reconciliation = { state: "unconfirmed", progress: { userCount: 1, lastUserId: "u1" } };
+  const baseline = { userCount: 1, lastUserId: "u1" };
+  assert.equal(confirmCanonicalNonDelivery(reconciliation, baseline, { running: false, confidence: "marker" }), true);
+  assert.equal(confirmCanonicalNonDelivery(reconciliation, baseline, { running: true, confidence: "bridge" }), false);
+  assert.equal(confirmCanonicalNonDelivery(reconciliation, baseline, { running: false, confidence: "historical_stale" }), false);
+  assert.equal(confirmCanonicalNonDelivery({ ...reconciliation, progress: { userCount: 2, lastUserId: "u2" } }, baseline, { running: false, confidence: "marker" }), false);
 });

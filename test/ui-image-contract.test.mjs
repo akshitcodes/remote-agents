@@ -67,6 +67,9 @@ test("failed delivery recovery distinguishes pre-dispatch failures and remains a
   assert.match(html, /this app will not resend it and risk a duplicate/);
   assert.match(html, /\/api\/send\/reconcile/);
   assert.match(html, /canonical\.state === "accepted"/);
+  assert.match(html, /canonical\.state === "not_sent"/);
+  assert.match(html, /function restartAutomaticDeliveryChecks\(\)/);
+  assert.match(html, /probe\.runtime\?\.running && probe\.runtime\?\.source === "bridge"/);
   assert.match(server, /baseline\.lastUserId/);
   assert.match(server, /userMessageText\(users\[before\]\) === expected/);
   assert.match(server, /expected\) \{ return \{ state: "unconfirmed"/);
@@ -190,8 +193,10 @@ test("Codex task settings expose a per-thread account without changing the globa
   assert.match(codexProvider, /accountRpcForThread/);
 });
 
-test("a bridge-owned live stream cannot be replayed by a forced transcript refresh", () => {
-  assert.match(html, /if \(state\.busy && !state\.externalTurn\) \{ return; \}/);
+test("a forced reconnect verifies ownership before replaying a bridge-owned stream", () => {
+  assert.match(html, /if \(state\.busy && !state\.externalTurn\) \{/);
+  assert.match(html, /if \(!force\) \{ return; \}/);
+  assert.match(html, /probe\.runtime\?\.running && probe\.runtime\?\.source === "bridge"/);
   assert.doesNotMatch(html, /state\.busy && !state\.externalTurn && \(!force \|\| state\.sendStage\)/);
 });
 

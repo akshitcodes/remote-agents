@@ -4402,6 +4402,9 @@ async function checkPendingDelivery(entry) {
         baseline: entry.baseline, text: entry.text,
       });
       if (canonical.state === "accepted") { result = { state: "accepted", source: "canonical_transcript" }; }
+      if (canonical.state === "not_sent") {
+        result = { state: "not_sent", error: { message: "The message did not reach the thread" } };
+      }
       if (canonical.progress && (entry.threadId || state.active?.id) === state.active?.id) { state.threadUserProgress = canonical.progress; }
     }
     entry.deliveryProofChecked = true;
@@ -4423,12 +4426,13 @@ async function checkPendingDelivery(entry) {
     entry.retryRequired = result.state !== "dispatching";
     entry.retryWithNewId = false;
 
-    if (result.state === "failed") {
+    if (result.state === "failed" || result.state === "not_sent") {
       entry.dispatching = false;
       entry.mayHaveDispatched = false;
       entry.retryRequired = true;
       entry.retryWithNewId = false;
       entry.errorMessage = cleanFailureReason(result.error?.message || entry.errorMessage);
+      if (result.state === "not_sent") { entry.requestId = newRequestId(); }
       if (label) { label.textContent = "Not sent — Retry, Edit, or Cancel"; }
       markSendFailed(entry.bubble, () => retryPendingEntry(entry), {
         reason: entry.errorMessage,
@@ -4765,6 +4769,18 @@ function flushPending() {
 const FAILED_SENDS_KEY = "cxp_failed_sends";
 const automaticDeliveryChecks = new Map();
 
+function restartAutomaticDeliveryChecks() {
+  const tid = state.active?.id;
+  if (!tid) { return; }
+  for (const failed of state.failedSends) {
+    if (!failed.retryWithNewId || failed.threadId !== tid || (failed.provider || "codex") !== activeProvider()) { continue; }
+    const bubble = failed.bubble;
+    if (!bubble?.isConnected) { continue; }
+    automaticDeliveryChecks.delete(failed.requestId);
+    autoCheckStandaloneDelivery(failed, bubble, 0);
+  }
+}
+
 function saveFailedSends() {
   try { localStorage.setItem(FAILED_SENDS_KEY, JSON.stringify(state.failedSends.slice(-200))); } catch {}
 }
@@ -4797,6 +4813,7 @@ function restoreFailedSends() {
 
     const attachments = Array.isArray(f.attachments) ? f.attachments : [];
     const bubble = addUser(f.text, { attachments });
+    f.bubble = bubble;
     markSendFailed(bubble, f.retryWithNewId
       ? () => checkStandaloneDelivery(f, bubble)
       : () => doSend(f.text, { attachments, bubble, requestId: f.requestId }), {
@@ -4822,9 +4839,14 @@ function autoCheckStandaloneDelivery(failed, bubble, delay = 0) {
     automaticDeliveryChecks.set(failed.requestId, attempt);
     try {
       const state = await checkStandaloneDelivery(failed, bubble, { announce: false });
-      if (state === "dispatching" && attempt < 5) { setTimeout(check, Math.min(4000, 500 * (2 ** attempt))); }
+      if (["dispatching", "uncertain"].includes(state) && attempt < 5) {
+        setTimeout(check, Math.min(4000, 500 * (2 ** attempt)));
+      } else {
+        automaticDeliveryChecks.delete(failed.requestId);
+      }
     } catch {
       if (attempt < 5) { setTimeout(check, Math.min(5000, 1000 * (2 ** attempt))); }
+      else { automaticDeliveryChecks.delete(failed.requestId); }
     }
   };
   setTimeout(check, delay);
@@ -4845,6 +4867,9 @@ async function checkStandaloneDelivery(failed, bubble, { announce = true } = {})
       baseline: failed.baseline, text: failed.text,
     });
     if (canonical.state === "accepted") { result = { state: "accepted", source: "canonical_transcript" }; }
+    if (canonical.state === "not_sent") {
+      result = { state: "not_sent", error: { message: "The message did not reach the thread" } };
+    }
     if (canonical.progress && failed.threadId === state.active?.id) { state.threadUserProgress = canonical.progress; }
   }
 
@@ -4855,14 +4880,14 @@ async function checkStandaloneDelivery(failed, bubble, { announce = true } = {})
     return result.state;
   }
 
-  if (result.state === "failed") {
+  if (result.state === "failed" || result.state === "not_sent") {
     failed.retryWithNewId = false;
     failed.errorMessage = cleanFailureReason(result.error?.message || failed.errorMessage);
     saveFailedSends();
     markSendFailed(bubble, () => doSend(failed.text, {
       attachments: failed.attachments ?? [],
       bubble,
-      requestId: failed.requestId,
+      requestId: result.state === "not_sent" ? null : failed.requestId,
     }), { reason: failed.errorMessage, onDismiss: () => { dropFailedSend(failed.requestId); bubble.remove(); } });
     return result.state;
   }
@@ -7475,7 +7500,13 @@ async function resyncOpenThread({ force = false } = {}) {
   // file alongside its live deltas, drawing every assistant message twice.
   // The provider terminal schedules one canonical refresh immediately after
   // ownership ends, which also recovers anything missed during a disconnect.
-  if (state.busy && !state.externalTurn) { return; }
+  if (state.busy && !state.externalTurn) {
+    if (!force) { return; }
+    try {
+      const probe = await api(`/api/thread/runtime?provider=${encodeURIComponent(t.provider || "codex")}&threadId=${encodeURIComponent(t.id)}`);
+      if (probe.runtime?.running && probe.runtime?.source === "bridge") { return; }
+    } catch { return; }
+  }
 
   // Following along at the bottom should keep following; someone reading back
   // through the transcript should stay where they are.
@@ -7500,6 +7531,7 @@ async function resyncOpenThread({ force = false } = {}) {
     reconcileNativeCodexQueue(t);
     if (res.runtime) {
       markRunning(t.provider, t.id, !!res.runtime.running, { confidence: res.runtime.confidence });
+      updateResumeButton(res.runtime);
     }
 
     if (wasAtBottom) { scrollDown({ force: true }); } else { b.scrollTop = prevTop; syncStick(); }
@@ -7566,6 +7598,7 @@ function connectEvents() {
     // The stream only opens if the Mac is answering, so this is the earliest
     // and most reliable signal that an outage is over.
     setOfflineNote(false);
+    restartAutomaticDeliveryChecks();
 
     // Reconnected after a drop (e.g. resumed from background) — catch up.
     if (state.sseErrored) {
@@ -7871,6 +7904,7 @@ document.addEventListener("visibilitychange", () => {
   sendPresence();
 
   if (!document.hidden) {
+    restartAutomaticDeliveryChecks();
     reconnectNow();
     loadNotificationRules().then(() => { if (!state.active) { renderRows(false); } });
     // A healthy stream already carries a bridge-owned turn. If it had dropped,
@@ -7883,7 +7917,7 @@ document.addEventListener("visibilitychange", () => {
 setInterval(() => {
   if (!document.hidden && state.active) { sendPresence(); }
 }, 30000);
-window.addEventListener("online", () => { setOfflineNote(false); reconnectNow(); resyncView({ force: true }); });
+window.addEventListener("online", () => { setOfflineNote(false); reconnectNow(); restartAutomaticDeliveryChecks(); resyncView({ force: true }); });
 window.addEventListener("offline", () => setOfflineNote(true, "phone"));
 
 function initProvider() {
