@@ -28,7 +28,7 @@ import { SendLedger } from "./send-ledger.mjs";
 import { ThreadSubscriptions } from "./thread-subscriptions.mjs";
 import { pruneAttachments, readAttachment, resolveAttachmentIds, storeAttachment } from "./attachments.mjs";
 import { UsageStateStore } from "./usage-state.mjs";
-import { usageRetryTrigger, userProgressFromThread, UsageRetryPolicyStore, UsageRetryRunner, UsageRetryStore } from "./usage-retry.mjs";
+import { usageRetryTrigger, userProgressFromThread, userProgressThroughTurn, UsageRetryPolicyStore, UsageRetryRunner, UsageRetryStore } from "./usage-retry.mjs";
 import { captureReplyStart, notificationBody, notificationTitle } from "./notification-content.mjs";
 import { localBridgeProof, localControlProofMatches, validLocalProofNonce } from "./local-proof.mjs";
 import { TerminalRunner } from "./terminal-runner.mjs";
@@ -2296,10 +2296,25 @@ const routes = {
     const existing = usageRetryStore.list({ provider: provider.name, threadId: body.threadId, activeOnly: true })[0];
     if (existing) { return json(res, 200, { entry: publicUsageRetry(existing), existing: true }); }
 
+    let progressGuard;
+    if (body.terminalId) {
+      const full = await provider.readThread(body.threadId);
+      progressGuard = userProgressThroughTurn(full, body.terminalId);
+      if (!progressGuard) {
+        return json(res, 409, { error: "This usage stop is no longer present in the provider transcript", code: "usage_stop_not_found" });
+      }
+      const current = userProgressFromThread(full);
+      const runtime = await resolveProviderRuntime(provider, body.threadId, threadRuntime(provider, body.threadId));
+      if (runtime.running || current.userCount > progressGuard.userCount) {
+        return json(res, 409, { error: "This thread has already resumed after that usage stop", code: "usage_already_resumed" });
+      }
+    } else {
+      progressGuard = await threadUserProgress(provider, body.threadId);
+    }
+
     // Capture exactly the currently selected turn settings, then re-validate
     // them at dispatch time. A delayed resume must fail closed rather than let
     // any provider silently choose a newer default model or permission mode.
-    const progressGuard = await threadUserProgress(provider, body.threadId);
     const dispatch = await validateSendDispatch(provider, body);
     const entry = createUsageRetry(provider, { ...body, ...dispatch }, { progressGuard });
     publishUsageRetry(entry);

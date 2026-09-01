@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { isUsageLimitError, usageCapacityKey, usageRetryTrigger, userProgressFromThread, UsageRetryPolicyStore, UsageRetryRunner, UsageRetryStore, usageAvailability } from "../usage-retry.mjs";
+import { isUsageLimitError, usageCapacityKey, usageRetryTrigger, userProgressFromThread, userProgressThroughTurn, UsageRetryPolicyStore, UsageRetryRunner, UsageRetryStore, usageAvailability } from "../usage-retry.mjs";
 import { UsageStateStore } from "../usage-state.mjs";
 
 function fixture(t, name = "retries.json") {
@@ -25,6 +25,21 @@ function create(store, input = {}) {
     progressGuard: input.progressGuard ?? null,
   });
 }
+
+test("a manual usage resume is anchored to the turn that actually hit the limit", () => {
+  const thread = {
+    thread: {
+      turns: [
+        { id: "turn-before", items: [{ type: "userMessage", id: "user-1" }] },
+        { id: "turn-limit", items: [{ type: "userMessage", id: "user-2" }] },
+        { id: "turn-manual", items: [{ type: "userMessage", id: "user-3" }] },
+      ],
+    },
+  };
+  assert.deepEqual(userProgressThroughTurn(thread, "codex:turn-limit"), { userCount: 2, lastUserId: "user-2" });
+  assert.equal(userProgressFromThread(thread).userCount, 3);
+  assert.equal(userProgressThroughTurn(thread, "codex:missing"), null);
+});
 
 test("capacity requires a fresh provider check and every measured window to have room", () => {
   const futureReset = Math.floor(Date.now() / 1000) + 3600;

@@ -2846,9 +2846,10 @@ function usageRetryPolicyAppliesToOpenThread() {
 function syncUsageRetryButtons() {
   const active = usageRetryForOpenThread();
   const enabled = usageRetryPolicyAppliesToOpenThread();
+  const alreadyResumed = state.busy && !active;
   box().querySelectorAll("[data-queue-usage-resume]").forEach((button) => {
-    button.disabled = !!active || enabled;
-    button.textContent = active ? "Resume queued" : enabled ? "Auto-resume enabled" : "Resume when usage returns";
+    button.disabled = !!active || enabled || alreadyResumed;
+    button.textContent = active ? "Resume queued" : enabled ? "Auto-resume enabled" : alreadyResumed ? "Already resumed" : "Resume when usage returns";
   });
 }
 
@@ -2955,7 +2956,7 @@ async function loadUsageRetryState(thread = state.active) {
   } catch {}
 }
 
-async function queueUsageResume() {
+async function queueUsageResume(terminalId = null) {
   const target = state.active;
   const readiness = dispatchReadiness();
   const mode = currentMode();
@@ -2964,6 +2965,7 @@ async function queueUsageResume() {
     provider: activeProvider(), threadId: target.id, text: "Continue.", cwd: target.cwd,
     model: state.model, effort: state.effort, mode: mode.key,
     approvalPolicy: mode.approvalPolicy, sandbox: mode.sandbox,
+    terminalId,
   });
   updateUsageRetry(result.entry);
   return result.entry;
@@ -2978,12 +2980,13 @@ function decorateUsageLimitError(el, error) {
   button.dataset.queueUsageResume = "";
   const active = usageRetryForOpenThread();
   const policyEnabled = usageRetryPolicyAppliesToOpenThread();
-  button.textContent = active ? "Resume queued" : policyEnabled ? "Auto-resume enabled" : "Resume when usage returns";
-  button.disabled = !!active || policyEnabled;
+  const alreadyResumed = state.busy && !active;
+  button.textContent = active ? "Resume queued" : policyEnabled ? "Auto-resume enabled" : alreadyResumed ? "Already resumed" : "Resume when usage returns";
+  button.disabled = !!active || policyEnabled || alreadyResumed;
   button.onclick = async () => {
     button.disabled = true;
     button.textContent = "Queuing…";
-    try { await queueUsageResume(); button.textContent = "Resume queued"; }
+    try { await queueUsageResume(error?.terminalId || el.dataset.terminalId || null); button.textContent = "Resume queued"; }
     catch (error) { button.disabled = false; button.textContent = "Resume when usage returns"; chip("⚠️", "Could not queue auto-resume: " + error.message); }
   };
   actions.appendChild(button);
@@ -3082,7 +3085,12 @@ function onNotify(method, params, provider) {
   if (method === "account/changing" || method === "account/changed") {
     usageSheetCache.delete(provider);
     if (provider === activeProvider() && method === "account/changed") {
-      initModels(provider);
+      refreshModelsAfterAccountChange(provider).catch((error) => {
+        if (!(provider === activeProvider())) { return; }
+        state.settingsTruth = { state: "error", sources: {}, message: "Account changed · settings refresh failed" };
+        syncControls();
+        chip("⚠️", "Could not refresh settings after the account changed: " + error.message);
+      });
       if ($("sheetBody").dataset.sheetKind === "usage" && $("sheet").classList.contains("show")) {
         refreshUsageProvider(provider);
       }
@@ -4846,18 +4854,21 @@ function autoCheckStandaloneDelivery(failed, bubble, delay = 0) {
   if (automaticDeliveryChecks.has(failed.requestId)) { return; }
   automaticDeliveryChecks.set(failed.requestId, 0);
   const check = async () => {
+    if (!bubble?.isConnected || !state.failedSends.some((entry) => entry.requestId === failed.requestId)) {
+      automaticDeliveryChecks.delete(failed.requestId);
+      return;
+    }
     const attempt = (automaticDeliveryChecks.get(failed.requestId) ?? 0) + 1;
     automaticDeliveryChecks.set(failed.requestId, attempt);
     try {
       const state = await checkStandaloneDelivery(failed, bubble, { announce: false });
-      if (["dispatching", "uncertain"].includes(state) && attempt < 5) {
-        setTimeout(check, Math.min(4000, 500 * (2 ** attempt)));
+      if (["dispatching", "uncertain", "not_found"].includes(state)) {
+        setTimeout(check, attempt < 5 ? Math.min(4000, 500 * (2 ** attempt)) : 30_000);
       } else {
         automaticDeliveryChecks.delete(failed.requestId);
       }
     } catch {
-      if (attempt < 5) { setTimeout(check, Math.min(5000, 1000 * (2 ** attempt))); }
-      else { automaticDeliveryChecks.delete(failed.requestId); }
+      setTimeout(check, attempt < 5 ? Math.min(5000, 1000 * (2 ** attempt)) : 30_000);
     }
   };
   setTimeout(check, delay);
@@ -5335,6 +5346,7 @@ function setBusy(busy, { external = false, ownershipChecking = false, ownershipU
   // not have and used to discard the user's queue before the interrupt failed.
   $("stopBtn").style.display = busy && !external ? "flex" : "none";
   setLivePill(state.externalTurn);
+  syncUsageRetryButtons();
   syncControls();
 
   if (ownTurnEnding) { scheduleExternalRefresh(); }
@@ -7714,7 +7726,22 @@ function connectEvents() {
 }
 
 // ---------- init ----------
-async function initModels(provider = state.provider, threadId = null) {
+async function refreshModelsAfterAccountChange(provider) {
+  const thread = state.active && (state.active.provider || state.provider) === provider ? state.active : null;
+  if (!thread) { return initModels(provider); }
+
+  const previousSelection = { model: state.model, effort: state.effort };
+  state.settingsTruth = { state: "loading", sources: {}, message: "Account changed · restoring this thread's settings…" };
+  syncControls();
+  const ready = await initModels(provider, thread.id, { deferSync: true });
+  if (state.active !== thread) { return ready; }
+  state.model = previousSelection.model;
+  state.effort = previousSelection.effort;
+  await loadThreadSettings(thread, { flush: false });
+  return ready;
+}
+
+async function initModels(provider = state.provider, threadId = null, { deferSync = false } = {}) {
   const requestSeq = ++state.modelRequestSeq;
 
   try {
@@ -7734,7 +7761,7 @@ async function initModels(provider = state.provider, threadId = null) {
 
     if (prefs.modeByProvider) { state.modeByProvider = { ...state.modeByProvider, ...prefs.modeByProvider }; }
 
-    syncControls();
+    if (!deferSync) { syncControls(); }
     return state.modelsReady;
   } catch (error) {
     if (requestSeq !== state.modelRequestSeq) { return false; }
@@ -7744,7 +7771,7 @@ async function initModels(provider = state.provider, threadId = null) {
     state.model = null;
     state.effort = null;
     state.settingsTruth = { state: "error", sources: {}, message: "Models unavailable · send blocked" };
-    syncControls();
+    if (!deferSync) { syncControls(); }
     return false;
   }
 }

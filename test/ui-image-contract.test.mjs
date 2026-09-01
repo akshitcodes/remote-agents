@@ -180,7 +180,7 @@ test("stop, draft adoption, and reconnect preserve queue truth", () => {
 
 test("usage retry controls distinguish enabled policy from a queued retry", () => {
   assert.match(html, /function usageRetryPolicyAppliesToOpenThread\(\)/);
-  assert.match(html, /enabled \? "Auto-resume enabled" : "Resume when usage returns"/);
+  assert.match(html, /enabled \? "Auto-resume enabled" : alreadyResumed \? "Already resumed" : "Resume when usage returns"/);
   assert.match(html, /\["accepted", "cancelled", "superseded"\]/);
   assert.match(server, /usageRetryStore\.supersedeThread\(provider, threadId/);
   assert.match(server, /\["marker", "stalled"\]\.includes\(data\.runConfidence\)/);
@@ -419,6 +419,11 @@ test("usage-limit auto-resume is explicit, durable, cancellable, and defaults of
   assert.match(html, /decorateUsageLimitError\(el, item\)/);
   assert.match(html, /method === "account\/changing" \|\| method === "account\/changed"/);
   assert.match(html, /usageSheetCache\.delete\(provider\)/);
+  assert.match(html, /refreshModelsAfterAccountChange\(provider\)/);
+  assert.match(html, /const alreadyResumed = state\.busy && !active/);
+  assert.match(html, /queueUsageResume\(error\?\.terminalId \|\| el\.dataset\.terminalId/);
+  assert.match(server, /userProgressThroughTurn\(full, body\.terminalId\)/);
+  assert.match(server, /code: "usage_already_resumed"/);
 });
 
 test("Codex write access stays provider-specific and retryable after a conflict", () => {

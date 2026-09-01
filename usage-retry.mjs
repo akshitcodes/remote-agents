@@ -45,6 +45,24 @@ export function userProgressFromThread(full) {
   };
 }
 
+export function userProgressThroughTurn(full, terminalId) {
+  const expected = String(terminalId ?? "").trim().replace(/^[^:]+:/, "");
+  if (!expected) { return null; }
+  const turns = full?.thread?.turns ?? [];
+  let userCount = 0;
+  let lastUserId = null;
+
+  for (const turn of turns) {
+    for (const item of turn?.items ?? []) {
+      if (item?.type !== "userMessage") { continue; }
+      userCount += 1;
+      lastUserId = item.id ? String(item.id).slice(0, 300) : null;
+    }
+    if (String(turn?.id ?? "") === expected) { return { userCount, lastUserId }; }
+  }
+  return null;
+}
+
 function progressRelation(guard, current) {
   const before = Number(guard?.userCount);
   const after = Number(current?.userCount);
