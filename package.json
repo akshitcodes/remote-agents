@@ -17,6 +17,7 @@
     "app-home.mjs",
     "attachments.mjs",
     "send-ledger.mjs",
+    "bridge-turn-state.mjs",
     "thread-subscriptions.mjs",
     "thread-settings.mjs",
     "watch.mjs",

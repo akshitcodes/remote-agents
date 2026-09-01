@@ -395,6 +395,7 @@ function runningDetailFromFile(provider, path, stat) {
   const silentFor = Date.now() - stat.mtimeMs;
 
   const state = classifyRunningState(observation?.running ?? null, silentFor);
+  state.lastActivityAt = stat.mtimeMs;
 
   if (state.running && observation?.activeMarkerId) {
     state.activeMarkerId = observation.activeMarkerId;

@@ -295,6 +295,7 @@ test("quiet and vanished provider turns degrade visibly without unsafe queue dis
   assert.match(html, /requireActive: true/);
   assert.match(html, /updateRowRunning\(provider, tid, on, confidence\)/);
   assert.match(html, /No recent activity — the provider may be stalled/);
+  assert.match(html, /showRuntimeRecovery[\s\S]*?bridge_restarted/);
 });
 
 test("usage sheet shows account limits for all providers and never thread usage", () => {

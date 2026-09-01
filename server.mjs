@@ -34,6 +34,7 @@ import { localBridgeProof, localControlProofMatches, validLocalProofNonce } from
 import { TerminalRunner } from "./terminal-runner.mjs";
 import { TerminalSecurity } from "./terminal-security.mjs";
 import { PtyTerminalManager } from "./pty-terminal.mjs";
+import { BridgeTurnState } from "./bridge-turn-state.mjs";
 import QRCode from "qrcode";
 import {
   readClaudeTranscriptThreadSettings,
@@ -66,6 +67,7 @@ const threadSettingsStore = new ThreadSettingsStore({ file: join(APP_HOME, "thre
 const usageState = new UsageStateStore({ file: join(APP_HOME, "usage-state.json") });
 const usageRetryStore = new UsageRetryStore({ file: join(APP_HOME, "usage-retries.json") });
 const usageRetryPolicies = new UsageRetryPolicyStore({ file: join(APP_HOME, "usage-retry-policy.json") });
+const bridgeTurnState = new BridgeTurnState({ file: join(APP_HOME, "bridge-turn-state.json") });
 const terminalRunner = new TerminalRunner();
 const ptyTerminals = new PtyTerminalManager();
 const terminalSecurity = new TerminalSecurity({
@@ -119,7 +121,7 @@ export function shouldEmitExternalUpdate(provider, threadId, turns = activeTurns
 // record, leaving the session file's final user marker looking active. Suppress
 // only when the terminal belongs to that exact marker; a later external prompt
 // has a different marker and remains visible as running.
-export function resolveThreadRunState({ owned = false, observed = null, bridgeTerminal = null, turnId = null } = {}) {
+export function resolveThreadRunState({ owned = false, observed = null, bridgeTerminal = null, bridgeInterrupted = null, turnId = null } = {}) {
   if (owned) {
     return { running: true, confidence: "bridge", source: "bridge", turnId };
   }
@@ -133,6 +135,24 @@ export function resolveThreadRunState({ owned = false, observed = null, bridgeTe
 
   if (terminalMatchesMarker) {
     return { running: false, confidence: "bridge_terminal", source: "bridge", turnId: null };
+  }
+
+  // A durable active row left by the previous bridge process is exact lifecycle
+  // evidence, not a stale-file guess. A newer provider write supersedes it.
+  if (bridgeInterrupted?.state === "interrupted"
+      && (!observed?.lastActivityAt || observed.lastActivityAt <= (bridgeInterrupted.interruptedAt ?? bridgeInterrupted.at))) {
+    return {
+      running: false,
+      confidence: "bridge_interrupted",
+      source: "bridge",
+      turnId: null,
+      terminalId: bridgeInterrupted.turnId ? `${bridgeInterrupted.provider}:${bridgeInterrupted.turnId}` : null,
+      terminalOutcome: "aborted",
+      terminalError: {
+        code: bridgeInterrupted.reason || "bridge_restarted",
+        message: "The bridge restarted before this turn finished.",
+      },
+    };
   }
 
   return {
@@ -206,6 +226,8 @@ function trackActiveTurn(event, data) {
   if (method === "turn/started") {
     recentBridgeTerminals.delete(key);
     activeTurns.add(key);
+    try { bridgeTurnState.started({ provider, threadId, turnId: params.turn?.id ?? params.turnId ?? null }); }
+    catch (error) { console.error("failed to persist active bridge turn:", error); }
   } else if (method === "turn/completed" || method === "turn/failed" || method === "turn/aborted") {
     if (activeTurns.has(key)) {
       const observed = watch.runningDetails(provider, [threadId])[threadId];
@@ -215,6 +237,8 @@ function trackActiveTurn(event, data) {
       });
     }
     activeTurns.delete(key);
+    try { bridgeTurnState.finished(provider, threadId); }
+    catch (error) { console.error("failed to clear active bridge turn:", error); }
 
     const cutoff = Date.now() - BRIDGE_TERMINAL_TTL_MS;
     for (const [terminalKey, terminal] of recentBridgeTerminals) {
@@ -223,6 +247,8 @@ function trackActiveTurn(event, data) {
   } else if (method === "thread/adopted" && params.sessionId) {
     // The turn streamed under a draft id; carry it onto the real one.
     if (activeTurns.delete(key)) { activeTurns.add(turnKey(provider, params.sessionId)); }
+    try { bridgeTurnState.adopted({ provider, fromThreadId: threadId, threadId: params.sessionId }); }
+    catch (error) { console.error("failed to adopt active bridge turn:", error); }
   }
 }
 
@@ -1495,6 +1521,7 @@ function threadRuntime(provider, threadId) {
     owned,
     observed,
     bridgeTerminal: recentBridgeTerminals.get(turnKey(provider.name, threadId)),
+    bridgeInterrupted: bridgeTurnState.get(provider.name, threadId),
     turnId: owned ? (provider.activeTurnId?.(threadId) ?? null) : null,
   });
   if (canResumeInterruptedRuntime(provider, runtime)) {
@@ -1504,7 +1531,8 @@ function threadRuntime(provider, threadId) {
 }
 
 export async function resolveProviderRuntime(provider, threadId, runtime) {
-  if (!runtime?.running || !["stalled", "heuristic"].includes(runtime.confidence)
+  if ((!runtime?.running && runtime?.confidence !== "bridge_interrupted")
+      || (runtime?.running && !["stalled", "heuristic"].includes(runtime.confidence))
       || typeof provider?.latestTurnState !== "function") {
     return runtime;
   }
@@ -1535,6 +1563,9 @@ export async function resolveProviderRuntime(provider, threadId, runtime) {
       };
     }
     if (["inProgress", "running"].includes(latest?.status)) {
+      if (runtime?.confidence === "bridge_interrupted") {
+        return { ...runtime, canResumeInterrupted: provider.supportsInterruptedResume?.() === true };
+      }
       return { ...runtime, running: true, confidence: "provider", source: "provider", turnId: latest.id ?? null };
     }
   } catch {
@@ -1694,6 +1725,7 @@ async function listThreadsWithState(p, { search, cursor, limit } = {}) {
         owned: childOwned,
         observed: running[child.id],
         bridgeTerminal: recentBridgeTerminals.get(turnKey(p.name, child.id)),
+        bridgeInterrupted: bridgeTurnState.get(p.name, child.id),
       });
       child.running = childState.running;
       child.runConfidence = childState.confidence;
@@ -1706,6 +1738,7 @@ async function listThreadsWithState(p, { search, cursor, limit } = {}) {
       owned,
       observed: running[t.id],
       bridgeTerminal: recentBridgeTerminals.get(turnKey(p.name, t.id)),
+      bridgeInterrupted: bridgeTurnState.get(p.name, t.id),
     });
     t.running = taskState.running || activeChild;
     t.runConfidence = activeChild && !taskState.running ? "subagent" : taskState.confidence;
@@ -1726,14 +1759,14 @@ async function listProjectThreadsWithState(p, { search } = {}) {
   for (const thread of listed.data ?? []) {
     for (const child of thread.subagents ?? []) {
       const owned = activeTurns.has(turnKey(p.name, child.id));
-      const state = resolveThreadRunState({ owned, observed: running[child.id], bridgeTerminal: recentBridgeTerminals.get(turnKey(p.name, child.id)) });
+      const state = resolveThreadRunState({ owned, observed: running[child.id], bridgeTerminal: recentBridgeTerminals.get(turnKey(p.name, child.id)), bridgeInterrupted: bridgeTurnState.get(p.name, child.id) });
       child.running = state.running;
       child.runConfidence = state.confidence;
     }
 
     const owned = activeTurns.has(turnKey(p.name, thread.id));
     const activeChild = (thread.subagents ?? []).some((child) => child.running);
-    const state = resolveThreadRunState({ owned, observed: running[thread.id], bridgeTerminal: recentBridgeTerminals.get(turnKey(p.name, thread.id)) });
+    const state = resolveThreadRunState({ owned, observed: running[thread.id], bridgeTerminal: recentBridgeTerminals.get(turnKey(p.name, thread.id)), bridgeInterrupted: bridgeTurnState.get(p.name, thread.id) });
     thread.running = state.running || activeChild;
     thread.runConfidence = activeChild && !state.running ? "subagent" : state.confidence;
   }

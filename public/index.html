@@ -2769,6 +2769,14 @@ function updateResumeButton(runtime = null) {
   syncComposerPrimaryAction();
 }
 
+function showRuntimeRecovery(runtime = null) {
+  if (runtime?.terminalError?.code !== "bridge_restarted") { return; }
+  showTurnFailure(
+    runtime.terminalError,
+    runtime.terminalId || `bridge-restarted:${activeProvider()}:${state.active?.id || "thread"}`,
+  );
+}
+
 function syncComposerPrimaryAction() {
   const hasComposerContent = !!$("input")?.value.trim() || state.composerAttachments.length > 0;
   const showResume = state.canResumeInterrupted && !state.busy && !hasComposerContent;
@@ -3476,9 +3484,10 @@ async function openThread(t) {
     loadUsageRetryState(t);
     state.fetching = false;
     setCursor(res);
-  if (res.runtime) {
+    if (res.runtime) {
       markRunning(t.provider, t.id, !!res.runtime.running, { confidence: res.runtime.confidence });
       updateResumeButton(res.runtime);
+      showRuntimeRecovery(res.runtime);
     }
     refreshApprovals();
     refreshLockStatus();
@@ -7529,6 +7538,7 @@ async function reconcileOpenRuntime(thread = state.active) {
   const runtime = result.runtime;
   markRunning(provider, thread.id, !!runtime.running, { confidence: runtime.confidence });
   updateResumeButton(runtime);
+  showRuntimeRecovery(runtime);
   if (runtime.running) {
     const external = runtime.source !== "bridge";
     state.activeTurnId = external ? null : (runtime.turnId ?? state.activeTurnId);
@@ -7584,6 +7594,7 @@ async function resyncOpenThread({ force = false } = {}) {
     if (res.runtime) {
       markRunning(t.provider, t.id, !!res.runtime.running, { confidence: res.runtime.confidence });
       updateResumeButton(res.runtime);
+      showRuntimeRecovery(res.runtime);
     }
 
     if (wasAtBottom) { scrollDown({ force: true }); } else { b.scrollTop = prevTop; syncStick(); }

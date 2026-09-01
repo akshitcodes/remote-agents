@@ -221,6 +221,33 @@ test("an owned turn remains running even if an older terminal marker exists", ()
   });
 });
 
+test("a bridge restart is an exact interrupted terminal until newer provider activity", () => {
+  const interrupted = {
+    provider: "codex",
+    threadId: "thread-restarted",
+    turnId: "turn-restarted",
+    state: "interrupted",
+    reason: "bridge_restarted",
+    interruptedAt: 2000,
+    at: 2000,
+  };
+  const runtime = resolveThreadRunState({
+    observed: { running: true, confidence: "marker", lastActivityAt: 1900 },
+    bridgeInterrupted: interrupted,
+  });
+  assert.equal(runtime.running, false);
+  assert.equal(runtime.confidence, "bridge_interrupted");
+  assert.equal(runtime.terminalOutcome, "aborted");
+  assert.equal(runtime.terminalError.code, "bridge_restarted");
+
+  const newer = resolveThreadRunState({
+    observed: { running: true, confidence: "marker", lastActivityAt: 2100 },
+    bridgeInterrupted: interrupted,
+  });
+  assert.equal(newer.running, true);
+  assert.equal(newer.confidence, "marker");
+});
+
 test("session-file updates cannot race a bridge-owned provider stream", () => {
   const turns = new Set(["claude:thread-live"]);
 
