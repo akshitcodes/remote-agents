@@ -326,6 +326,13 @@
   #draftStrip { display: none; width: max-content; max-width: 100%; margin: 0 0 7px 10px; border: 0; border-radius: 8px; padding: 4px 9px; background: var(--bg3); color: var(--fg-dim); font-size: 11px; cursor: pointer; }
   #draftStrip.on { display: block; }
   #sendActions { position: relative; flex: 0 0 34px; touch-action: manipulation; -webkit-touch-callout: none; user-select: none; }
+  /* Installed PWAs already have a viewport ending above the iOS/Android
+     gesture area. Applying env(safe-area-inset-bottom) here as well reserves
+     the same space a second time, leaving a conspicuous dead strip below the
+     composer. Browser mode still uses the safe-area inset from the base rule. */
+  @media (max-width: 959px) and (display-mode: standalone) {
+    #composerWrap { padding-bottom: 8px; }
+  }
   #sendActions #sendBtn { position: relative; z-index: 2; }
   .send-popover { display: none; position: absolute; z-index: 12; right: 0; bottom: calc(100% - 2px); min-width: 132px; padding: 5px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg3); box-shadow: 0 10px 28px #0008; }
   .send-popover button { width: 100%; border: 0; border-radius: 7px; padding: 8px 9px; background: transparent; color: var(--fg); font-size: 12px; text-align: left; cursor: pointer; }
