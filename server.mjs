@@ -497,10 +497,26 @@ async function emitExternal({ provider, threadId, running, runConfidence, termin
 // original outcome instead of sending again.
 const sendLedger = new SendLedger({ file: join(APP_HOME, "send-ledger.json") });
 
+export function providerOperation(provider, method) {
+  const name = method === "resume" ? "resumeInterrupted" : method;
+  const operation = provider?.[name];
+  if (typeof operation !== "function") {
+    throw Object.assign(new Error(`${provider?.name || "provider"} does not support ${method}`), {
+      status: 409,
+      code: `${method}_unsupported`,
+    });
+  }
+  return operation.bind(provider);
+}
+
 async function sendOnce(provider, body, method = "send") {
   const requestId = body?.requestId;
   const patch = {};
   let dispatch = null;
+  // Resolve the adapter method before journaling dispatch. A bridge programming
+  // or capability error at this point is a definite non-delivery, never an
+  // ambiguous provider acknowledgement.
+  const operate = providerOperation(provider, method);
 
   if (method === "send") { dispatch = await validateSendDispatch(provider, body); }
 
@@ -519,7 +535,7 @@ async function sendOnce(provider, body, method = "send") {
     const providerBody = { ...body, attachments: resolveAttachmentIds(body?.attachmentIds ?? []) };
     if (dispatch?.mode === "provider-exact") { providerBody.preserveProviderPolicy = true; }
     delete providerBody.attachmentIds;
-    const result = await provider[method](providerBody);
+    const result = await operate(providerBody);
     return dispatch && result && typeof result === "object"
       ? { ...result, dispatch: { ...dispatch, accepted: true } }
       : result;

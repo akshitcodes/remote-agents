@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { CodexProvider } from "../providers/codex.mjs";
+import { providerOperation } from "../server.mjs";
 
 function delay(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
@@ -109,6 +110,24 @@ test("native interrupted resume starts an empty Codex turn", async () => {
   assert.deepEqual(calls, [{ method: "turn/start", params: { threadId: "thread-resume", input: [] } }]);
   assert.equal(provider.activeTurnId("thread-resume"), "turn-resumed");
   provider.cancelIdleRelease("thread-resume");
+});
+
+test("the shared resume operation routes to the native Codex adapter before dispatch", async () => {
+  const calls = [];
+  const provider = {
+    name: "codex",
+    resumeInterrupted: async (body) => { calls.push(body); return { resumed: true }; },
+  };
+  const operation = providerOperation(provider, "resume");
+  assert.deepEqual(await operation({ threadId: "thread-resume" }), { resumed: true });
+  assert.deepEqual(calls, [{ threadId: "thread-resume" }]);
+});
+
+test("an unsupported provider operation fails before durable dispatch", () => {
+  assert.throws(
+    () => providerOperation({ name: "claude" }, "resume"),
+    (error) => error.status === 409 && error.code === "resume_unsupported",
+  );
 });
 
 test("native resume refuses when Codex does not confirm an interrupted latest turn", async () => {
