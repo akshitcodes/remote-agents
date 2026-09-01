@@ -148,6 +148,12 @@ export function resolveThreadRunState({ owned = false, observed = null, bridgeTe
   };
 }
 
+export function canResumeInterruptedRuntime(provider, runtime) {
+  if (!runtime || runtime.running || provider?.supportsInterruptedResume?.() !== true) { return false; }
+  return runtime.terminalOutcome === "aborted"
+    || ["stale_timeout", "historical_stale"].includes(runtime.confidence);
+}
+
 // Keep the safety decision next to the authoritative turn set, not in the UI.
 // The optional set makes this exact route path testable without starting a turn.
 export async function releaseThreadLock(provider, threadId, turns = activeTurns) {
@@ -1447,8 +1453,8 @@ function threadRuntime(provider, threadId) {
     bridgeTerminal: recentBridgeTerminals.get(turnKey(provider.name, threadId)),
     turnId: owned ? (provider.activeTurnId?.(threadId) ?? null) : null,
   });
-  if (runtime.terminalOutcome === "aborted") {
-    runtime.canResumeInterrupted = provider.supportsInterruptedResume?.() === true;
+  if (canResumeInterruptedRuntime(provider, runtime)) {
+    runtime.canResumeInterrupted = true;
   }
   return runtime;
 }

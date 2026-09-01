@@ -2752,8 +2752,7 @@ function showTurnFailure(error, terminalId = null) {
 function updateResumeButton(runtime = null) {
   const button = $("resumeBtn");
   const available = runtime?.canResumeInterrupted === true
-    && !runtime?.running
-    && runtime?.terminalOutcome === "aborted";
+    && !runtime?.running;
   button.style.display = available ? "flex" : "none";
   button.disabled = false;
   button.title = available ? "Resume interrupted turn" : "Resume interrupted turn";

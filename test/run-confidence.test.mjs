@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { classifyRunningState, observeProviderTail } from "../watch.mjs";
-import { resolveThreadRunState, shouldEmitExternalUpdate } from "../server.mjs";
+import { canResumeInterruptedRuntime, resolveThreadRunState, shouldEmitExternalUpdate } from "../server.mjs";
 
 test("missing tail markers remain explicitly heuristic", () => {
   assert.deepEqual(classifyRunningState(null, 1_000), {
@@ -123,6 +123,18 @@ test("resolved runtime retains an aborted terminal for native resume", () => {
     terminalOutcome: "aborted",
     terminalError: null,
   });
+});
+
+test("Codex native resume covers explicit aborts and terminal-less stale starts only", () => {
+  const codex = { supportsInterruptedResume: () => true };
+  const claude = { supportsInterruptedResume: () => false };
+
+  assert.equal(canResumeInterruptedRuntime(codex, { running: false, terminalOutcome: "aborted", confidence: "marker" }), true);
+  assert.equal(canResumeInterruptedRuntime(codex, { running: false, confidence: "stale_timeout" }), true);
+  assert.equal(canResumeInterruptedRuntime(codex, { running: false, confidence: "historical_stale" }), true);
+  assert.equal(canResumeInterruptedRuntime(codex, { running: true, confidence: "stalled" }), false);
+  assert.equal(canResumeInterruptedRuntime(codex, { running: false, confidence: "unknown" }), false);
+  assert.equal(canResumeInterruptedRuntime(claude, { running: false, confidence: "historical_stale" }), false);
 });
 
 test("tool traffic is not mistaken for a completed turn", () => {
