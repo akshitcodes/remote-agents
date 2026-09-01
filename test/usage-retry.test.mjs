@@ -415,6 +415,34 @@ test("a bridge restart during dispatch becomes durable uncertainty and never sen
   assert.equal(sends, 0);
 });
 
+test("an interrupted resume is reconciled automatically without replaying it", async (t) => {
+  const store = new UsageRetryStore({ file: fixture(t), now: () => 1000 });
+  const entry = create(store, { progressGuard: { userCount: 3, lastUserId: "before" } });
+  store.update(entry.id, { state: "uncertain", nextCheckAt: 1000 });
+  let sends = 0;
+  const runner = new UsageRetryRunner({
+    store, now: () => 1000, readUsage: async () => { throw new Error("must not probe usage before delivery is reconciled"); },
+    readRuntime: async () => ({ running: false }), send: async () => { sends += 1; },
+    reconcileDelivery: async () => ({ state: "accepted" }),
+  });
+  assert.equal((await runner.tick()), 1);
+  assert.equal(store.get(entry.id).state, "accepted");
+  assert.equal(sends, 0);
+});
+
+test("an interrupted resume with a newer manual message is superseded automatically", async (t) => {
+  const store = new UsageRetryStore({ file: fixture(t), now: () => 1000 });
+  const entry = create(store, { progressGuard: { userCount: 3, lastUserId: "before" } });
+  store.update(entry.id, { state: "uncertain", nextCheckAt: 1000 });
+  const runner = new UsageRetryRunner({
+    store, now: () => 1000, readUsage: async () => { throw new Error("must not probe usage before delivery is reconciled"); },
+    readRuntime: async () => ({ running: false }), send: async () => {},
+    reconcileDelivery: async () => ({ state: "superseded" }),
+  });
+  await runner.tick();
+  assert.equal(store.get(entry.id).state, "superseded");
+});
+
 test("a legacy pending resume without transcript guard is failed closed on upgrade", (t) => {
   const file = fixture(t);
   writeFileSync(file, JSON.stringify([{

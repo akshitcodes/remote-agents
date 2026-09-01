@@ -1120,6 +1120,34 @@ const usageRetryRunner = new UsageRetryRunner({
     if (!provider) { throw Object.assign(new Error("provider is unavailable"), { status: 409, code: "provider_unavailable" }); }
     return threadUserProgress(provider, threadId);
   },
+  reconcileDelivery: async (entry) => {
+    const provider = pickProvider(entry.provider);
+    if (!provider) { throw Object.assign(new Error("provider is unavailable"), { status: 409, code: "provider_unavailable" }); }
+    const ledger = sendLedger.status({
+      provider: entry.provider,
+      method: "send",
+      requestId: entry.requestId,
+      threadId: entry.threadId,
+    });
+    if (ledger.state === "accepted") { return { state: "accepted" }; }
+
+    // The provider transcript is canonical even when the HTTP acknowledgement
+    // and send ledger outcome were lost. Match only the immediate message after
+    // the saved cursor, so an older or later "Continue." cannot be mistaken for
+    // this attempt.
+    const canonical = await reconcileUserIntent(provider, entry.threadId, entry.progressGuard, entry.text);
+    if (canonical.state === "accepted") { return { state: "accepted" }; }
+    const before = Number(entry.progressGuard?.userCount);
+    const after = Number(canonical.progress?.userCount);
+    if (Number.isSafeInteger(before) && Number.isSafeInteger(after) && after > before) {
+      return { state: "superseded" };
+    }
+    // send-ledger writes `dispatching` synchronously before invoking a provider.
+    // Therefore not_found/failed plus an unchanged canonical transcript proves
+    // this attempt did not become a provider message and can be safely re-armed.
+    if (["not_found", "failed"].includes(ledger.state)) { return { state: "retryable" }; }
+    return { state: "unconfirmed" };
+  },
   prepare: async (entry) => {
     const provider = pickProvider(entry.provider);
     if (!provider) { throw Object.assign(new Error("provider is unavailable"), { status: 409, code: "provider_unavailable" }); }
@@ -2783,6 +2811,20 @@ export async function handleRequest(req, res) {
 
     res.writeHead(200, headers);
     return res.end(readFileSync(file));
+  }
+
+  // Math fonts deliberately use a non-service-worker path. During a guarded
+  // deploy the new HTML can be observed before this server process restarts;
+  // an old server must return an uncached 404, not let the worker retain a font
+  // under the old JavaScript MIME type.
+  if (req.method === "GET" && url.pathname.startsWith("/math-fonts/")) {
+    const name = basename(url.pathname);
+    const file = join(__dirname, "public", "vendor", name);
+    if (/^KaTeX_[A-Za-z0-9-]+\.woff2$/.test(name) && existsSync(file)) {
+      res.writeHead(200, { "content-type": "font/woff2", "cache-control": "max-age=86400" });
+      return res.end(readFileSync(file));
+    }
+    return json(res, 404, { error: "not found" });
   }
 
   // Vendored static assets. basename() prevents traversal; an explicit MIME

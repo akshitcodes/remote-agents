@@ -199,10 +199,18 @@ export class UsageRetryStore {
     for (const row of rows) {
       if (!row?.id || !row.provider || !row.threadId || !row.requestId) { continue; }
       // A bridge cannot know whether an in-flight send survived its crash.
-      // Surface it as uncertain and never resume it automatically.
+      // Surface it as uncertain, then reconcile against durable provider state
+      // before taking any action; uncertainty never authorizes a blind resend.
       if (row.state === "dispatching") {
         row.state = "uncertain";
-        row.error = { message: "Bridge restarted while sending; check the thread before retrying", code: "delivery_uncertain", status: 504 };
+        row.nextCheckAt = this.now();
+        row.error = { message: "Bridge restarted while sending; verifying the provider transcript automatically", code: "delivery_uncertain", status: 504 };
+        repaired = true;
+      } else if (row.state === "uncertain" && !Number.isFinite(Number(row.nextCheckAt))) {
+        // Upgrade permanent/manual uncertainty into an automatically checked
+        // state. This never authorizes a resend; reconciliation must first
+        // prove acceptance, supersession, or a pre-provider failure.
+        row.nextCheckAt = this.now();
         repaired = true;
       }
       // A previous build did not record transcript progress. It cannot safely
@@ -368,6 +376,13 @@ export class UsageRetryStore {
       .map((entry) => structuredClone(entry));
   }
 
+  uncertainDue() {
+    const now = this.now();
+    return [...this.entries.values()]
+      .filter((entry) => entry.state === "uncertain" && Number(entry.nextCheckAt) <= now)
+      .map((entry) => structuredClone(entry));
+  }
+
   wake(provider) {
     const now = this.now();
     const changed = [];
@@ -383,18 +398,61 @@ export class UsageRetryStore {
 }
 
 export class UsageRetryRunner {
-  constructor({ store, now = () => Date.now(), readUsage, readRuntime, readProgress = async () => null, prepare = async (entry) => entry.dispatch, send, onUpdate = () => {}, pollMs = 60_000 } = {}) {
+  constructor({ store, now = () => Date.now(), readUsage, readRuntime, readProgress = async () => null, reconcileDelivery = async () => ({ state: "unconfirmed" }), prepare = async (entry) => entry.dispatch, send, onUpdate = () => {}, pollMs = 60_000 } = {}) {
     if (!store || !readUsage || !readRuntime || !send) { throw new Error("usage retry runner requires store, readUsage, readRuntime, and send"); }
     this.store = store;
     this.now = now;
     this.readUsage = readUsage;
     this.readRuntime = readRuntime;
     this.readProgress = readProgress;
+    this.reconcileDelivery = reconcileDelivery;
     this.prepare = prepare;
     this.send = send;
     this.onUpdate = onUpdate;
     this.pollMs = pollMs;
     this.inFlight = new Set();
+  }
+
+  async reconcile(id) {
+    if (this.inFlight.has(id)) { return this.store.get(id); }
+    this.inFlight.add(id);
+    try {
+      let entry = this.store.get(id);
+      if (!entry || entry.state !== "uncertain") { return entry; }
+      let result;
+      try {
+        result = await this.reconcileDelivery(entry);
+      } catch (error) {
+        const current = this.store.get(id);
+        if (!current || current.state !== "uncertain") { return current; }
+        return this.publish(this.store.update(id, {
+          nextCheckAt: this.now() + this.pollMs,
+          error: { ...publicError(error), message: `Still verifying Continue delivery automatically: ${error?.message ?? error}` },
+        }));
+      }
+      entry = this.store.get(id);
+      if (!entry || entry.state !== "uncertain") { return entry; }
+      if (result?.state === "accepted") {
+        return this.publish(this.store.update(id, { state: "accepted", nextCheckAt: null, error: null }));
+      }
+      if (result?.state === "superseded") {
+        return this.publish(this.store.update(id, { state: "superseded", nextCheckAt: null, error: null }));
+      }
+      if (result?.state === "retryable") {
+        return this.publish(this.store.update(id, {
+          state: "waiting_usage",
+          nextCheckAt: this.now(),
+          attempts: Math.max(0, Number(entry.attempts ?? 1) - 1),
+          error: null,
+        }));
+      }
+      return this.publish(this.store.update(id, {
+        nextCheckAt: this.now() + this.pollMs,
+        error: { message: "Verifying Continue delivery automatically; it will not be resent without proof", code: "delivery_reconciling", status: null },
+      }));
+    } finally {
+      this.inFlight.delete(id);
+    }
   }
 
   publish(entry) {
@@ -403,6 +461,7 @@ export class UsageRetryRunner {
   }
 
   async check(id) {
+    if (this.store.get(id)?.state === "uncertain") { return this.reconcile(id); }
     if (this.inFlight.has(id)) { return this.store.get(id); }
     this.inFlight.add(id);
 
@@ -595,7 +654,7 @@ export class UsageRetryRunner {
         const uncertain = error?.code === "delivery_uncertain" || error?.status == null || error?.status >= 500;
         return this.publish(this.store.update(id, {
           state: uncertain ? "uncertain" : "failed",
-          nextCheckAt: null,
+          nextCheckAt: uncertain ? this.now() + this.pollMs : null,
           error: publicError(error),
         }));
       }
@@ -606,8 +665,12 @@ export class UsageRetryRunner {
 
   async tick() {
     const rows = this.store.due();
-    await Promise.all(rows.map((entry) => this.check(entry.id)));
-    return rows.length;
+    const uncertain = this.store.uncertainDue();
+    await Promise.all([
+      ...rows.map((entry) => this.check(entry.id)),
+      ...uncertain.map((entry) => this.reconcile(entry.id)),
+    ]);
+    return rows.length + uncertain.length;
   }
 }
 

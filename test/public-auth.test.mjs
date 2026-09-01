@@ -76,9 +76,11 @@ test("unauthenticated responses reveal no app, version, thread, or path data", a
 
 test("vendored math fonts use a font MIME type", async () => {
   fixture();
-  const response = await request("/vendor/KaTeX_Main-Regular.woff2", { headers: { authorization: `Bearer ${TOKEN}` } });
+  const response = await request("/math-fonts/KaTeX_Main-Regular.woff2", { headers: { authorization: `Bearer ${TOKEN}` } });
   assert.equal(response.statusCode, 200);
   assert.equal(response.getHeader("content-type"), "font/woff2");
+  const unknown = await request("/math-fonts/not-a-katex-font.woff2", { headers: { authorization: `Bearer ${TOKEN}` } });
+  assert.equal(unknown.statusCode, 404);
 });
 
 test("the loopback setup challenge proves token knowledge without returning the token", async () => {

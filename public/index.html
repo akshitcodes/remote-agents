@@ -2803,7 +2803,7 @@ function usageRetryText(entry) {
     waiting_thread: "Usage is available — waiting for this turn to be idle",
     waiting_provider: "Auto-resume queued — provider temporarily unavailable",
     dispatching: "Sending Continue…",
-    uncertain: "Continue delivery is uncertain — it will not be sent again",
+    uncertain: "Verifying Continue delivery automatically — it will not be resent without proof",
     failed: "Auto-resume could not send Continue",
   };
   const failure = ["waiting_provider", "uncertain", "failed"].includes(entry.state) && entry.error?.message ? ` · ${entry.error.message}` : "";
@@ -2840,10 +2840,20 @@ function renderUsageRetry(entry) {
     };
     actions.appendChild(cancel);
   } else if (entry.state === "uncertain") {
+    const check = document.createElement("button");
+    check.className = "pending-action";
+    check.textContent = "Check now";
+    check.onclick = async () => {
+      check.disabled = true;
+      try { updateUsageRetry(await api("/api/usage-retries/check", { id: entry.id }).then((result) => result.entry)); }
+      catch (error) { chip("⚠️", "Could not verify delivery yet: " + error.message); }
+      finally { if (check.isConnected) { check.disabled = false; } }
+    };
+    actions.appendChild(check);
     const dismiss = document.createElement("button");
     dismiss.className = "pending-action cancel";
-    dismiss.textContent = "Dismiss after checking";
-    dismiss.title = "Remove this saved retry only after checking the thread; this cannot recall a Continue that may already have reached the agent";
+    dismiss.textContent = "Dismiss";
+    dismiss.title = "Stop automatic verification and remove this saved retry; this cannot recall a Continue that may already have reached the agent";
     dismiss.onclick = async () => {
       dismiss.disabled = true;
       try { updateUsageRetry(await api("/api/usage-retries/cancel", { id: entry.id }).then((result) => result.entry)); }
