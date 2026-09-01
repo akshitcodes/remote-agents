@@ -198,6 +198,8 @@
   .md .mermaid-diagram svg { display: block; max-width: 100%; height: auto; margin: auto; }
   .md .mermaid-diagram.error { display: block; min-height: 0; color: var(--danger); font-size: 12.5px; }
   .md .mermaid-source[hidden], .md .mermaid-diagram[hidden] { display: none; }
+  .md .katex { font-size: 1.03em; }
+  .md .katex-display { max-width: 100%; margin: 10px 0; padding: 3px 0; overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch; }
   .md blockquote { margin: 0 0 8px; padding: 2px 0 2px 12px; border-left: 3px solid var(--border); color: var(--fg-dim); }
   .md hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
   .md table { border-collapse: collapse; display: block; overflow-x: auto; margin: 0 0 10px; font-size: 13px; }
@@ -712,15 +714,43 @@ function renderMarkdown(src) {
   // `file://` link targets are dropped by the sanitizer, so rewrite them to plain
   // absolute paths first; the click handler opens those in the file viewer.
   const normalized = src.replace(/(\]\(\s*)file:\/\/(?:localhost)?(\/)/gi, "$1$2");
-  const html = window.marked.parse(normalized);
-  return window.DOMPurify.sanitize(html, {
+  const math = protectMathForMarkdown(normalized);
+  const html = window.marked.parse(math.source);
+  const sanitized = window.DOMPurify.sanitize(html, {
     ADD_ATTR: ["target"],
     // Interactive controls are created only by this client after sanitizing.
     // Agent-authored styles/hidden content must not disguise what a copy action copies.
     FORBID_TAGS: ["button", "style"],
     FORBID_ATTR: ["style", "hidden"],
   });
+  return math.restore(sanitized);
 }
+
+// BEGIN math-markdown-protection
+// Marked treats the backslashes in \(...\) and \[...\] as Markdown escapes.
+// Protect complete math spans while Markdown is parsed, then restore them as
+// escaped text. KaTeX sees the original delimiters later; no agent HTML bypasses
+// DOMPurify. Code spans are safe too because auto-render explicitly ignores code.
+function protectMathForMarkdown(src) {
+  const spans = [];
+  let nonce = 0;
+  while (String(src).includes(`REMOTEAGENTSMATH${nonce}TOKEN`)) { nonce += 1; }
+  const source = String(src).replace(/\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)|\$\$[\s\S]*?\$\$/g, (value) => {
+    const token = `REMOTEAGENTSMATH${nonce}TOKEN${spans.length}END`;
+    spans.push({ token, value });
+    return token;
+  });
+  return {
+    source,
+    restore(html) {
+      let restored = String(html);
+      for (const span of spans) { restored = restored.split(span.token).join(esc(span.value)); }
+      return restored;
+    },
+    count: spans.length,
+  };
+}
+// END math-markdown-protection
 
 // BEGIN code-block-metadata (pure so language decisions stay unit-testable)
 const CODE_LANGUAGE_LABELS = {
@@ -736,6 +766,7 @@ const CODE_LANGUAGE_LABELS = {
 };
 const MAX_CODE_HIGHLIGHT_CHARS = 200_000;
 const MAX_MERMAID_CHARS = 50_000;
+const MAX_MATH_CHARS = 50_000;
 
 function codeBlockMetadata(className, text) {
   const explicit = String(className || "").match(/(?:^|\s)language-([^\s]+)/i)?.[1]?.toLowerCase() || null;
@@ -863,6 +894,91 @@ function scheduleMermaidBlocks(root) {
   }
 }
 
+let mathLoader = null;
+const observedMathRoots = new Set();
+const mathObserver = window.IntersectionObserver ? new IntersectionObserver((entries) => {
+  for (const entry of entries) {
+    if (!entry.isIntersecting) { continue; }
+    mathObserver.unobserve(entry.target);
+    observedMathRoots.delete(entry.target);
+    renderMathRoot(entry.target);
+  }
+}, { rootMargin: "320px 0px" }) : null;
+
+function loadMathRenderer() {
+  if (window.renderMathInElement && window.katex) { return Promise.resolve(window.renderMathInElement); }
+  if (mathLoader) { return mathLoader; }
+  mathLoader = new Promise((resolve, reject) => {
+    if (!document.querySelector('link[data-remote-agents-katex]')) {
+      const style = document.createElement("link");
+      style.rel = "stylesheet";
+      style.href = "/vendor/katex.min.css";
+      style.dataset.remoteAgentsKatex = "";
+      document.head.appendChild(style);
+    }
+    const core = document.createElement("script");
+    core.src = "/vendor/katex.min.js";
+    core.async = true;
+    core.onerror = () => reject(new Error("Math renderer could not be loaded"));
+    core.onload = () => {
+      const auto = document.createElement("script");
+      auto.src = "/vendor/katex-auto-render.min.js";
+      auto.async = true;
+      auto.onerror = () => reject(new Error("Math auto-renderer could not be loaded"));
+      auto.onload = () => window.renderMathInElement ? resolve(window.renderMathInElement) : reject(new Error("Math renderer did not initialize"));
+      document.head.appendChild(auto);
+    };
+    document.head.appendChild(core);
+  }).catch((error) => {
+    mathLoader = null;
+    throw error;
+  });
+  return mathLoader;
+}
+
+async function renderMathRoot(root) {
+  if (!root.isConnected || root.dataset.mathState !== "pending") { return; }
+  root.dataset.mathState = "rendering";
+  try {
+    const render = await loadMathRenderer();
+    if (!root.isConnected) { return; }
+    render(root, {
+      delimiters: [
+        { left: "$$", right: "$$", display: true },
+        { left: "\\[", right: "\\]", display: true },
+        { left: "\\(", right: "\\)", display: false },
+      ],
+      ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code", "option"],
+      throwOnError: false,
+      strict: "ignore",
+      trust: false,
+      maxSize: 20,
+      maxExpand: 1000,
+    });
+    root.dataset.mathState = "ready";
+  } catch {
+    if (root.isConnected) { root.dataset.mathState = "error"; }
+  }
+}
+
+function scheduleMath(root, sourceText) {
+  for (const candidate of observedMathRoots) {
+    if (!candidate.isConnected) {
+      mathObserver?.unobserve(candidate);
+      observedMathRoots.delete(candidate);
+    }
+  }
+  const source = String(sourceText || "");
+  if (source.length > MAX_MATH_CHARS || !/(?:\\\[|\\\(|\$\$)/.test(source)) { return; }
+  root.dataset.mathState = "pending";
+  if (mathObserver) {
+    observedMathRoots.add(root);
+    mathObserver.observe(root);
+  } else {
+    renderMathRoot(root);
+  }
+}
+
 function makeMermaidCard(pre, code, sourceText) {
   for (const attr of Array.from(pre.attributes)) { pre.removeAttribute(attr.name); }
   for (const attr of Array.from(code.attributes)) { code.removeAttribute(attr.name); }
@@ -963,6 +1079,7 @@ function renderFinalMarkdownInto(el, text) {
   el.innerHTML = renderMarkdown(text);
   decorateCodeBlocks(el);
   scheduleMermaidBlocks(el);
+  scheduleMath(el, text);
 }
 
 async function writeClipboardText(text) {
@@ -5768,6 +5885,7 @@ function renderFileInto(el, name, d, staleAt) {
     const markdown = el.querySelector(".md.filebody");
     decorateCodeBlocks(markdown);
     scheduleMermaidBlocks(markdown);
+    scheduleMath(markdown, d.content);
     return;
   }
 

@@ -13,6 +13,15 @@ const context = vm.createContext({ JSON });
 vm.runInContext(`${source}\nthis.codeBlockMetadata = codeBlockMetadata;`, context);
 const metadata = context.codeBlockMetadata;
 
+const mathMarker = html.indexOf("// BEGIN math-markdown-protection");
+const mathStart = html.indexOf("\n", mathMarker) + 1;
+const mathEnd = html.indexOf("// END math-markdown-protection", mathStart);
+const mathSource = mathMarker >= 0 && mathEnd >= 0 ? html.slice(mathStart, mathEnd) : "";
+assert.ok(mathSource, "math protection source must remain extractable");
+const mathContext = vm.createContext({ esc: (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") });
+vm.runInContext(`${mathSource}\nthis.protectMathForMarkdown = protectMathForMarkdown;`, mathContext);
+const protectMath = mathContext.protectMathForMarkdown;
+
 test("fenced languages get stable human-readable labels", () => {
   assert.deepEqual(structuredClone(metadata("language-json", "{}")), { language: "json", label: "JSON", inferred: false });
   assert.equal(metadata("foo language-typescript bar", "const x = 1").label, "TypeScript");
@@ -68,6 +77,27 @@ test("Mermaid is lazy, bounded, sanitized, and absent from the streaming path", 
 
   const appendAgent = html.match(/function appendAgent\(el, delta\) \{[\s\S]*?\n\}/)?.[0] ?? "";
   assert.doesNotMatch(appendAgent, /mermaid|scheduleMermaidBlocks|loadMermaid/);
+});
+
+test("LaTeX is protected from Markdown and rendered lazily only after completion", () => {
+  const input = "Area: \\[A=\\pi r^2\\] and \\(x<y\\), but `\\[code\\]`.";
+  const protectedMath = protectMath(input);
+  assert.equal(protectedMath.count, 3);
+  assert.doesNotMatch(protectedMath.source, /\\pi/);
+  assert.equal(protectedMath.restore(protectedMath.source), input.replace("<", "&lt;"));
+  const hostile = protectMath("\\[x < y & z\\]");
+  assert.equal(hostile.restore(hostile.source), "\\[x &lt; y &amp; z\\]");
+
+  assert.match(html, /core\.src = "\/vendor\/katex\.min\.js"/);
+  assert.match(html, /auto\.src = "\/vendor\/katex-auto-render\.min\.js"/);
+  assert.match(html, /trust: false/);
+  assert.match(html, /maxExpand: 1000/);
+  assert.match(html, /MAX_MATH_CHARS = 50_000/);
+  assert.match(html, /scheduleMath\(el, text\)/);
+  assert.match(html, /scheduleMath\(markdown, d\.content\)/);
+
+  const appendAgent = html.match(/function appendAgent\(el, delta\) \{[\s\S]*?\n\}/)?.[0] ?? "";
+  assert.doesNotMatch(appendAgent, /katex|scheduleMath|renderMathRoot/);
 });
 
 test("HTML files render only in a scriptless isolated preview with source fallback", () => {

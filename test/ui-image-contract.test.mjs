@@ -350,7 +350,7 @@ test("desktop workspace keeps session navigation visible and constrains the chat
   assert.match(html, /event\.key === "Escape"/);
   assert.match(server, /const body = renderIndexHtml\(req\.headers\["user-agent"\][\s\S]*?return res\.end\(body\)/);
   assert.match(onboarding, /const readIndexShell = createIndexShellReader\(indexHtmlPath\)/);
-  assert.match(sw, /const CACHE_VERSION = "remote-agents-v23"/);
+  assert.match(sw, /const CACHE_VERSION = "remote-agents-v24"/);
 });
 
 test("project terminal uses passkey step-up, a server-derived cwd, and an isolated interactive transport", () => {

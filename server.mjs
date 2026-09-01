@@ -1207,7 +1207,8 @@ function ensureBrowserIdentity(req, res) {
 
 function exactTerminalOrigin(req) {
   const supplied = String(req.headers.origin ?? "");
-  return !!PUBLIC_ORIGIN && supplied === PUBLIC_ORIGIN;
+  if (!PUBLIC_ORIGIN || !supplied || supplied === "null") { return false; }
+  try { return new URL(supplied).origin === PUBLIC_ORIGIN; } catch { return false; }
 }
 
 function requireTerminalOrigin(req) {
@@ -1716,6 +1717,26 @@ export function startLocalTerminalBrowserHandoff({
       });
     });
   });
+}
+
+export function createTerminalDeviceHandoff({
+  provider,
+  threadId,
+  targetBrowserSecret = randomBytes(32).toString("base64url"),
+  createEnrollment = () => terminalSecurity.createEnrollment(),
+  createBrowserBootstrap = (input) => terminalSecurity.createBrowserBootstrap(input),
+} = {}) {
+  const enrollment = createEnrollment();
+  const bootstrap = createBrowserBootstrap({
+    // A newly trusted phone must get its own browser identity. Reusing the
+    // authorizing Mac's identity would couple revocation and passkey records.
+    browserSecret: targetBrowserSecret,
+    enrollmentSecret: enrollment.secret,
+    context: { provider, threadId },
+  });
+  const target = new URL("/api/terminal/handoff", bootstrap.origin ?? enrollment.origin);
+  target.searchParams.set("handoff", bootstrap.secret);
+  return { url: target.toString(), code: enrollment.code, expiresAt: enrollment.expiresAt };
 }
 
 export async function requireReachableTerminalOrigin(origin, resolveHost = lookup) {
@@ -2240,6 +2261,23 @@ const routes = {
     json(res, 200, { url: target.toString() });
   },
 
+  // An already unlocked terminal device can authorize another browser without
+  // returning to the CLI. The link is short-lived and one-use; redemption
+  // gives the new browser its own identity and then starts passkey enrollment.
+  "POST /api/terminal/device-handoff": async (req, res) => {
+    requireTerminalOrigin(req);
+    const browserSecret = terminalBrowser(req);
+    terminalSecurity.requireUnlock(terminalUnlock(req), browserSecret);
+    const body = await readBody(req, 16 * 1024);
+    const provider = String(body?.provider ?? "");
+    const threadId = String(body?.threadId ?? "");
+    if (!USABLE_PROVIDER_NAMES.has(provider) || !threadId || threadId.length > 500) {
+      return json(res, 400, { error: "provider and threadId are required", code: "terminal_context_invalid" });
+    }
+    await requireReachableTerminalOrigin(PUBLIC_ORIGIN);
+    json(res, 200, createTerminalDeviceHandoff({ provider, threadId }));
+  },
+
   "POST /api/terminal/register/options": async (req, res) => {
     requireTerminalOrigin(req);
     const body = await readBody(req, 64 * 1024);
@@ -2754,7 +2792,12 @@ export async function handleRequest(req, res) {
 
     if (existsSync(file)) {
       const body = readFileSync(file);
-      const type = extname(file) === ".css" ? "text/css; charset=utf-8" : "application/javascript; charset=utf-8";
+      const type = ({
+        ".css": "text/css; charset=utf-8",
+        ".js": "application/javascript; charset=utf-8",
+        ".mjs": "application/javascript; charset=utf-8",
+        ".woff2": "font/woff2",
+      })[extname(file).toLowerCase()] || "application/octet-stream";
       res.writeHead(200, { "content-type": type, "cache-control": "max-age=86400" });
       return res.end(body);
     }

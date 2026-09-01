@@ -193,6 +193,7 @@ export class TerminalSecurity {
     return {
       enabled: state.enabled,
       originReady: !!this.origin,
+      origin: this.origin,
       enrolled: !!device,
       device: device ? publicDevice(device) : null,
       unlocked,

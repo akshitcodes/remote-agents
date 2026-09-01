@@ -14,6 +14,9 @@ let fitAddon = null;
 let resizeObserver = null;
 let inputSequence = 0;
 let fallbackJob = null;
+let terminalBackendAvailable = false;
+let terminalMode = null;
+const TERMINAL_MODE_KEY = "remote-agents-terminal-mode-v1";
 
 function setError(message = "") {
   $("gateError").textContent = message;
@@ -22,6 +25,8 @@ function setError(message = "") {
 
 function gate({ title, copy, action, disabled = false, code = false, label = false, onclick = null }) {
   $("gate").classList.remove("hidden");
+  $("modeSwitch").classList.add("hidden");
+  $("addDevice").classList.add("hidden");
   $("terminalShell").classList.add("hidden");
   $("fallback").classList.add("hidden");
   $("gateTitle").textContent = title;
@@ -33,6 +38,59 @@ function gate({ title, copy, action, disabled = false, code = false, label = fal
   $("gateAction").onclick = onclick;
   $("connection").textContent = "Locked";
   $("connection").classList.remove("live");
+}
+
+function preferredTerminalMode() {
+  const saved = localStorage.getItem(TERMINAL_MODE_KEY);
+  if (saved === "command" || saved === "interactive") { return saved; }
+  return matchMedia("(max-width: 600px)").matches ? "command" : "interactive";
+}
+
+function closeInteractiveSocket() {
+  const connection = socket;
+  socket = null;
+  if (connection && connection.readyState < WebSocket.CLOSING) {
+    connection.close(4000, "switched to command mode");
+  }
+}
+
+function updateModeSwitch() {
+  $("modeSwitch").classList.remove("hidden");
+  for (const button of $("modeSwitch").querySelectorAll("[data-terminal-mode]")) {
+    const mode = button.dataset.terminalMode;
+    button.classList.toggle("on", mode === terminalMode);
+    button.setAttribute("aria-pressed", String(mode === terminalMode));
+    button.disabled = mode === "interactive" && !terminalBackendAvailable;
+    button.title = button.disabled ? "Interactive PTY is unavailable on this bridge" : "";
+  }
+}
+
+function showCommandMode(reason = "Typing stays on this device. The command is sent only when you press Enter.") {
+  closeInteractiveSocket();
+  terminalMode = "command";
+  $("gate").classList.add("hidden");
+  $("terminalShell").classList.add("hidden");
+  $("fallback").classList.remove("hidden");
+  $("fallbackReason").textContent = reason;
+  $("connection").textContent = "Command mode";
+  $("connection").classList.remove("live");
+  updateModeSwitch();
+  $("commandInput").focus();
+}
+
+async function selectTerminalMode(mode, { persist = true, unavailableReason = "" } = {}) {
+  if (mode === "interactive" && !terminalBackendAvailable) {
+    showCommandMode(unavailableReason || "Interactive PTY is unavailable on this bridge. Commands still run normally after Enter.");
+    return;
+  }
+  if (persist) { localStorage.setItem(TERMINAL_MODE_KEY, mode); }
+  if (mode === "command") {
+    showCommandMode();
+    return;
+  }
+  terminalMode = "interactive";
+  updateModeSwitch();
+  await connectTerminal();
 }
 
 async function api(path, body) {
@@ -109,6 +167,31 @@ async function beginLocalSetup() {
   }
 }
 
+async function routeToCanonicalOrigin(canonicalOrigin) {
+  const handoff = await api("/api/terminal/browser-handoff", { provider, threadId });
+  const target = new URL(handoff.url);
+  if (target.origin !== canonicalOrigin) { throw new Error("The bridge returned an unexpected terminal address"); }
+  location.replace(target.toString());
+}
+
+async function addTrustedDevice() {
+  $("deviceError").classList.add("hidden");
+  $("addDevice").disabled = true;
+  try {
+    const handoff = await api("/api/terminal/device-handoff", { provider, threadId });
+    $("deviceLink").value = handoff.url;
+    $("deviceCode").textContent = handoff.code || "—";
+    $("shareDeviceLink").style.display = navigator.share ? "inline-flex" : "none";
+    $("deviceDialog").showModal();
+  } catch (error) {
+    $("deviceError").textContent = error.message;
+    $("deviceError").classList.remove("hidden");
+    if (!$("deviceDialog").open) { $("deviceDialog").showModal(); }
+  } finally {
+    $("addDevice").disabled = false;
+  }
+}
+
 function terminalDimensions() {
   return { cols: terminal?.cols || 100, rows: terminal?.rows || 30 };
 }
@@ -120,6 +203,8 @@ async function connectTerminal() {
   $("gate").classList.add("hidden");
   $("fallback").classList.add("hidden");
   $("terminalShell").classList.remove("hidden");
+  terminalMode = "interactive";
+  updateModeSwitch();
 
   if (!terminal) {
     terminal = new Terminal({
@@ -224,7 +309,11 @@ async function initialize() {
   $("context").textContent = `${provider} · ${threadId}`;
   try {
     const status = await api("/api/terminal/security/status");
-    if (!status.access.enabled || (!status.access.enrolled && !enrollmentCapability)) {
+    if (status.access.origin && location.origin !== status.access.origin) {
+      await routeToCanonicalOrigin(status.access.origin);
+      return;
+    }
+    if (!status.access.enabled) {
       const bridgeMacBrowser = /Macintosh|Mac OS X/i.test(navigator.userAgent) && (navigator.maxTouchPoints || 0) < 2;
       return gate(!bridgeMacBrowser
         ? { title: "Finish setup on the bridge Mac", copy: "For safety, terminal access can only be turned on from a browser running on the bridge Mac. Open this chat there, tap the terminal icon, and choose Set up on this Mac.", action: "Check again", onclick: initialize }
@@ -237,16 +326,14 @@ async function initialize() {
     if (!status.access.unlocked) {
       return gate({ title: "Unlock project terminal", copy: `Verify the passkey for ${status.access.device?.label || "this device"}. The unlock expires after inactivity.`, action: "Unlock with passkey", onclick: unlock });
     }
-    if (!status.backend.available) {
+    $("addDevice").classList.remove("hidden");
+    terminalBackendAvailable = !!status.backend.available;
+    if (!terminalBackendAvailable) {
       $("context").textContent = `${provider} · project command mode`;
-      $("gate").classList.add("hidden");
-      $("terminalShell").classList.add("hidden");
-      $("fallback").classList.remove("hidden");
-      $("fallbackReason").textContent = status.backend.reason || "Interactive PTY is unavailable on this machine.";
-      $("connection").textContent = "Command mode";
+      showCommandMode(status.backend.reason || "Interactive PTY is unavailable on this bridge. Commands still run normally after Enter.");
       return;
     }
-    await connectTerminal();
+    await selectTerminalMode(preferredTerminalMode(), { persist: false });
   } catch (error) {
     gate({ title: "Terminal unavailable", copy: "The bridge could not establish secure terminal access.", action: "Try again", onclick: initialize });
     setError(error.message);
@@ -254,6 +341,24 @@ async function initialize() {
 }
 
 $("commandForm").addEventListener("submit", runFallback);
+$("addDevice").addEventListener("click", addTrustedDevice);
+$("copyDeviceLink").addEventListener("click", async () => {
+  await navigator.clipboard.writeText($("deviceLink").value);
+  $("copyDeviceLink").textContent = "Copied";
+  setTimeout(() => { $("copyDeviceLink").textContent = "Copy link"; }, 1500);
+});
+$("shareDeviceLink").addEventListener("click", () => navigator.share?.({
+  title: "Remote Agents terminal setup",
+  text: "Trust this device for project terminal access",
+  url: $("deviceLink").value,
+}));
+$("modeSwitch").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-terminal-mode]");
+  if (!button || button.disabled) { return; }
+  selectTerminalMode(button.dataset.terminalMode).catch((error) => {
+    $("terminalStatus").textContent = error.message;
+  });
+});
 $("reconnect").addEventListener("click", () => connectTerminal().catch((error) => { $("terminalStatus").textContent = error.message; }));
 window.addEventListener("beforeunload", () => { try { socket?.close(1000, "page closed"); } catch {} });
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { configureServer, handleRequest, resetAuthRateLimits, startLocalTerminalBrowserHandoff } from "../server.mjs";
+import { configureServer, createTerminalDeviceHandoff, handleRequest, resetAuthRateLimits, startLocalTerminalBrowserHandoff } from "../server.mjs";
 import { localBridgeProof } from "../local-proof.mjs";
 
 const TOKEN = "portable-test-token-with-at-least-32-characters";
@@ -74,6 +74,13 @@ test("unauthenticated responses reveal no app, version, thread, or path data", a
   assert.equal(manifest.statusCode, 401, "PWA assets are private until the pairing cookie exists");
 });
 
+test("vendored math fonts use a font MIME type", async () => {
+  fixture();
+  const response = await request("/vendor/KaTeX_Main-Regular.woff2", { headers: { authorization: `Bearer ${TOKEN}` } });
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.getHeader("content-type"), "font/woff2");
+});
+
 test("the loopback setup challenge proves token knowledge without returning the token", async () => {
   fixture();
   const nonce = "a".repeat(64);
@@ -122,6 +129,30 @@ test("terminal browser handoffs use a separate one-use loopback listener", async
   await new Promise((resolve) => setTimeout(resolve, 20));
   await assert.rejects(fetch(handoff.url, { redirect: "manual" }));
   assert.equal(enrollments, 1);
+});
+
+test("an unlocked device can create an independent one-use enrollment handoff", () => {
+  const inputs = [];
+  const result = createTerminalDeviceHandoff({
+    provider: "codex",
+    threadId: "thread-phone",
+    targetBrowserSecret: "independent-phone-browser-secret-with-32-bytes",
+    createEnrollment: () => ({ origin: "https://agents.example.test", secret: "phone-enrollment", code: "1234-5678", expiresAt: 999 }),
+    createBrowserBootstrap: (input) => {
+      inputs.push(input);
+      return { origin: "https://agents.example.test", secret: "phone-handoff" };
+    },
+  });
+  assert.deepEqual(inputs, [{
+    browserSecret: "independent-phone-browser-secret-with-32-bytes",
+    enrollmentSecret: "phone-enrollment",
+    context: { provider: "codex", threadId: "thread-phone" },
+  }]);
+  assert.deepEqual(result, {
+    url: "https://agents.example.test/api/terminal/handoff?handoff=phone-handoff",
+    code: "1234-5678",
+    expiresAt: 999,
+  });
 });
 
 test("an expired terminal browser handoff cannot create an enrollment", async () => {

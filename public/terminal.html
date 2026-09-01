@@ -17,10 +17,17 @@
       <h1>Project terminal</h1>
       <div id="context" class="context">Checking access…</div>
     </div>
-    <span id="connection" class="connection">Locked</span>
+    <div class="header-actions">
+      <button id="addDevice" class="add-device hidden" type="button">Add device</button>
+      <span id="connection" class="connection">Locked</span>
+    </div>
   </header>
 
   <main>
+    <nav id="modeSwitch" class="mode-switch hidden" aria-label="Terminal input mode">
+      <button type="button" data-terminal-mode="command">Command</button>
+      <button type="button" data-terminal-mode="interactive">Interactive</button>
+    </nav>
     <section id="gate" class="gate" aria-live="polite">
       <div class="gate-card">
         <div class="shield">›_</div>
@@ -51,7 +58,7 @@
     <section id="fallback" class="fallback hidden">
       <div class="fallback-head">
         <strong>Command mode</strong>
-        <span id="fallbackReason">Interactive PTY is unavailable on this machine.</span>
+        <span id="fallbackReason">Typing stays on this device. The command is sent only when you press Enter.</span>
       </div>
       <pre id="commandOutput">Ready.</pre>
       <form id="commandForm">
@@ -61,5 +68,25 @@
       </form>
     </section>
   </main>
+
+  <dialog id="deviceDialog" class="device-dialog">
+    <form method="dialog" class="device-card">
+      <div class="device-title-row">
+        <h2>Add a trusted device</h2>
+        <button class="dialog-close" value="cancel" aria-label="Close">×</button>
+      </div>
+      <p>Open this one-time link on your phone, then create a passkey with Face ID. It expires in five minutes.</p>
+      <label class="field">
+        <span>Setup link</span>
+        <input id="deviceLink" readonly>
+      </label>
+      <div class="device-code">Or enter code <strong id="deviceCode">—</strong> on an already paired phone.</div>
+      <div class="device-actions">
+        <button id="copyDeviceLink" class="secondary" type="button">Copy link</button>
+        <button id="shareDeviceLink" class="primary" type="button">Share link</button>
+      </div>
+      <p id="deviceError" class="error hidden"></p>
+    </form>
+  </dialog>
 </body>
 </html>

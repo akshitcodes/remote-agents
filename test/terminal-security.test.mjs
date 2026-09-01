@@ -49,6 +49,7 @@ test("terminal enrollment binds a passkey to one browser and tickets are one-use
   const enrollment = security.createEnrollment();
   const registered = await enroll(security, enrollment);
   assert.equal(registered.device.label, "Phone");
+  assert.equal(security.status({ browserSecret: "browser-one" }).origin, "https://agents.example.test");
   assert.equal(security.status({ browserSecret: "browser-one", unlockToken: registered.unlockToken }).unlocked, true);
   assert.equal(security.status({ browserSecret: "browser-two", unlockToken: registered.unlockToken }).unlocked, false);
 
