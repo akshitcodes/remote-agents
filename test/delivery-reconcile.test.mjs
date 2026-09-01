@@ -20,18 +20,26 @@ test("canonical reconciliation accepts only an exact user message after the save
   assert.deepEqual(result.progress, { userCount: 2, lastUserId: "u2" });
 });
 
-test("canonical reconciliation fails closed for stale cursors, mismatches, and image-only prompts", async () => {
+test("canonical reconciliation fails closed for stale cursors and image-only prompts", async () => {
   const p = provider([user("u1", "earlier"), user("u2", "different")]);
   assert.equal((await reconcileUserIntent(p, "thread", { userCount: 1, lastUserId: "wrong" }, "different")).state, "unconfirmed");
-  assert.equal((await reconcileUserIntent(p, "thread", { userCount: 1, lastUserId: "u1" }, "not present")).state, "unconfirmed");
   assert.equal((await reconcileUserIntent(p, "thread", { userCount: 1, lastUserId: "u1" }, "")).state, "unconfirmed");
   assert.equal((await reconcileUserIntent(p, "thread", { userCount: 2, lastUserId: "u2" }, "different")).state, "unconfirmed");
+});
+
+test("a different immediate next message proves the attempted send was superseded", async () => {
+  const p = provider([user("u1", "earlier"), user("u2", ".")]);
+  const result = await reconcileUserIntent(p, "thread", { userCount: 1, lastUserId: "u1" }, "the attempted prompt");
+
+  assert.equal(result.state, "superseded");
+  assert.deepEqual(result.progress, { userCount: 2, lastUserId: "u2" });
+  assert.equal(confirmCanonicalNonDelivery(result, { userCount: 1, lastUserId: "u1" }, { running: true, confidence: "stalled" }), true);
 });
 
 test("canonical reconciliation never searches past the immediate next user message", async () => {
   const p = provider([user("u1", "earlier"), user("u2", "different"), user("u3", "continue")]);
   const result = await reconcileUserIntent(p, "thread", { userCount: 1, lastUserId: "u1" }, "continue");
-  assert.equal(result.state, "unconfirmed");
+  assert.equal(result.state, "superseded");
 });
 
 test("unchanged canonical progress proves non-delivery only after a confirmed idle state", () => {

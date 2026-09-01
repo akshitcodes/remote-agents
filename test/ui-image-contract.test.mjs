@@ -71,7 +71,8 @@ test("failed delivery recovery distinguishes pre-dispatch failures and remains a
   assert.match(html, /function restartAutomaticDeliveryChecks\(\)/);
   assert.match(html, /probe\.runtime\?\.running && probe\.runtime\?\.source === "bridge"/);
   assert.match(server, /baseline\.lastUserId/);
-  assert.match(server, /userMessageText\(users\[before\]\) === expected/);
+  assert.match(server, /userMessageText\(next\) === expected/);
+  assert.match(server, /state: matched \? "accepted" : "superseded"/);
   assert.match(server, /expected\) \{ return \{ state: "unconfirmed"/);
   assert.match(claudeProvider, /code: "delivery_uncertain"/);
   assert.match(codexProvider, /p\.method === "turn\/start" \|\| p\.method === "turn\/steer"/);

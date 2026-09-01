@@ -987,11 +987,19 @@ export async function reconcileUserIntent(provider, threadId, baseline, text) {
   // Only the immediate next canonical user message can satisfy this attempt.
   // A wider search makes repeated prompts such as "continue" falsely prove a
   // later failed send merely because an older identical message exists.
-  const matched = userMessageText(users[before]) === expected;
-  return { state: matched ? "accepted" : "unconfirmed", progress: userProgressFromThread(full) };
+  const next = users[before];
+  if (!next) { return { state: "unconfirmed", progress: userProgressFromThread(full) }; }
+  const matched = userMessageText(next) === expected;
+  // User messages are append-only. Once a different canonical message occupies
+  // the position immediately after this attempt's verified cursor, the missing
+  // attempt cannot arrive later without violating transcript order. This is
+  // stronger proof of non-delivery than an unchanged transcript: a later send
+  // has already crossed the exact boundary where this one would have appeared.
+  return { state: matched ? "accepted" : "superseded", progress: userProgressFromThread(full) };
 }
 
 export function confirmCanonicalNonDelivery(reconciliation, baseline, runtime) {
+  if (reconciliation?.state === "superseded") { return true; }
   if (reconciliation?.state !== "unconfirmed" || runtime?.running) { return false; }
   if (!["marker", "bridge_terminal", "provider"].includes(runtime?.confidence)) { return false; }
   const before = Number(baseline?.userCount);
