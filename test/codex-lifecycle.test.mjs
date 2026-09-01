@@ -85,6 +85,12 @@ test("native interrupted resume starts an empty Codex turn", async () => {
   const provider = new CodexProvider(() => {}, { idleReleaseMs: 1000 });
   const calls = [];
   provider.ensureResumed = async () => false;
+  provider.ready = async () => {};
+  provider.rpc = async (method, params) => {
+    assert.equal(method, "thread/read");
+    assert.deepEqual(params, { threadId: "thread-resume", includeTurns: true });
+    return { thread: { turns: [{ id: "turn-native-interrupted", status: "interrupted" }] } };
+  };
   provider.threadClients.set("thread-resume", {});
   provider.clientRpc = async (_client, method, params) => {
     calls.push({ method, params });
@@ -99,10 +105,22 @@ test("native interrupted resume starts an empty Codex turn", async () => {
 
   assert.equal(provider.supportsInterruptedResume(), true);
   assert.equal(result.resumed, true);
-  assert.equal(result.previousTurnId, "codex:turn-aborted");
+  assert.equal(result.previousTurnId, "turn-native-interrupted");
   assert.deepEqual(calls, [{ method: "turn/start", params: { threadId: "thread-resume", input: [] } }]);
   assert.equal(provider.activeTurnId("thread-resume"), "turn-resumed");
   provider.cancelIdleRelease("thread-resume");
+});
+
+test("native resume refuses when Codex does not confirm an interrupted latest turn", async () => {
+  const provider = new CodexProvider(() => {});
+  provider.ready = async () => {};
+  provider.rpc = async () => ({ thread: { turns: [{ id: "turn-complete", status: "completed" }] } });
+
+  await assert.rejects(
+    provider.resumeInterrupted({ threadId: "thread-complete", requestId: "resume-request-2" }),
+    (error) => error.status === 409 && error.code === "no_interrupted_turn",
+  );
+  assert.equal(provider.startingTurns.has("thread-complete"), false);
 });
 
 test("a turn-started notification without an id still blocks idle release", () => {

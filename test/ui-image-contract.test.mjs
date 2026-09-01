@@ -38,6 +38,10 @@ test("image references survive queue, steer, send, retry, and reload paths", () 
   assert.match(server, /terminalOutcome === "aborted"/);
   assert.match(server, /\["stale_timeout", "historical_stale"\]\.includes\(runtime\.confidence\)/);
   assert.match(codexProvider, /input: resume \? \[\] : codexUserInput/);
+  assert.match(html, /function syncComposerPrimaryAction\(\)/);
+  assert.match(html, /state\.canResumeInterrupted && !state\.busy && !hasComposerContent/);
+  assert.match(html, /sendActions"\)\.style\.display = showResume \? "none" : ""/);
+  assert.match(codexProvider, /latest\?\.status !== "interrupted"/);
 });
 
 test("failed delivery recovery distinguishes pre-dispatch failures and remains actionable", () => {

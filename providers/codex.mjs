@@ -1333,8 +1333,17 @@ export class CodexProvider extends BaseProvider {
     if (this.activeTurns.has(threadId) || this.startingTurns.has(threadId)) {
       throw Object.assign(new Error("a turn is already in progress"), { status: 409, code: "turn_in_progress" });
     }
+    await this.ready();
+    const native = await this.rpc("thread/read", { threadId, includeTurns: true });
+    const latest = native?.thread?.turns?.at(-1) ?? null;
+    if (latest?.status !== "interrupted") {
+      throw Object.assign(new Error("Codex does not report an interrupted latest turn"), {
+        status: 409,
+        code: "no_interrupted_turn",
+      });
+    }
     const result = await this.send({ threadId, requestId, resume: true });
-    return { ...result, resumed: true, previousTurnId: turnId ?? null };
+    return { ...result, resumed: true, previousTurnId: latest.id ?? turnId ?? null };
   }
 
   supportsInterruptedResume() {

@@ -1186,6 +1186,7 @@ const state = {
   sendStage: null,        // { requestId, threadId, text, bubble, chip }
   threadUserProgress: null, // canonical user-message cursor from the last successful read
   composerAttachments: [], // uploaded server refs safe to persist in queues
+  canResumeInterrupted: false,
   composerDraftMemory: new Map(), // in-page fallback if browser storage is unavailable/full
   uploadingAttachments: 0,
   notificationRules: new Map(), // "provider:threadId" -> once | follow, for this device
@@ -2751,13 +2752,19 @@ function showTurnFailure(error, terminalId = null) {
 
 function updateResumeButton(runtime = null) {
   const button = $("resumeBtn");
-  const available = runtime?.canResumeInterrupted === true
-    && !runtime?.running;
-  button.style.display = available ? "flex" : "none";
+  state.canResumeInterrupted = runtime?.canResumeInterrupted === true && !runtime?.running;
   button.disabled = false;
-  button.title = available ? "Resume interrupted turn" : "Resume interrupted turn";
-  if (available) { button.dataset.turnId = runtime.terminalId || ""; }
+  button.title = "Resume interrupted turn";
+  if (state.canResumeInterrupted) { button.dataset.turnId = runtime.terminalId || ""; }
   else { delete button.dataset.turnId; }
+  syncComposerPrimaryAction();
+}
+
+function syncComposerPrimaryAction() {
+  const hasComposerContent = !!$("input")?.value.trim() || state.composerAttachments.length > 0;
+  const showResume = state.canResumeInterrupted && !state.busy && !hasComposerContent;
+  $("resumeBtn").style.display = showResume ? "flex" : "none";
+  $("sendActions").style.display = showResume ? "none" : "";
 }
 
 async function resumeInterruptedTurn() {
@@ -3594,6 +3601,7 @@ function renderComposerAttachments() {
     preview.append(img, remove);
     strip.appendChild(preview);
   }
+  syncComposerPrimaryAction();
 }
 
 function imageElement(file) {
@@ -6311,6 +6319,7 @@ function syncControls() {
   $("sendBtn").disabled = state.uploadingAttachments > 0 || !readiness.ready;
   $("sendBtn").title = readiness.ready ? "Send with the exact settings shown" : readiness.reason;
   $("sendActions").title = readiness.ready ? "" : readiness.reason;
+  syncComposerPrimaryAction();
   syncLockControl();
 }
 
@@ -7795,6 +7804,7 @@ $("input").addEventListener("input", function () {
   this.style.height = "auto";
   this.style.height = Math.min(this.scrollHeight, 120) + "px";
   scheduleComposerDraftSave();
+  syncComposerPrimaryAction();
 });
 $("input").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey && !("ontouchstart" in window)) { e.preventDefault(); send(); }
