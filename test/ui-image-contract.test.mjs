@@ -70,6 +70,9 @@ test("failed delivery recovery distinguishes pre-dispatch failures and remains a
   assert.match(html, /canonical\.state === "not_sent"/);
   assert.match(html, /function restartAutomaticDeliveryChecks\(\)/);
   assert.match(html, /probe\.runtime\?\.running && probe\.runtime\?\.source === "bridge"/);
+  assert.match(html, /async function reconcileOpenRuntime\(thread = state\.active\)/);
+  assert.match(html, /reconcileOpenRuntime\(state\.active\)\.then/);
+  assert.match(html, /if \(runtime && !runtime\.running\) \{ resyncOpenThread\(\{ force: true \}\); \}/);
   assert.match(server, /baseline\.lastUserId/);
   assert.match(server, /userMessageText\(next\) === expected/);
   assert.match(server, /state: matched \? "accepted" : "superseded"/);

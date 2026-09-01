@@ -7490,6 +7490,28 @@ function resyncView({ force = false } = {}) {
   }
 }
 
+async function reconcileOpenRuntime(thread = state.active) {
+  if (!thread || thread.draft) { return null; }
+  const provider = thread.provider || "codex";
+  const result = await api(`/api/thread/runtime?provider=${encodeURIComponent(provider)}&threadId=${encodeURIComponent(thread.id)}`);
+  if (state.active !== thread || !result.runtime) { return result.runtime ?? null; }
+
+  const runtime = result.runtime;
+  markRunning(provider, thread.id, !!runtime.running, { confidence: runtime.confidence });
+  updateResumeButton(runtime);
+  if (runtime.running) {
+    const external = runtime.source !== "bridge";
+    state.activeTurnId = external ? null : (runtime.turnId ?? state.activeTurnId);
+    setBusy(true, { external });
+    setLivePill(true, liveRunText(runtime.confidence), { stalled: runtime.confidence === "stalled" });
+  } else {
+    state.activeTurnId = null;
+    setBusy(false);
+    setLivePill(false);
+  }
+  return runtime;
+}
+
 async function resyncOpenThread({ force = false } = {}) {
   const t = state.active;
 
@@ -7653,7 +7675,17 @@ function connectEvents() {
     // A turn we started here is the authority on its own state. The session file
     // lags it — at the start of a turn it still holds the *previous* turn's end
     // marker — and acting on that would tear down the live UI mid-stream.
-    if (open && state.busy && !state.externalTurn) { return; }
+    if (open && state.busy && !state.externalTurn) {
+      // The browser may remember ownership across a bridge restart while the
+      // new bridge correctly has no such in-memory turn. Verify with the new
+      // bridge before suppressing the file event. This keeps the duplicate
+      // renderer guard for a genuinely live bridge turn, but immediately turns
+      // a provider-confirmed interruption into the shared Resume action.
+      reconcileOpenRuntime(state.active).then((runtime) => {
+        if (runtime && !runtime.running) { resyncOpenThread({ force: true }); }
+      }).catch(() => {});
+      return;
+    }
 
     markRunning(provider, threadId, running, { confidence: runConfidence });
 
