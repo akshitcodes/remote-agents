@@ -33,6 +33,10 @@ test("image references survive queue, steer, send, retry, and reload paths", () 
   assert.match(html, /all\[targetKey\] = \{ \.\.\.saved, attachments: targetAttachments\.slice\(\), updatedAt: Date\.now\(\) \}/);
   assert.match(html, /Drop images to attach/);
   assert.match(html, /document\.addEventListener\("drop"/);
+  assert.match(html, /id="resumeBtn"/);
+  assert.match(html, /\/api\/resume/);
+  assert.match(html, /terminalOutcome === "aborted"/);
+  assert.match(codexProvider, /input: resume \? \[\] : codexUserInput/);
 });
 
 test("failed delivery recovery distinguishes pre-dispatch failures and remains actionable", () => {

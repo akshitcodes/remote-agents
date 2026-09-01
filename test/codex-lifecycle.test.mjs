@@ -81,6 +81,30 @@ test("two concurrent sends cannot start parallel turns", async () => {
   assert.equal(provider.activeTurns.get("thread-c"), "turn-c");
 });
 
+test("native interrupted resume starts an empty Codex turn", async () => {
+  const provider = new CodexProvider(() => {}, { idleReleaseMs: 1000 });
+  const calls = [];
+  provider.ensureResumed = async () => false;
+  provider.threadClients.set("thread-resume", {});
+  provider.clientRpc = async (_client, method, params) => {
+    calls.push({ method, params });
+    return { turn: { id: "turn-resumed" } };
+  };
+
+  const result = await provider.resumeInterrupted({
+    threadId: "thread-resume",
+    turnId: "codex:turn-aborted",
+    requestId: "resume-request-1",
+  });
+
+  assert.equal(provider.supportsInterruptedResume(), true);
+  assert.equal(result.resumed, true);
+  assert.equal(result.previousTurnId, "codex:turn-aborted");
+  assert.deepEqual(calls, [{ method: "turn/start", params: { threadId: "thread-resume", input: [] } }]);
+  assert.equal(provider.activeTurnId("thread-resume"), "turn-resumed");
+  provider.cancelIdleRelease("thread-resume");
+});
+
 test("a turn-started notification without an id still blocks idle release", () => {
   const provider = new CodexProvider(() => {}, { idleReleaseMs: 1000 });
   provider.resumedThreads.add("thread-d");

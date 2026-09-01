@@ -12,6 +12,7 @@
 //   readThread(id)                             -> { thread: { turns:[{ items:[Item] }] } }
 //   newThread({ cwd, model })                  -> { thread: { id, ... } }
 //   send(body)                                 stream events via this.emit()
+//   resumeInterrupted({ threadId, turnId })    resume an interrupted turn when supported
 //   interrupt({ threadId, turnId })
 //   queue({ threadId, text, requestId })        persist a provider-native follow-up when supported
 //   queueList({ threadId })                     -> { data:[QueuedSubmission] }
@@ -52,6 +53,16 @@ export class BaseProvider {
 
   async send() {
     throw new Error("send not supported");
+  }
+
+  async resumeInterrupted() {
+    throw Object.assign(new Error("native interrupted-turn resume is not supported by this provider"), {
+      status: 409, code: "resume_unsupported",
+    });
+  }
+
+  supportsInterruptedResume() {
+    return false;
   }
 
   async interrupt() {

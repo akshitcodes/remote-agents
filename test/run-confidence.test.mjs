@@ -105,6 +105,26 @@ test("a Codex turn_aborted marker clears a preceding task_started state", () => 
   });
 });
 
+test("resolved runtime retains an aborted terminal for native resume", () => {
+  assert.deepEqual(resolveThreadRunState({
+    observed: {
+      running: false,
+      confidence: "marker",
+      terminalId: "codex:turn-aborted",
+      terminalOutcome: "aborted",
+      terminalError: null,
+    },
+  }), {
+    running: false,
+    confidence: "marker",
+    source: "session_file",
+    turnId: null,
+    terminalId: "codex:turn-aborted",
+    terminalOutcome: "aborted",
+    terminalError: null,
+  });
+});
+
 test("tool traffic is not mistaken for a completed turn", () => {
   assert.equal(observeProviderTail("claude", [JSON.stringify({ type: "assistant", message: { stop_reason: "tool_use" } })]), null);
   assert.equal(observeProviderTail("grok", [JSON.stringify({ type: "assistant", content: "Calling", tool_calls: [{ id: "tool" }] })]), null);

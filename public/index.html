@@ -316,10 +316,11 @@
   #composer { display: flex; flex-direction: column; gap: 8px; min-width: 0; width: 100%; min-height: 102px; padding: 10px 7px 7px; background: var(--bg3); border: 1px solid var(--border); border-radius: 22px; }
   #input { display: block; width: 100%; min-width: 0; min-height: 42px; box-sizing: border-box; background: transparent; border: 0; color: var(--fg); border-radius: 15px; padding: 4px 7px; font-size: 16px; outline: none; resize: none; max-height: 150px; font-family: inherit; line-height: 1.4; }
   #composerToolbar { display: flex; flex: 0 0 34px; align-items: center; gap: 5px; min-width: 0; height: 34px; }
-  #sendBtn, #stopBtn, #attachBtn { width: 34px; height: 34px; border-radius: 50%; border: none; font-size: 16px; cursor: pointer; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
+  #sendBtn, #stopBtn, #resumeBtn, #attachBtn { width: 34px; height: 34px; border-radius: 50%; border: none; font-size: 16px; cursor: pointer; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
   #sendBtn { background: var(--accent); color: #04260f; }
   #sendBtn:disabled { opacity: .4; pointer-events: none; }
   #stopBtn { background: var(--danger); color: #fff; display: none; }
+  #resumeBtn { background: var(--accent2); color: #07111d; display: none; }
   #attachBtn { background: var(--bg3); color: var(--fg-dim); border: 1px solid var(--border); }
   #attachBtn:disabled { opacity: .35; }
   #draftStrip { display: none; width: max-content; max-width: 100%; margin: 0 0 7px 10px; border: 0; border-radius: 8px; padding: 4px 9px; background: var(--bg3); color: var(--fg-dim); font-size: 11px; cursor: pointer; }
@@ -670,6 +671,7 @@
             <button class="ctl" id="lockCtl" aria-haspopup="dialog" aria-expanded="false" style="display:none"><span>Lock</span> <b id="lockName">Not held here</b> <span class="ck">▾</span></button>
           </div>
           <button id="stopBtn" aria-label="Stop">■</button>
+          <button id="resumeBtn" aria-label="Resume interrupted turn" title="Resume interrupted turn">▶</button>
           <div id="sendActions">
             <button id="sendBtn" aria-label="Send">➤</button>
             <div class="send-popover" id="sendPopover">
@@ -2747,6 +2749,54 @@ function showTurnFailure(error, terminalId = null) {
   return el;
 }
 
+function updateResumeButton(runtime = null) {
+  const button = $("resumeBtn");
+  const available = runtime?.canResumeInterrupted === true
+    && !runtime?.running
+    && runtime?.terminalOutcome === "aborted";
+  button.style.display = available ? "flex" : "none";
+  button.disabled = false;
+  button.title = available ? "Resume interrupted turn" : "Resume interrupted turn";
+  if (available) { button.dataset.turnId = runtime.terminalId || ""; }
+  else { delete button.dataset.turnId; }
+}
+
+async function resumeInterruptedTurn() {
+  const t = state.active;
+  if (!t || t.provider !== "codex" || !t.id || $("resumeBtn").disabled) { return; }
+  const button = $("resumeBtn");
+  const requestId = button.dataset.requestId || newRequestId();
+  button.dataset.requestId = requestId;
+  button.disabled = true;
+  button.title = "Resuming interrupted Codex turn…";
+  try {
+    await api("/api/resume", {
+      provider: "codex", threadId: t.id, turnId: button.dataset.turnId || null, requestId,
+    });
+    updateResumeButton(null);
+    setBusy(true, { external: false });
+    setLivePill(true, "Resuming interrupted turn…", { stalled: false });
+  } catch (error) {
+    try {
+      const query = new URLSearchParams({ provider: "codex", method: "resume", requestId, threadId: t.id });
+      const status = await api(`/api/send/status?${query}`);
+      if (status.state === "accepted") {
+        updateResumeButton(null);
+        setBusy(true, { external: false });
+        setLivePill(true, "Resuming interrupted turn…", { stalled: false });
+        return;
+      }
+      if (status.state === "uncertain" || status.state === "dispatching") {
+        button.style.display = "none";
+        chip("⚠️", "Resume delivery could not be confirmed. Refresh the thread before retrying.");
+        return;
+      }
+    } catch {}
+    button.disabled = false;
+    chip("⚠️", "Could not resume this turn: " + error.message);
+  }
+}
+
 const USAGE_LIMIT_CODES = new Set([
   "credit_balance_exhausted", "credits_exhausted", "insufficient_quota", "monthly_spend_limit",
   "quota_exceeded", "rate_limit", "rate_limit_exceeded", "usage_exhausted", "usage_limit_exceeded",
@@ -3256,6 +3306,9 @@ function onNotify(method, params, provider) {
       setBusy(false);
       state.activeTurnId = null;
       clearCarets();
+      updateResumeButton(method === "turn/aborted"
+        ? { running: false, terminalOutcome: "aborted", terminalId: params.turn?.id ?? null, canResumeInterrupted: provider === "codex" }
+        : null);
 
       if ((method === "turn/failed" || error) && error?.code !== "thread_locked_elsewhere") {
         showTurnFailure(error || "Turn failed", params.turn?.id ? `${provider}:${params.turn.id}` : null);
@@ -3290,6 +3343,7 @@ async function openThread(t) {
   state.usageRetryPolicy = { globalEnabled: false, threadOverride: null, enabled: false, provider: null, threadId: null };
   state.codexThreadAccount = null;
   state.settingsTruth = { state: "loading", sources: {}, message: "Checking settings…" };
+  updateResumeButton(null);
   const threadProvider = t.provider || state.provider || "codex";
   const providerChanged = threadProvider !== state.modelsProvider;
   state.provider = threadProvider;
@@ -3390,8 +3444,9 @@ async function openThread(t) {
     loadUsageRetryState(t);
     state.fetching = false;
     setCursor(res);
-    if (res.runtime) {
+  if (res.runtime) {
       markRunning(t.provider, t.id, !!res.runtime.running, { confidence: res.runtime.confidence });
+      updateResumeButton(res.runtime);
     }
     refreshApprovals();
     refreshLockStatus();
@@ -7646,6 +7701,7 @@ for (const eventName of ["pointerup", "pointercancel", "pointerleave"]) {
 $("steerAction").onclick = () => send("steer");
 $("queueAction").onclick = () => send("queue");
 $("saveDraftAction").onclick = () => saveCurrentAsDraft();
+$("resumeBtn").onclick = () => resumeInterruptedTurn();
 $("attachBtn").onclick = () => {
   if (!supportsInput("image")) { chip("⚠️", `${providerLabel()} does not advertise image prompt support`); return; }
   $("imageInput").click();

@@ -1233,10 +1233,10 @@ export class CodexProvider extends BaseProvider {
   async send(body = {}) {
     const {
       threadId, text, attachments = [], model, effort, approvalPolicy, sandbox,
-      preserveProviderPolicy = false, summary, requestId,
+      preserveProviderPolicy = false, summary, requestId, resume = false,
     } = body;
 
-    if (!threadId || (!String(text ?? "").trim() && !attachments.length)) {
+    if (!threadId || (!resume && !String(text ?? "").trim() && !attachments.length)) {
       throw Object.assign(new Error("threadId and message content required"), { status: 400 });
     }
 
@@ -1267,7 +1267,7 @@ export class CodexProvider extends BaseProvider {
       this.emit("send-stage", { threadId, requestId, stage: "starting_turn" });
     }
 
-    const params = { threadId, input: codexUserInput(text, attachments) };
+    const params = { threadId, input: resume ? [] : codexUserInput(text, attachments) };
 
     if (model) {
       params.model = model;
@@ -1324,6 +1324,21 @@ export class CodexProvider extends BaseProvider {
     }
 
     return result;
+  }
+
+  async resumeInterrupted({ threadId, turnId, requestId } = {}) {
+    if (!threadId) {
+      throw Object.assign(new Error("threadId required"), { status: 400, code: "invalid_thread" });
+    }
+    if (this.activeTurns.has(threadId) || this.startingTurns.has(threadId)) {
+      throw Object.assign(new Error("a turn is already in progress"), { status: 409, code: "turn_in_progress" });
+    }
+    const result = await this.send({ threadId, requestId, resume: true });
+    return { ...result, resumed: true, previousTurnId: turnId ?? null };
+  }
+
+  supportsInterruptedResume() {
+    return true;
   }
 
   activeTurnId(threadId) {

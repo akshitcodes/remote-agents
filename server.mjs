@@ -140,6 +140,11 @@ export function resolveThreadRunState({ owned = false, observed = null, bridgeTe
     confidence: observed?.confidence ?? "unknown",
     source: "session_file",
     turnId: null,
+    ...(observed?.terminalOutcome ? {
+      terminalId: observed.terminalId ?? null,
+      terminalOutcome: observed.terminalOutcome,
+      terminalError: observed.terminalError ?? null,
+    } : {}),
   };
 }
 
@@ -1436,12 +1441,16 @@ function providerFromBody(res, body) {
 function threadRuntime(provider, threadId) {
   const owned = activeTurns.has(turnKey(provider.name, threadId));
   const observed = watch.runningDetails(provider.name, [threadId])[threadId];
-  return resolveThreadRunState({
+  const runtime = resolveThreadRunState({
     owned,
     observed,
     bridgeTerminal: recentBridgeTerminals.get(turnKey(provider.name, threadId)),
     turnId: owned ? (provider.activeTurnId?.(threadId) ?? null) : null,
   });
+  if (runtime.terminalOutcome === "aborted") {
+    runtime.canResumeInterrupted = provider.supportsInterruptedResume?.() === true;
+  }
+  return runtime;
 }
 
 // Read a file for the viewer, scoped to the thread's project. "Project" means
@@ -2036,8 +2045,8 @@ const routes = {
     if (!p) { return; }
 
     const method = url.searchParams.get("method");
-    if (method !== "send" && method !== "steer") {
-      return json(res, 400, { error: "method must be send or steer", code: "invalid_send_status_request" });
+    if (!["send", "steer", "resume"].includes(method)) {
+      return json(res, 400, { error: "method must be send, steer, or resume", code: "invalid_send_status_request" });
     }
 
     json(res, 200, sendLedger.status({
@@ -2476,6 +2485,16 @@ const routes = {
     }
 
     json(res, 200, await sendOnce(p, body));
+  },
+
+  "POST /api/resume": async (req, res) => {
+    const body = await readBody(req);
+    const p = providerFromBody(res, body);
+    if (!p) { return; }
+    if (p.supportsInterruptedResume?.() !== true || typeof p.resumeInterrupted !== "function") {
+      return json(res, 409, { error: "native interrupted-turn resume is only available for Codex", code: "resume_unsupported" });
+    }
+    json(res, 200, await sendOnce(p, body, "resume"));
   },
 
   "POST /api/steer": async (req, res) => {
