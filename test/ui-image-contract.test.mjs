@@ -410,6 +410,8 @@ test("usage-limit auto-resume is explicit, durable, cancellable, and defaults of
   assert.match(html, /api\("\/api\/usage-retries"/);
   assert.match(html, /api\("\/api\/usage-retries\/cancel"/);
   assert.match(html, /api\("\/api\/usage-retries\/check"/);
+  assert.match(html, /function replaceThreadUsageRetries\([\s\S]*?state\.usageRetries\.delete/);
+  assert.match(html, /renderHistory\(res\.thread, res\.itemWindow\);[\s\S]*?renderOpenUsageRetryState\(\)/);
   assert.match(html, /es\.addEventListener\("usage-retry"/);
   assert.match(server, /usage-retry-policy\.json/);
   assert.match(server, /setInterval\(\(\) => usageRetryRunner\.tick/);

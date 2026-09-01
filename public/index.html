@@ -2954,6 +2954,29 @@ function updateUsageRetry(entry) {
   renderUsageRetry(entry);
 }
 
+function replaceThreadUsageRetries(provider, threadId, entries = []) {
+  // The server response is authoritative for this thread. Merging leaves a
+  // missed SSE transition (waiting -> accepted/superseded) alive forever in the
+  // PWA and makes the button claim "Resume queued" with no real server job.
+  for (const [id, entry] of state.usageRetries) {
+    if (entry.provider === provider && entry.threadId === threadId) { state.usageRetries.delete(id); }
+  }
+  for (const entry of entries) {
+    if (entry?.id) { state.usageRetries.set(entry.id, entry); }
+  }
+}
+
+function renderOpenUsageRetryState() {
+  box().querySelectorAll("[data-usage-resume-id]").forEach((node) => node.remove());
+  syncUsageRetryButtons();
+  if (!state.active) { return; }
+  const active = usageRetryForOpenThread();
+  const fallback = [...state.usageRetries.values()]
+    .filter((entry) => entry.provider === activeProvider() && entry.threadId === state.active.id && ["uncertain", "failed"].includes(entry.state))
+    .sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))[0];
+  if (active || fallback) { renderUsageRetry(active || fallback); }
+}
+
 async function loadUsageRetryState(thread = state.active) {
   if (!thread || thread.draft) { return; }
   const provider = thread.provider || "codex";
@@ -2963,11 +2986,9 @@ async function loadUsageRetryState(thread = state.active) {
       api(`/api/usage-retry-policy?provider=${encodeURIComponent(provider)}&threadId=${encodeURIComponent(thread.id)}`),
     ]);
     if (state.active !== thread) { return; }
-    for (const entry of retries.data || []) { state.usageRetries.set(entry.id, entry); }
+    replaceThreadUsageRetries(provider, thread.id, retries.data || []);
     state.usageRetryPolicy = { ...policy, provider, threadId: thread.id };
-    syncUsageRetryButtons();
-    const latest = usageRetryForOpenThread() || (retries.data || []).find((entry) => ["uncertain", "failed"].includes(entry.state));
-    if (latest) { renderUsageRetry(latest); }
+    renderOpenUsageRetryState();
   } catch {}
 }
 
@@ -7587,6 +7608,10 @@ async function resyncOpenThread({ force = false } = {}) {
     const res = await api("/api/thread?id=" + encodeURIComponent(t.id) + "&provider=" + encodeURIComponent(t.provider || "codex"));
     state.items = new Map();
     renderHistory(res.thread, res.itemWindow);
+    // renderHistory replaces the transcript DOM, including status chips that
+    // are not provider messages. Restore the durable server-side retry state so
+    // its minute-check status and controls cannot disappear after a refresh.
+    renderOpenUsageRetryState();
     state.threadUserProgress = res.userProgress ?? state.threadUserProgress;
     state.fetching = false;
     setCursor(res);
