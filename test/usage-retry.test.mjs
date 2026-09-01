@@ -73,7 +73,10 @@ test("only a terminal provider usage error with stable identity triggers auto-re
   }), { provider: "codex", threadId: "thread-3", triggerId: "terminal-3", terminalId: "terminal-3" });
   assert.equal(usageRetryTrigger("notify", { provider: "codex", method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1" } } }), null);
   assert.equal(usageRetryTrigger("external", { provider: "claude", threadId: "thread-2", terminalOutcome: "failed", terminalError: { message: "usage limit reached" } }), null);
-  assert.equal(usageRetryTrigger("external", { provider: "claude", threadId: "thread-2", terminalId: "old", terminalOutcome: "failed", terminalError: { message: "usage limit reached" }, observedChange: false }), null);
+  assert.deepEqual(usageRetryTrigger("external", {
+    provider: "claude", threadId: "thread-2", terminalId: "old", terminalOutcome: "failed",
+    terminalError: { message: "usage limit reached" }, observedChange: false,
+  }), { provider: "claude", threadId: "thread-2", triggerId: "old", terminalId: "old" });
 });
 
 test("usage exhaustion prefers provider codes and supports legacy provider wording", () => {

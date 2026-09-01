@@ -180,9 +180,10 @@ test("stop, draft adoption, and reconnect preserve queue truth", () => {
   assert.match(html, /refreshApprovals\(\);\s*refreshLockStatus\(\);/);
 });
 
-test("usage retry controls distinguish enabled policy from a queued retry", () => {
+test("usage retry controls never present policy alone as a queued retry", () => {
   assert.match(html, /function usageRetryPolicyAppliesToOpenThread\(\)/);
-  assert.match(html, /enabled \? "Auto-resume enabled" : alreadyResumed \? "Already resumed" : "Resume when usage returns"/);
+  assert.doesNotMatch(html, /enabled \? "Auto-resume enabled"/);
+  assert.match(html, /active \? "Resume queued" : alreadyResumed \? "Already resumed" : "Resume when usage returns"/);
   assert.match(html, /\["accepted", "cancelled", "superseded"\]/);
   assert.match(server, /usageRetryStore\.supersedeThread\(provider, threadId/);
   assert.match(server, /\["marker", "stalled"\]\.includes\(data\.runConfidence\)/);

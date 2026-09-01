@@ -21,7 +21,7 @@ test("Codex rollout replay retains image-only and mixed user prompts", () => {
 test("Codex rollout replay preserves provider terminal errors", () => {
   const state = newParseState();
   feedLines(state, [
-    JSON.stringify({ type: "event_msg", payload: { type: "task_started" } }),
+    JSON.stringify({ type: "event_msg", payload: { type: "task_started", turn_id: "turn-limit" } }),
     JSON.stringify({
       type: "event_msg",
       payload: {
@@ -39,6 +39,25 @@ test("Codex rollout replay preserves provider terminal errors", () => {
     code: "usage_limit_exceeded",
     message: "Your workspace is out of credits. Add credits to continue.",
   });
+  assert.equal(state.turns[0].id, "turn-limit");
+  assert.equal(state.turns[0].status, "failed");
+  assert.deepEqual(state.turns[0].error, {
+    message: "Your workspace is out of credits. Add credits to continue.",
+    codex_error_info: "usage_limit_exceeded",
+  });
+});
+
+test("Codex rollout replay recovers terminal identity when task_started was missed", () => {
+  const state = newParseState();
+  feedLines(state, [
+    JSON.stringify({
+      type: "event_msg",
+      payload: { type: "task_complete", turn_id: "late-turn", last_agent_message: "done" },
+    }),
+  ]);
+
+  assert.equal(state.turns[0].id, "late-turn");
+  assert.equal(state.turns[0].status, "completed");
 });
 
 test("Codex rollout replay reads current response-item messages", () => {

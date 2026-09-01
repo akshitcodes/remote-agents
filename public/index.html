@@ -2860,11 +2860,13 @@ function usageRetryPolicyAppliesToOpenThread() {
 
 function syncUsageRetryButtons() {
   const active = usageRetryForOpenThread();
-  const enabled = usageRetryPolicyAppliesToOpenThread();
   const alreadyResumed = state.busy && !active;
   box().querySelectorAll("[data-queue-usage-resume]").forEach((button) => {
-    button.disabled = !!active || enabled || alreadyResumed;
-    button.textContent = active ? "Resume queued" : enabled ? "Auto-resume enabled" : alreadyResumed ? "Already resumed" : "Resume when usage returns";
+    // A policy is permission to create future retries, not proof that this
+    // particular usage failure has a durable job. Only an active store entry
+    // may claim "Resume queued" and disable this recovery action.
+    button.disabled = !!active || alreadyResumed;
+    button.textContent = active ? "Resume queued" : alreadyResumed ? "Already resumed" : "Resume when usage returns";
   });
 }
 
@@ -3004,7 +3006,16 @@ async function queueUsageResume(terminalId = null) {
     terminalId,
   });
   updateUsageRetry(result.entry);
+  box().querySelectorAll("[data-usage-resume-error]").forEach((node) => node.remove());
   return result.entry;
+}
+
+function showUsageResumeError(message) {
+  // This is one recovery action. Repeated taps or a transcript redraw should
+  // update its status, not stack identical warnings beneath the same turn.
+  box().querySelectorAll("[data-usage-resume-error]").forEach((node) => node.remove());
+  const notice = chip("⚠️", "Could not queue auto-resume: " + message);
+  notice.dataset.usageResumeError = "";
 }
 
 function decorateUsageLimitError(el, error) {
@@ -3015,15 +3026,14 @@ function decorateUsageLimitError(el, error) {
   button.className = "pending-action";
   button.dataset.queueUsageResume = "";
   const active = usageRetryForOpenThread();
-  const policyEnabled = usageRetryPolicyAppliesToOpenThread();
   const alreadyResumed = state.busy && !active;
-  button.textContent = active ? "Resume queued" : policyEnabled ? "Auto-resume enabled" : alreadyResumed ? "Already resumed" : "Resume when usage returns";
-  button.disabled = !!active || policyEnabled || alreadyResumed;
+  button.textContent = active ? "Resume queued" : alreadyResumed ? "Already resumed" : "Resume when usage returns";
+  button.disabled = !!active || alreadyResumed;
   button.onclick = async () => {
     button.disabled = true;
     button.textContent = "Queuing…";
     try { await queueUsageResume(error?.terminalId || el.dataset.terminalId || null); button.textContent = "Resume queued"; }
-    catch (error) { button.disabled = false; button.textContent = "Resume when usage returns"; chip("⚠️", "Could not queue auto-resume: " + error.message); }
+    catch (error) { button.disabled = false; button.textContent = "Resume when usage returns"; showUsageResumeError(error.message); }
   };
   actions.appendChild(button);
   el.appendChild(actions);

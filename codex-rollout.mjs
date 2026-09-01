@@ -274,12 +274,24 @@ export function feedLines(st, lines) {
     if (rec.type === "event_msg") {
       switch (p.type) {
         case "task_started":
-          st.current = { items: [] };
+          st.current = {
+            id: p.turn_id ?? null,
+            status: "inProgress",
+            error: null,
+            items: [],
+          };
           turns.push(st.current);
           st.recentMessages.clear();
           break;
 
         case "task_complete":
+          // The rollout is the durable transcript used after a bridge restart.
+          // Keep the provider turn identity on the turn itself, not only on its
+          // error item, so delayed actions can prove which failed turn they are
+          // acting on. Some older logs omit task_started, hence turn().
+          turn().id = p.turn_id ?? turn().id ?? null;
+          turn().status = p.error ? "failed" : "completed";
+          turn().error = p.error ?? null;
           if (p.error) {
             const message = typeof p.error === "string" ? p.error : String(p.error.message ?? p.error.error ?? "Turn failed");
             push({
@@ -291,6 +303,11 @@ export function feedLines(st, lines) {
             });
           }
 
+          break;
+
+        case "turn_aborted":
+          turn().id = p.turn_id ?? turn().id ?? null;
+          turn().status = "interrupted";
           break;
 
         case "user_message":

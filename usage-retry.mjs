@@ -177,7 +177,7 @@ export function isUsageLimitError(error) {
 }
 
 export function usageRetryTrigger(event, data) {
-  if (event === "external" && data?.observedChange === true && data?.terminalOutcome === "failed" && isUsageLimitError(data.terminalError)) {
+  if (event === "external" && data?.terminalOutcome === "failed" && isUsageLimitError(data.terminalError)) {
     return data.terminalId ? {
       provider: data.provider,
       threadId: data.threadId,
