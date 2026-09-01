@@ -1333,9 +1333,7 @@ export class CodexProvider extends BaseProvider {
     if (this.activeTurns.has(threadId) || this.startingTurns.has(threadId)) {
       throw Object.assign(new Error("a turn is already in progress"), { status: 409, code: "turn_in_progress" });
     }
-    await this.ready();
-    const native = await this.rpc("thread/read", { threadId, includeTurns: true });
-    const latest = native?.thread?.turns?.at(-1) ?? null;
+    const latest = await this.latestTurnState(threadId);
     if (latest?.status !== "interrupted") {
       throw Object.assign(new Error("Codex does not report an interrupted latest turn"), {
         status: 409,
@@ -1344,6 +1342,14 @@ export class CodexProvider extends BaseProvider {
     }
     const result = await this.send({ threadId, requestId, resume: true });
     return { ...result, resumed: true, previousTurnId: latest.id ?? turnId ?? null };
+  }
+
+  async latestTurnState(threadId) {
+    if (!threadId) { return null; }
+    await this.ready();
+    const native = await this.rpc("thread/read", { threadId, includeTurns: true });
+    const latest = native?.thread?.turns?.at(-1) ?? null;
+    return latest ? { id: latest.id ?? null, status: latest.status ?? null } : null;
   }
 
   supportsInterruptedResume() {

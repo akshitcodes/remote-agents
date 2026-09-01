@@ -1476,6 +1476,47 @@ function threadRuntime(provider, threadId) {
   return runtime;
 }
 
+export async function resolveProviderRuntime(provider, threadId, runtime) {
+  if (!runtime?.running || !["stalled", "heuristic"].includes(runtime.confidence)
+      || typeof provider?.latestTurnState !== "function") {
+    return runtime;
+  }
+
+  try {
+    const latest = await provider.latestTurnState(threadId);
+    if (latest?.status === "interrupted") {
+      return {
+        running: false,
+        confidence: "provider",
+        source: "provider",
+        turnId: null,
+        terminalId: latest.id ? `codex:${latest.id}` : null,
+        terminalOutcome: "aborted",
+        terminalError: null,
+        canResumeInterrupted: provider.supportsInterruptedResume?.() === true,
+      };
+    }
+    if (["completed", "failed"].includes(latest?.status)) {
+      return {
+        running: false,
+        confidence: "provider",
+        source: "provider",
+        turnId: null,
+        terminalId: latest.id ? `codex:${latest.id}` : null,
+        terminalOutcome: latest.status,
+        terminalError: null,
+      };
+    }
+    if (["inProgress", "running"].includes(latest?.status)) {
+      return { ...runtime, running: true, confidence: "provider", source: "provider", turnId: latest.id ?? null };
+    }
+  } catch {
+    // Transcript reads remain available even when Codex app-server is unhealthy.
+    // Keep the explicitly degraded file observation instead of hiding the thread.
+  }
+  return runtime;
+}
+
 // Read a file for the viewer, scoped to the thread's project. "Project" means
 // the thread's cwd AND every git worktree of the same repository — an agent that
 // works in a worktree writes files that are genuinely part of your project, and
@@ -2036,7 +2077,7 @@ const routes = {
     const id = url.searchParams.get("id");
     const full = await p.readThread(id);
     const before = Number(url.searchParams.get("before")) || null;
-    const runtime = threadRuntime(p, id);
+    const runtime = await resolveProviderRuntime(p, id, threadRuntime(p, id));
 
     // Seed the delta baseline from exactly what this client is being given, so
     // the next change is measured against it. Paging backwards is not a new
@@ -2059,7 +2100,7 @@ const routes = {
       return json(res, 400, { error: "threadId required", code: "invalid_runtime_request" });
     }
 
-    json(res, 200, { runtime: threadRuntime(p, threadId) });
+    json(res, 200, { runtime: await resolveProviderRuntime(p, threadId, threadRuntime(p, threadId)) });
   },
 
   "GET /api/send/status": async (_req, res, url) => {
@@ -2088,7 +2129,7 @@ const routes = {
       return json(res, 400, { error: "threadId, baseline, and text required", code: "invalid_reconcile_request" });
     }
     const reconciliation = await reconcileUserIntent(p, body.threadId, body.baseline, body.text);
-    const runtime = threadRuntime(p, body.threadId);
+    const runtime = await resolveProviderRuntime(p, body.threadId, threadRuntime(p, body.threadId));
     json(res, 200, confirmCanonicalNonDelivery(reconciliation, body.baseline, runtime)
       ? { ...reconciliation, state: "not_sent" }
       : reconciliation);

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { classifyRunningState, observeProviderTail } from "../watch.mjs";
-import { canResumeInterruptedRuntime, resolveThreadRunState, shouldEmitExternalUpdate } from "../server.mjs";
+import { canResumeInterruptedRuntime, resolveProviderRuntime, resolveThreadRunState, shouldEmitExternalUpdate } from "../server.mjs";
 
 test("missing tail markers remain explicitly heuristic", () => {
   assert.deepEqual(classifyRunningState(null, 1_000), {
@@ -135,6 +135,33 @@ test("Codex native resume covers explicit aborts and terminal-less stale starts 
   assert.equal(canResumeInterruptedRuntime(codex, { running: true, confidence: "stalled" }), false);
   assert.equal(canResumeInterruptedRuntime(codex, { running: false, confidence: "unknown" }), false);
   assert.equal(canResumeInterruptedRuntime(claude, { running: false, confidence: "historical_stale" }), false);
+});
+
+test("Codex provider truth resolves a stalled file marker immediately after bridge restart", async () => {
+  const provider = {
+    supportsInterruptedResume: () => true,
+    latestTurnState: async () => ({ id: "turn-interrupted", status: "interrupted" }),
+  };
+  const runtime = await resolveProviderRuntime(provider, "thread", {
+    running: true, confidence: "stalled", source: "session_file", turnId: null,
+  });
+
+  assert.deepEqual(runtime, {
+    running: false,
+    confidence: "provider",
+    source: "provider",
+    turnId: null,
+    terminalId: "codex:turn-interrupted",
+    terminalOutcome: "aborted",
+    terminalError: null,
+    canResumeInterrupted: true,
+  });
+});
+
+test("provider runtime verification fails open to the degraded file state", async () => {
+  const observed = { running: true, confidence: "stalled", source: "session_file", turnId: null };
+  const provider = { latestTurnState: async () => { throw new Error("app-server unavailable"); } };
+  assert.equal(await resolveProviderRuntime(provider, "thread", observed), observed);
 });
 
 test("tool traffic is not mistaken for a completed turn", () => {
