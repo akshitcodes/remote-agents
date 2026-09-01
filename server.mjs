@@ -34,6 +34,7 @@ import { localBridgeProof, localControlProofMatches, validLocalProofNonce } from
 import { TerminalRunner } from "./terminal-runner.mjs";
 import { TerminalSecurity } from "./terminal-security.mjs";
 import { PtyTerminalManager } from "./pty-terminal.mjs";
+import QRCode from "qrcode";
 import {
   readClaudeTranscriptThreadSettings,
   readCodexDbThreadSettings,
@@ -2303,7 +2304,12 @@ const routes = {
       return json(res, 400, { error: "provider and threadId are required", code: "terminal_context_invalid" });
     }
     await requireReachableTerminalOrigin(PUBLIC_ORIGIN);
-    json(res, 200, createTerminalDeviceHandoff({ provider, threadId }));
+    const handoff = createTerminalDeviceHandoff({ provider, threadId });
+    handoff.qr = await QRCode.toString(handoff.url, {
+      type: "svg", margin: 1, width: 240, errorCorrectionLevel: "M",
+      color: { dark: "#edf1f7", light: "#11161e" },
+    });
+    json(res, 200, handoff);
   },
 
   "POST /api/terminal/register/options": async (req, res) => {

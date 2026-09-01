@@ -181,6 +181,7 @@ async function addTrustedDevice() {
     const handoff = await api("/api/terminal/device-handoff", { provider, threadId });
     $("deviceLink").value = handoff.url;
     $("deviceCode").textContent = handoff.code || "—";
+    $("deviceQr").innerHTML = handoff.qr || "";
     $("shareDeviceLink").style.display = navigator.share ? "inline-flex" : "none";
     $("deviceDialog").showModal();
   } catch (error) {
