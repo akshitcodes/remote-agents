@@ -35,6 +35,8 @@ test("image references survive queue, steer, send, retry, and reload paths", () 
   assert.match(html, /document\.addEventListener\("drop"/);
   assert.match(html, /id="resumeBtn"/);
   assert.match(html, /\/api\/resume/);
+  assert.match(html, /button\.setAttribute\("aria-busy", "true"\)/);
+  assert.match(html, /button\.textContent = "…"/);
   assert.match(server, /terminalOutcome === "aborted"/);
   assert.match(server, /\["stale_timeout", "historical_stale"\]\.includes\(runtime\.confidence\)/);
   assert.match(codexProvider, /input: resume \? \[\] : codexUserInput/);

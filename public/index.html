@@ -2754,6 +2754,8 @@ function updateResumeButton(runtime = null) {
   const button = $("resumeBtn");
   state.canResumeInterrupted = runtime?.canResumeInterrupted === true && !runtime?.running;
   button.disabled = false;
+  button.textContent = "▶";
+  button.removeAttribute("aria-busy");
   button.title = "Resume interrupted turn";
   if (state.canResumeInterrupted) { button.dataset.turnId = runtime.terminalId || ""; }
   else { delete button.dataset.turnId; }
@@ -2774,6 +2776,8 @@ async function resumeInterruptedTurn() {
   const requestId = button.dataset.requestId || newRequestId();
   button.dataset.requestId = requestId;
   button.disabled = true;
+  button.textContent = "…";
+  button.setAttribute("aria-busy", "true");
   button.title = "Resuming interrupted Codex turn…";
   try {
     await api("/api/resume", {
@@ -2799,6 +2803,8 @@ async function resumeInterruptedTurn() {
       }
     } catch {}
     button.disabled = false;
+    button.textContent = "▶";
+    button.removeAttribute("aria-busy");
     chip("⚠️", "Could not resume this turn: " + error.message);
   }
 }
