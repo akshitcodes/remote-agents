@@ -28,7 +28,7 @@ import { SendLedger } from "./send-ledger.mjs";
 import { ThreadSubscriptions } from "./thread-subscriptions.mjs";
 import { pruneAttachments, readAttachment, resolveAttachmentIds, storeAttachment } from "./attachments.mjs";
 import { UsageStateStore } from "./usage-state.mjs";
-import { usageRetryTrigger, userProgressFromThread, userProgressThroughTurn, UsageRetryPolicyStore, UsageRetryRunner, UsageRetryStore } from "./usage-retry.mjs";
+import { isUsageLimitError, usageRetryTrigger, userProgressFromThread, userProgressThroughTurn, UsageRetryPolicyStore, UsageRetryRunner, UsageRetryStore } from "./usage-retry.mjs";
 import { captureReplyStart, notificationBody, notificationTitle } from "./notification-content.mjs";
 import { localBridgeProof, localControlProofMatches, validLocalProofNonce } from "./local-proof.mjs";
 import { TerminalRunner } from "./terminal-runner.mjs";
@@ -535,7 +535,9 @@ async function emitExternal({ provider, threadId, running, runConfidence, termin
 const sendLedger = new SendLedger({ file: join(APP_HOME, "send-ledger.json") });
 
 export function providerOperation(provider, method) {
-  const name = method === "resume" ? "resumeInterrupted" : method;
+  const name = method === "resume"
+    ? "resumeInterrupted"
+    : method === "resumeUsage" ? "resumeUsageLimited" : method;
   const operation = provider?.[name];
   if (typeof operation !== "function") {
     throw Object.assign(new Error(`${provider?.name || "provider"} does not support ${method}`), {
@@ -1051,6 +1053,51 @@ export async function reconcileUserIntent(provider, threadId, baseline, text) {
   return { state: matched ? "accepted" : "superseded", progress: userProgressFromThread(full) };
 }
 
+export async function reconcileUsageRetryDelivery(provider, entry, ledger) {
+  if (ledger.state === "accepted") { return { state: "accepted" }; }
+
+  if (entry.method === "resumeUsage") {
+    const latest = await provider.latestTurnState(entry.threadId);
+    const expected = String(entry.terminalId ?? "").replace(/^codex:/, "");
+    const actual = String(latest?.id ?? "").replace(/^codex:/, "");
+    if (actual && actual !== expected) {
+      if (latest?.status === "failed" && isUsageLimitError(latest?.error)) {
+        return {
+          state: "rearm",
+          triggerId: `codex:${actual}`,
+          terminalId: actual,
+          progressGuard: await threadUserProgress(provider, entry.threadId),
+        };
+      }
+      // A later provider turn, whether ours or another client's, proves the
+      // old failed turn has already been resumed. Never send a second resume.
+      return { state: "superseded" };
+    }
+    if (actual === expected && latest?.status === "failed" && isUsageLimitError(latest?.error)
+        && ["not_found", "failed"].includes(ledger.state)) {
+      return { state: "retryable" };
+    }
+    return { state: "unconfirmed" };
+  }
+
+  // The provider transcript is canonical even when the HTTP acknowledgement
+  // and send ledger outcome were lost. Match only the immediate message after
+  // the saved cursor, so an older or later "Continue." cannot be mistaken for
+  // this attempt.
+  const canonical = await reconcileUserIntent(provider, entry.threadId, entry.progressGuard, entry.text);
+  if (canonical.state === "accepted") { return { state: "accepted" }; }
+  const before = Number(entry.progressGuard?.userCount);
+  const after = Number(canonical.progress?.userCount);
+  if (Number.isSafeInteger(before) && Number.isSafeInteger(after) && after > before) {
+    return { state: "superseded" };
+  }
+  // send-ledger writes `dispatching` synchronously before invoking a provider.
+  // Therefore not_found/failed plus an unchanged canonical transcript proves
+  // this attempt did not become a provider message and can be safely re-armed.
+  if (["not_found", "failed"].includes(ledger.state)) { return { state: "retryable" }; }
+  return { state: "unconfirmed" };
+}
+
 export function confirmCanonicalNonDelivery(reconciliation, baseline, runtime) {
   if (reconciliation?.state === "superseded") { return true; }
   if (reconciliation?.state !== "unconfirmed" || runtime?.running) { return false; }
@@ -1082,6 +1129,8 @@ async function autoQueueUsageResumeInner({ provider: providerName, threadId, tri
     const waiting = usageRetryStore.rearmDispatchedTurn(providerName, threadId, terminalId, {
       requestId: `usage-resume:${randomUUID()}`,
       triggerId,
+      terminalId,
+      method: providerName === "codex" ? "resumeUsage" : "send",
       progressGuard,
       nextCheckAt: Date.now() + 60_000,
     });
@@ -1096,7 +1145,10 @@ async function autoQueueUsageResumeInner({ provider: providerName, threadId, tri
   try {
     progressGuard = await threadUserProgress(provider, threadId);
   } catch (error) {
-    const failed = createUsageRetry(provider, { threadId, text: "Continue." }, { triggerId });
+    const failed = createUsageRetry(provider, { threadId, text: "Continue." }, {
+      triggerId,
+      terminalId,
+    });
     const terminal = usageRetryStore.update(failed.id, {
       state: "failed",
       nextCheckAt: null,
@@ -1128,7 +1180,7 @@ async function autoQueueUsageResumeInner({ provider: providerName, threadId, tri
     // auto-resume intent. Capture the provider-recorded settings without using
     // them until a later model catalog proves the exact combination.
     body = await threadDispatchBody(provider, threadId);
-    const queued = createUsageRetry(provider, body, { triggerId, progressGuard });
+    const queued = createUsageRetry(provider, body, { triggerId, progressGuard, terminalId });
     const waiting = usageRetryStore.update(queued.id, {
       state: "waiting_provider",
       nextCheckAt: Date.now() + 60_000,
@@ -1137,7 +1189,7 @@ async function autoQueueUsageResumeInner({ provider: providerName, threadId, tri
     publishUsageRetry(waiting);
     return waiting;
   }
-  const entry = createUsageRetry(provider, body, { triggerId, progressGuard });
+  const entry = createUsageRetry(provider, body, { triggerId, progressGuard, terminalId });
   publishUsageRetry(entry);
   scheduleUsageRetryCheck(entry.id);
   return entry;
@@ -1155,7 +1207,8 @@ async function autoQueueUsageResume(trigger) {
   }
 }
 
-function createUsageRetry(provider, body, { triggerId = null, progressGuard = null } = {}) {
+function createUsageRetry(provider, body, { triggerId = null, progressGuard = null, terminalId = null } = {}) {
+  const nativeCodexResume = provider.name === "codex" && !!terminalId;
   const dispatch = {
     model: body.model,
     effort: body.effort,
@@ -1171,6 +1224,8 @@ function createUsageRetry(provider, body, { triggerId = null, progressGuard = nu
     threadId: body.threadId,
     requestId: `usage-resume:${randomUUID()}`,
     text: body.text || "Continue.",
+    method: nativeCodexResume ? "resumeUsage" : "send",
+    terminalId: nativeCodexResume ? terminalId : null,
     dispatch,
     triggerId,
     progressGuard,
@@ -1205,30 +1260,14 @@ const usageRetryRunner = new UsageRetryRunner({
   reconcileDelivery: async (entry) => {
     const provider = pickProvider(entry.provider);
     if (!provider) { throw Object.assign(new Error("provider is unavailable"), { status: 409, code: "provider_unavailable" }); }
+    const method = entry.method === "resumeUsage" ? "resumeUsage" : "send";
     const ledger = sendLedger.status({
       provider: entry.provider,
-      method: "send",
+      method,
       requestId: entry.requestId,
       threadId: entry.threadId,
     });
-    if (ledger.state === "accepted") { return { state: "accepted" }; }
-
-    // The provider transcript is canonical even when the HTTP acknowledgement
-    // and send ledger outcome were lost. Match only the immediate message after
-    // the saved cursor, so an older or later "Continue." cannot be mistaken for
-    // this attempt.
-    const canonical = await reconcileUserIntent(provider, entry.threadId, entry.progressGuard, entry.text);
-    if (canonical.state === "accepted") { return { state: "accepted" }; }
-    const before = Number(entry.progressGuard?.userCount);
-    const after = Number(canonical.progress?.userCount);
-    if (Number.isSafeInteger(before) && Number.isSafeInteger(after) && after > before) {
-      return { state: "superseded" };
-    }
-    // send-ledger writes `dispatching` synchronously before invoking a provider.
-    // Therefore not_found/failed plus an unchanged canonical transcript proves
-    // this attempt did not become a provider message and can be safely re-armed.
-    if (["not_found", "failed"].includes(ledger.state)) { return { state: "retryable" }; }
-    return { state: "unconfirmed" };
+    return reconcileUsageRetryDelivery(provider, entry, ledger);
   },
   prepare: async (entry) => {
     const provider = pickProvider(entry.provider);
@@ -1246,9 +1285,10 @@ const usageRetryRunner = new UsageRetryRunner({
       provider: entry.provider,
       threadId: entry.threadId,
       text: entry.text,
+      turnId: entry.terminalId,
       requestId: entry.requestId,
       ...(entry.dispatch ?? {}),
-    });
+    }, entry.method === "resumeUsage" ? "resumeUsage" : "send");
   },
   onUpdate: publishUsageRetry,
 });
@@ -2349,7 +2389,10 @@ const routes = {
     // them at dispatch time. A delayed resume must fail closed rather than let
     // any provider silently choose a newer default model or permission mode.
     const dispatch = await validateSendDispatch(provider, body);
-    const entry = createUsageRetry(provider, { ...body, ...dispatch }, { progressGuard });
+    const entry = createUsageRetry(provider, { ...body, ...dispatch }, {
+      progressGuard,
+      terminalId: provider.name === "codex" ? body.terminalId ?? null : null,
+    });
     publishUsageRetry(entry);
     scheduleUsageRetryCheck(entry.id);
     json(res, 201, { entry: publicUsageRetry(entry) });

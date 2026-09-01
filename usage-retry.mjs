@@ -216,6 +216,10 @@ export class UsageRetryStore {
 
     for (const row of rows) {
       if (!row?.id || !row.provider || !row.threadId || !row.requestId) { continue; }
+      // Entries created before native Codex usage resume were ordinary text
+      // sends. Preserve that behavior across upgrades instead of reinterpreting
+      // an already-durable intent.
+      if (!row.method) { row.method = "send"; repaired = true; }
       // A bridge cannot know whether an in-flight send survived its crash.
       // Surface it as uncertain, then reconcile against durable provider state
       // before taking any action; uncertainty never authorizes a blind resend.
@@ -287,7 +291,9 @@ export class UsageRetryStore {
     return entry ? structuredClone(entry) : null;
   }
 
-  rearmDispatchedTurn(provider, threadId, turnId, { requestId, triggerId, progressGuard, nextCheckAt } = {}) {
+  rearmDispatchedTurn(provider, threadId, turnId, {
+    requestId, triggerId, terminalId, method, progressGuard, nextCheckAt,
+  } = {}) {
     const prior = this.findByDispatchedTurn(provider, threadId, turnId);
     if (!prior) { return null; }
     const blocking = [...this.entries.values()].find((candidate) =>
@@ -301,6 +307,8 @@ export class UsageRetryStore {
       state: "waiting_usage",
       requestId: nextRequestId,
       triggerId: clip(triggerId, 300),
+      terminalId: clip(terminalId, 300) ?? prior.terminalId ?? null,
+      method: method === "resumeUsage" ? "resumeUsage" : "send",
       progressGuard,
       nextCheckAt: Number(nextCheckAt) || this.now(),
       rejectedCapacityKey: prior.capacityKey ?? null,
@@ -316,8 +324,10 @@ export class UsageRetryStore {
     const threadId = clip(input.threadId, 300);
     const requestId = clip(input.requestId, 200);
     const text = clip(input.text, 16000);
-    if (!id || !provider || !threadId || !requestId || !text) {
-      throw retryError("id, provider, threadId, requestId, and text are required");
+    const method = input.method === "resumeUsage" ? "resumeUsage" : "send";
+    const terminalId = clip(input.terminalId, 300);
+    if (!id || !provider || !threadId || !requestId || (method === "send" && !text) || (method === "resumeUsage" && !terminalId)) {
+      throw retryError("id, provider, threadId, requestId, and a valid resume intent are required");
     }
 
     const triggerId = clip(input.triggerId, 300);
@@ -331,7 +341,7 @@ export class UsageRetryStore {
     if (existing) { return structuredClone(existing); }
     const now = this.now();
     const entry = {
-      id, provider, threadId, requestId, text,
+      id, provider, threadId, requestId, text, method, terminalId,
       triggerId,
       dispatch: structuredClone(input.dispatch ?? {}),
       progressGuard: input.progressGuard ? structuredClone(input.progressGuard) : null,
@@ -367,7 +377,7 @@ export class UsageRetryStore {
     const entry = this.entries.get(String(id ?? ""));
     if (!entry) { throw retryError("usage resume request not found", "usage_retry_not_found", 404); }
     if (entry.state === "dispatching") {
-      throw retryError("Continue is already being sent and can no longer be cancelled", "usage_retry_dispatching", 409);
+      throw retryError("The automatic resume is already being sent and can no longer be cancelled", "usage_retry_dispatching", 409);
     }
     return this.update(id, { state: "cancelled", nextCheckAt: null, error: null });
   }
@@ -445,7 +455,7 @@ export class UsageRetryRunner {
         if (!current || current.state !== "uncertain") { return current; }
         return this.publish(this.store.update(id, {
           nextCheckAt: this.now() + this.pollMs,
-          error: { ...publicError(error), message: `Still verifying Continue delivery automatically: ${error?.message ?? error}` },
+          error: { ...publicError(error), message: `Still verifying automatic resume delivery: ${error?.message ?? error}` },
         }));
       }
       entry = this.store.get(id);
@@ -455,6 +465,17 @@ export class UsageRetryRunner {
       }
       if (result?.state === "superseded") {
         return this.publish(this.store.update(id, { state: "superseded", nextCheckAt: null, error: null }));
+      }
+      if (result?.state === "rearm") {
+        return this.publish(this.store.update(id, {
+          state: "waiting_usage",
+          triggerId: clip(result.triggerId, 300) ?? entry.triggerId,
+          terminalId: clip(result.terminalId, 300) ?? entry.terminalId,
+          progressGuard: result.progressGuard ?? entry.progressGuard,
+          nextCheckAt: this.now(),
+          attempts: Math.max(0, Number(entry.attempts ?? 1) - 1),
+          error: null,
+        }));
       }
       if (result?.state === "retryable") {
         return this.publish(this.store.update(id, {
@@ -466,7 +487,7 @@ export class UsageRetryRunner {
       }
       return this.publish(this.store.update(id, {
         nextCheckAt: this.now() + this.pollMs,
-        error: { message: "Verifying Continue delivery automatically; it will not be resent without proof", code: "delivery_reconciling", status: null },
+        error: { message: "Verifying automatic resume delivery; it will not be repeated without proof", code: "delivery_reconciling", status: null },
       }));
     } finally {
       this.inFlight.delete(id);

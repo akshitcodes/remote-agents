@@ -113,6 +113,61 @@ test("native interrupted resume starts an empty Codex turn", async () => {
   provider.cancelIdleRelease("thread-resume");
 });
 
+test("native usage resume starts an empty turn only for the exact Codex usage failure", async () => {
+  const provider = new CodexProvider(() => {}, { idleReleaseMs: 1000, accountObserver: { start() {}, stop() {} } });
+  const calls = [];
+  const client = { threadId: "thread-usage", child: {}, ready: Promise.resolve(), resumePromise: null };
+  provider.startThreadClient = () => client;
+  provider.clientRpc = async (_client, method, params) => {
+    calls.push({ method, params });
+    if (method === "thread/resume") {
+      return { thread: { turns: [{
+        id: "turn-usage",
+        status: "failed",
+        error: { message: "localized", codexErrorInfo: "usageLimitExceeded" },
+      }] } };
+    }
+    return { turn: { id: "turn-native-resumed" } };
+  };
+
+  const result = await provider.resumeUsageLimited({
+    threadId: "thread-usage",
+    turnId: "codex:turn-usage",
+    requestId: "usage-resume-request",
+    model: "gpt-test",
+    effort: "high",
+  });
+
+  assert.equal(result.resumed, true);
+  assert.equal(result.previousTurnId, "turn-usage");
+  assert.deepEqual(calls, [
+    { method: "thread/resume", params: { threadId: "thread-usage" } },
+    { method: "turn/start", params: { threadId: "thread-usage", input: [], model: "gpt-test", effort: "high" } },
+  ]);
+  provider.cancelIdleRelease("thread-usage");
+});
+
+test("native usage resume refuses a different or non-usage failed turn", async () => {
+  for (const latest of [
+    { id: "other-turn", status: "failed", error: { codexErrorInfo: "usageLimitExceeded" } },
+    { id: "turn-usage", status: "failed", error: { codexErrorInfo: "serverOverloaded" } },
+  ]) {
+    const provider = new CodexProvider(() => {}, { accountObserver: { start() {}, stop() {} } });
+    const client = { threadId: "thread-usage", child: {}, ready: Promise.resolve(), resumePromise: null };
+    provider.startThreadClient = () => client;
+    provider.clientRpc = async (_client, method) => {
+      assert.equal(method, "thread/resume");
+      return { thread: { turns: [latest] } };
+    };
+    provider.stopThreadClient = async () => {};
+
+    await assert.rejects(
+      provider.resumeUsageLimited({ threadId: "thread-usage", turnId: "turn-usage" }),
+      (error) => error.status === 409 && error.code === "no_usage_limited_turn",
+    );
+  }
+});
+
 test("the shared resume operation routes to the native Codex adapter before dispatch", async () => {
   const calls = [];
   const provider = {
@@ -122,6 +177,17 @@ test("the shared resume operation routes to the native Codex adapter before disp
   const operation = providerOperation(provider, "resume");
   assert.deepEqual(await operation({ threadId: "thread-resume" }), { resumed: true });
   assert.deepEqual(calls, [{ threadId: "thread-resume" }]);
+});
+
+test("the shared usage resume operation routes to the Codex usage adapter", async () => {
+  const calls = [];
+  const provider = {
+    name: "codex",
+    resumeUsageLimited: async (body) => { calls.push(body); return { resumed: true }; },
+  };
+  const operation = providerOperation(provider, "resumeUsage");
+  assert.deepEqual(await operation({ threadId: "thread-usage", turnId: "turn-usage" }), { resumed: true });
+  assert.deepEqual(calls, [{ threadId: "thread-usage", turnId: "turn-usage" }]);
 });
 
 test("an unsupported provider operation fails before durable dispatch", () => {

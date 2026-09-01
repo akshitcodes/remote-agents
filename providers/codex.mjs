@@ -77,6 +77,18 @@ function rpcTransportError(error, method) {
     : { status: 503, code: "provider_unavailable" });
 }
 
+function bareTurnId(value) {
+  return String(value ?? "").trim().replace(/^codex:/, "");
+}
+
+function isNativeUsageLimitTurn(turn) {
+  if (turn?.status !== "failed") { return false; }
+  const code = String(turn?.error?.codexErrorInfo ?? turn?.error?.codex_error_info ?? "")
+    .replace(/[\s_-]+/g, "")
+    .toLowerCase();
+  return code === "usagelimitexceeded";
+}
+
 function writeJsonLine(stream, payload, { label = "codex app-server", onError = null } = {}) {
   const fail = (error) => {
     if (onError) { onError(error); }
@@ -391,6 +403,7 @@ export class CodexProvider extends BaseProvider {
           status: msg.method === "turn/aborted"
             ? "interrupted"
             : msg.method === "turn/failed" ? "failed" : "completed",
+          error: msg.params?.turn?.error ?? msg.params?.error ?? null,
         };
       }
       const client = this.threadClients.get(threadId);
@@ -924,7 +937,11 @@ export class CodexProvider extends BaseProvider {
       await client.ready;
       const result = await this.clientRpc(client, "thread/resume", params);
       const latest = result?.thread?.turns?.at(-1) ?? null;
-      client.latestTurnState = latest ? { id: latest.id ?? null, status: latest.status ?? null } : null;
+      client.latestTurnState = latest ? {
+        id: latest.id ?? null,
+        status: latest.status ?? null,
+        error: latest.error ?? null,
+      } : null;
       return result;
     })();
 
@@ -1250,6 +1267,7 @@ export class CodexProvider extends BaseProvider {
     const {
       threadId, text, attachments = [], model, effort, approvalPolicy, sandbox,
       preserveProviderPolicy = false, summary, requestId, resume = false,
+      resumeReason = "interrupted", expectedPreviousTurnId = null,
     } = body;
 
     if (!threadId || (!resume && !String(text ?? "").trim() && !attachments.length)) {
@@ -1289,13 +1307,21 @@ export class CodexProvider extends BaseProvider {
     // Use that result (or live notifications on an already-held client) as the
     // dispatch-time gate instead of replaying a huge rollout a second time via
     // `thread/read(includeTurns:true)` before acquiring the writer.
-    if (resume && previousTurn?.status !== "interrupted") {
+    const resumeAllowed = !resume
+      || (resumeReason === "usage"
+        ? isNativeUsageLimitTurn(previousTurn)
+          && (!expectedPreviousTurnId || bareTurnId(previousTurn?.id) === bareTurnId(expectedPreviousTurnId))
+        : previousTurn?.status === "interrupted");
+    if (!resumeAllowed) {
       this.startingTurns.delete(threadId);
       this.finishedStartingTurns.delete(threadId);
       try { await this.releaseThread({ threadId, reason: "resume-rejected" }); } catch {}
-      throw Object.assign(new Error("Codex does not report an interrupted latest turn"), {
+      const usageResume = resumeReason === "usage";
+      throw Object.assign(new Error(usageResume
+        ? "Codex does not report the expected usage-limited latest turn"
+        : "Codex does not report an interrupted latest turn"), {
         status: 409,
-        code: "no_interrupted_turn",
+        code: usageResume ? "no_usage_limited_turn" : "no_interrupted_turn",
       });
     }
 
@@ -1372,12 +1398,31 @@ export class CodexProvider extends BaseProvider {
     return { ...result, resumed: true, previousTurnId: result.previousTurnId ?? turnId ?? null };
   }
 
+  async resumeUsageLimited({
+    threadId, turnId, requestId, model, effort, summary,
+    approvalPolicy, sandbox, preserveProviderPolicy,
+  } = {}) {
+    if (!threadId || !turnId) {
+      throw Object.assign(new Error("threadId and turnId required"), { status: 400, code: "invalid_usage_resume" });
+    }
+    if (this.activeTurns.has(threadId) || this.startingTurns.has(threadId)) {
+      throw Object.assign(new Error("a turn is already in progress"), { status: 409, code: "turn_in_progress" });
+    }
+    const result = await this.send({
+      threadId, requestId, model, effort, summary, approvalPolicy, sandbox, preserveProviderPolicy,
+      resume: true,
+      resumeReason: "usage",
+      expectedPreviousTurnId: turnId,
+    });
+    return { ...result, resumed: true, previousTurnId: result.previousTurnId ?? bareTurnId(turnId) };
+  }
+
   async latestTurnState(threadId) {
     if (!threadId) { return null; }
     await this.ready();
     const native = await this.rpc("thread/read", { threadId, includeTurns: true });
     const latest = native?.thread?.turns?.at(-1) ?? null;
-    return latest ? { id: latest.id ?? null, status: latest.status ?? null } : null;
+    return latest ? { id: latest.id ?? null, status: latest.status ?? null, error: latest.error ?? null } : null;
   }
 
   supportsInterruptedResume() {

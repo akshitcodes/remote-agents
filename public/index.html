@@ -2886,8 +2886,8 @@ function usageRetryText(entry) {
     waiting_thread: "Usage is available — waiting for this turn to be idle",
     waiting_provider: "Auto-resume queued — provider temporarily unavailable",
     dispatching: "Sending Continue…",
-    uncertain: "Verifying Continue delivery automatically — it will not be resent without proof",
-    failed: "Auto-resume could not send Continue",
+    uncertain: "Verifying automatic resume — it will not be repeated without proof",
+    failed: "The turn could not be resumed automatically",
   };
   const failure = ["waiting_provider", "uncertain", "failed"].includes(entry.state) && entry.error?.message ? ` · ${entry.error.message}` : "";
   return `${labels[entry.state] || "Auto-resume queued"}${suffix ? ` · ${suffix}` : ""}${failure}`;
@@ -6908,7 +6908,7 @@ async function openTaskSettingsSheet() {
     $("sheetBody").innerHTML = `<h2 id="sheetTitle">Task settings</h2>
       ${accountOptions}
       <div class="toggle-row">
-        <div class="toggle-copy"><div class="toggle-title">Auto-continue after usage resets</div><div class="toggle-desc">For this chat, queue one <b>Continue.</b> after a confirmed usage-limit stop. The bridge checks the account selected for this task every minute.</div></div>
+        <div class="toggle-copy"><div class="toggle-title">Auto-resume after usage resets</div><div class="toggle-desc">For this chat, resume one confirmed usage-limit stop when the selected account has capacity again. Codex resumes natively; other providers send a continuation prompt.</div></div>
         <button type="button" class="toggle ${policy.enabled ? "on" : ""}" data-retry-scope="thread" role="switch" aria-checked="${policy.enabled}"></button>
       </div>
       <div class="toggle-row">

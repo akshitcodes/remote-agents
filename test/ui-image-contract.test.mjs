@@ -44,7 +44,9 @@ test("image references survive queue, steer, send, retry, and reload paths", () 
   assert.match(html, /function syncComposerPrimaryAction\(\)/);
   assert.match(html, /state\.canResumeInterrupted && !state\.busy && !hasComposerContent/);
   assert.match(html, /sendActions"\)\.style\.display = showResume \? "none" : ""/);
-  assert.match(codexProvider, /previousTurn\?\.status !== "interrupted"/);
+  assert.match(codexProvider, /previousTurn\?\.status === "interrupted"/);
+  assert.match(codexProvider, /isNativeUsageLimitTurn\(previousTurn\)/);
+  assert.match(codexProvider, /bareTurnId\(previousTurn\?\.id\) === bareTurnId\(expectedPreviousTurnId\)/);
   assert.match(codexProvider, /result\?\.thread\?\.turns\?\.at\(-1\)/);
   assert.match(codexProvider, /reason: "resume-rejected"/);
 });
@@ -404,7 +406,7 @@ test("project terminal uses passkey step-up, a server-derived cwd, and an isolat
 
 test("usage-limit auto-resume is explicit, durable, cancellable, and defaults off", () => {
   assert.match(html, /id="settingsBtn"[^>]*aria-label="Task settings"/);
-  assert.match(html, /Auto-continue after usage resets/);
+  assert.match(html, /Auto-resume after usage resets/);
   assert.match(html, /Enable for all chats/);
   assert.match(html, /Resume when usage returns/);
   assert.match(html, /api\("\/api\/usage-retries"/);

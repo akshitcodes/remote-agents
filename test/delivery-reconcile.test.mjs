@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { confirmCanonicalNonDelivery, reconcileUserIntent } from "../server.mjs";
+import { confirmCanonicalNonDelivery, reconcileUsageRetryDelivery, reconcileUserIntent } from "../server.mjs";
 
 function provider(items) {
   return { readThread: async () => ({ thread: { turns: [{ items }] } }) };
@@ -49,4 +49,50 @@ test("unchanged canonical progress proves non-delivery only after a confirmed id
   assert.equal(confirmCanonicalNonDelivery(reconciliation, baseline, { running: true, confidence: "bridge" }), false);
   assert.equal(confirmCanonicalNonDelivery(reconciliation, baseline, { running: false, confidence: "historical_stale" }), false);
   assert.equal(confirmCanonicalNonDelivery({ ...reconciliation, progress: { userCount: 2, lastUserId: "u2" } }, baseline, { running: false, confidence: "marker" }), false);
+});
+
+test("native Codex usage resume reconciles by exact provider turn identity", async () => {
+  const entry = {
+    method: "resumeUsage",
+    threadId: "thread",
+    terminalId: "codex:usage-turn",
+    progressGuard: { userCount: 1, lastUserId: "u1" },
+  };
+  const unchanged = {
+    latestTurnState: async () => ({
+      id: "usage-turn",
+      status: "failed",
+      error: { codexErrorInfo: "usageLimitExceeded", message: "usage limit reached" },
+    }),
+  };
+  assert.equal((await reconcileUsageRetryDelivery(unchanged, entry, { state: "failed" })).state, "retryable");
+  assert.equal((await reconcileUsageRetryDelivery(unchanged, entry, { state: "dispatching" })).state, "unconfirmed");
+
+  const advanced = {
+    latestTurnState: async () => ({ id: "new-turn", status: "completed", error: null }),
+  };
+  assert.equal((await reconcileUsageRetryDelivery(advanced, entry, { state: "dispatching" })).state, "superseded");
+});
+
+test("a crashed native resume that immediately exhausts usage is re-armed on the new failed turn", async () => {
+  const p = {
+    latestTurnState: async () => ({
+      id: "new-usage-turn",
+      status: "failed",
+      error: { codexErrorInfo: "usageLimitExceeded", message: "usage limit reached" },
+    }),
+    readThread: async () => ({ thread: { turns: [{ items: [user("u1", "original prompt")] }] } }),
+  };
+  const result = await reconcileUsageRetryDelivery(p, {
+    method: "resumeUsage",
+    threadId: "thread",
+    terminalId: "old-usage-turn",
+  }, { state: "dispatching" });
+
+  assert.deepEqual(result, {
+    state: "rearm",
+    triggerId: "codex:new-usage-turn",
+    terminalId: "new-usage-turn",
+    progressGuard: { userCount: 1, lastUserId: "u1" },
+  });
 });
