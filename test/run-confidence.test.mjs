@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { classifyRunningState, observeProviderTail } from "../watch.mjs";
-import { canResumeInterruptedRuntime, resolveProviderRuntime, resolveThreadRunState, shouldEmitExternalUpdate } from "../server.mjs";
+import { canAttemptInterruptedResume, canResumeInterruptedRuntime, resolveProviderRuntime, resolveThreadRunState, shouldEmitExternalUpdate } from "../server.mjs";
 
 test("missing tail markers remain explicitly heuristic", () => {
   assert.deepEqual(classifyRunningState(null, 1_000), {
@@ -135,6 +135,17 @@ test("Codex native resume covers explicit aborts and terminal-less stale starts 
   assert.equal(canResumeInterruptedRuntime(codex, { running: true, confidence: "stalled" }), false);
   assert.equal(canResumeInterruptedRuntime(codex, { running: false, confidence: "unknown" }), false);
   assert.equal(canResumeInterruptedRuntime(claude, { running: false, confidence: "historical_stale" }), false);
+});
+
+test("resume action revalidation admits only interrupted or provider-probe-eligible states", () => {
+  const codex = { supportsInterruptedResume: () => true };
+
+  assert.equal(canAttemptInterruptedResume(codex, { running: false, terminalOutcome: "aborted", confidence: "marker" }), true);
+  assert.equal(canAttemptInterruptedResume(codex, { running: false, confidence: "stale_timeout" }), true);
+  assert.equal(canAttemptInterruptedResume(codex, { running: true, confidence: "stalled" }), true);
+  assert.equal(canAttemptInterruptedResume(codex, { running: true, confidence: "heuristic" }), true);
+  assert.equal(canAttemptInterruptedResume(codex, { running: true, confidence: "marker" }), false);
+  assert.equal(canAttemptInterruptedResume(codex, { running: false, terminalOutcome: "completed", confidence: "marker" }), false);
 });
 
 test("Codex provider truth resolves a stalled file marker immediately after bridge restart", async () => {

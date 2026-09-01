@@ -371,6 +371,7 @@ export class CodexProvider extends BaseProvider {
 
     const threadId = msg.params?.threadId;
     const turnId = msg.params?.turn?.id ?? msg.params?.turnId;
+    const threadClient = threadId && source?.threadId === threadId ? source : null;
 
     if (msg.method === "turn/started" && threadId) {
       this.cancelIdleRelease(threadId);
@@ -378,9 +379,20 @@ export class CodexProvider extends BaseProvider {
       // safety invariant is never to release merely because optional metadata
       // was absent.
       this.activeTurns.set(threadId, turnId || this.activeTurns.get(threadId) || "__unknown__");
+      if (threadClient) {
+        threadClient.latestTurnState = { id: turnId ?? null, status: "inProgress" };
+      }
     } else if ((msg.method === "turn/completed" || msg.method === "turn/failed" || msg.method === "turn/aborted") && threadId) {
       if (this.startingTurns.has(threadId)) { this.finishedStartingTurns.add(threadId); }
       this.activeTurns.delete(threadId);
+      if (threadClient) {
+        threadClient.latestTurnState = {
+          id: turnId ?? threadClient.latestTurnState?.id ?? null,
+          status: msg.method === "turn/aborted"
+            ? "interrupted"
+            : msg.method === "turn/failed" ? "failed" : "completed",
+        };
+      }
       const client = this.threadClients.get(threadId);
       if (this.clientUsesSharedAccount(client)
           && client?.accountGeneration != null
@@ -589,6 +601,7 @@ export class CodexProvider extends BaseProvider {
       accountGeneration: context.profileId === SHARED_PROFILE_ID ? this.accountGeneration : null,
       profileControl,
       profileIdleTimer: null,
+      latestTurnState: null,
     };
     observeStdinErrors(child, `${client.key} app-server`);
     const feed = makeLineReader((line) => {
@@ -909,7 +922,10 @@ export class CodexProvider extends BaseProvider {
 
     client.resumePromise = (async () => {
       await client.ready;
-      return this.clientRpc(client, "thread/resume", params);
+      const result = await this.clientRpc(client, "thread/resume", params);
+      const latest = result?.thread?.turns?.at(-1) ?? null;
+      client.latestTurnState = latest ? { id: latest.id ?? null, status: latest.status ?? null } : null;
+      return result;
     })();
 
     try {
@@ -1264,6 +1280,26 @@ export class CodexProvider extends BaseProvider {
 
     if (requestId) {
       this.emit("send-stage", { threadId, requestId, stage: "resumed", cold });
+    }
+
+    const client = this.threadClients.get(threadId);
+    const previousTurn = resume ? client?.latestTurnState : null;
+
+    // `thread/resume` already returns the provider's populated turn history.
+    // Use that result (or live notifications on an already-held client) as the
+    // dispatch-time gate instead of replaying a huge rollout a second time via
+    // `thread/read(includeTurns:true)` before acquiring the writer.
+    if (resume && previousTurn?.status !== "interrupted") {
+      this.startingTurns.delete(threadId);
+      this.finishedStartingTurns.delete(threadId);
+      try { await this.releaseThread({ threadId, reason: "resume-rejected" }); } catch {}
+      throw Object.assign(new Error("Codex does not report an interrupted latest turn"), {
+        status: 409,
+        code: "no_interrupted_turn",
+      });
+    }
+
+    if (requestId) {
       this.emit("send-stage", { threadId, requestId, stage: "starting_turn" });
     }
 
@@ -1289,7 +1325,6 @@ export class CodexProvider extends BaseProvider {
       params.sandboxPolicy = sandboxPolicyFor(sandbox);
     }
 
-    const client = this.threadClients.get(threadId);
     let result;
     try {
       result = await this.clientRpc(client, "turn/start", params);
@@ -1323,7 +1358,7 @@ export class CodexProvider extends BaseProvider {
       this.emit("send-stage", { threadId, requestId, stage: "turn_started", turnId: turnId ?? null });
     }
 
-    return result;
+    return resume ? { ...(result ?? {}), previousTurnId: previousTurn?.id ?? null } : result;
   }
 
   async resumeInterrupted({ threadId, turnId, requestId } = {}) {
@@ -1333,15 +1368,8 @@ export class CodexProvider extends BaseProvider {
     if (this.activeTurns.has(threadId) || this.startingTurns.has(threadId)) {
       throw Object.assign(new Error("a turn is already in progress"), { status: 409, code: "turn_in_progress" });
     }
-    const latest = await this.latestTurnState(threadId);
-    if (latest?.status !== "interrupted") {
-      throw Object.assign(new Error("Codex does not report an interrupted latest turn"), {
-        status: 409,
-        code: "no_interrupted_turn",
-      });
-    }
     const result = await this.send({ threadId, requestId, resume: true });
-    return { ...result, resumed: true, previousTurnId: latest.id ?? turnId ?? null };
+    return { ...result, resumed: true, previousTurnId: result.previousTurnId ?? turnId ?? null };
   }
 
   async latestTurnState(threadId) {

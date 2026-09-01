@@ -37,13 +37,16 @@ test("image references survive queue, steer, send, retry, and reload paths", () 
   assert.match(html, /\/api\/resume/);
   assert.match(html, /button\.setAttribute\("aria-busy", "true"\)/);
   assert.match(html, /button\.textContent = "…"/);
+  assert.match(html, /startSendProgress\(requestId, t\.id, "", null\)/);
   assert.match(server, /terminalOutcome === "aborted"/);
   assert.match(server, /\["stale_timeout", "historical_stale"\]\.includes\(runtime\.confidence\)/);
   assert.match(codexProvider, /input: resume \? \[\] : codexUserInput/);
   assert.match(html, /function syncComposerPrimaryAction\(\)/);
   assert.match(html, /state\.canResumeInterrupted && !state\.busy && !hasComposerContent/);
   assert.match(html, /sendActions"\)\.style\.display = showResume \? "none" : ""/);
-  assert.match(codexProvider, /latest\?\.status !== "interrupted"/);
+  assert.match(codexProvider, /previousTurn\?\.status !== "interrupted"/);
+  assert.match(codexProvider, /result\?\.thread\?\.turns\?\.at\(-1\)/);
+  assert.match(codexProvider, /reason: "resume-rejected"/);
 });
 
 test("failed delivery recovery distinguishes pre-dispatch failures and remains actionable", () => {

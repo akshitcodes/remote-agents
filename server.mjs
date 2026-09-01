@@ -154,6 +154,17 @@ export function canResumeInterruptedRuntime(provider, runtime) {
     || ["stale_timeout", "historical_stale"].includes(runtime.confidence);
 }
 
+export function canAttemptInterruptedResume(provider, runtime) {
+  if (canResumeInterruptedRuntime(provider, runtime)) { return true; }
+  // A GET may have resolved this degraded state through provider truth before
+  // the action arrives. Let the real writer acquisition make the final call;
+  // a live external writer rejects `thread/resume`, and the returned latest
+  // turn must still be interrupted before an empty turn can start.
+  return provider?.supportsInterruptedResume?.() === true
+    && runtime?.running === true
+    && ["stalled", "heuristic"].includes(runtime.confidence);
+}
+
 // Keep the safety decision next to the authoritative turn set, not in the UI.
 // The optional set makes this exact route path testable without starting a turn.
 export async function releaseThreadLock(provider, threadId, turns = activeTurns) {
@@ -2577,6 +2588,17 @@ const routes = {
     if (!p) { return; }
     if (p.supportsInterruptedResume?.() !== true || typeof p.resumeInterrupted !== "function") {
       return json(res, 409, { error: "native interrupted-turn resume is only available for Codex", code: "resume_unsupported" });
+    }
+    if (!body?.threadId) {
+      return json(res, 400, { error: "threadId required", code: "invalid_thread" });
+    }
+    // Recheck the bounded on-disk runtime at the action boundary. The adapter
+    // then performs the definitive provider check from `thread/resume`'s own
+    // returned turns after it holds the writer; no second full thread replay is
+    // needed merely to authorize this request.
+    const runtime = threadRuntime(p, body.threadId);
+    if (!canAttemptInterruptedResume(p, runtime)) {
+      return json(res, 409, { error: "this thread is not currently interrupted", code: "no_interrupted_turn" });
     }
     json(res, 200, await sendOnce(p, body, "resume"));
   },

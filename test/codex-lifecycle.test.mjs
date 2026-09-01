@@ -83,18 +83,16 @@ test("two concurrent sends cannot start parallel turns", async () => {
 });
 
 test("native interrupted resume starts an empty Codex turn", async () => {
-  const provider = new CodexProvider(() => {}, { idleReleaseMs: 1000 });
+  const provider = new CodexProvider(() => {}, { idleReleaseMs: 1000, accountObserver: { start() {}, stop() {} } });
   const calls = [];
-  provider.ensureResumed = async () => false;
-  provider.ready = async () => {};
-  provider.rpc = async (method, params) => {
-    assert.equal(method, "thread/read");
-    assert.deepEqual(params, { threadId: "thread-resume", includeTurns: true });
-    return { thread: { turns: [{ id: "turn-native-interrupted", status: "interrupted" }] } };
-  };
-  provider.threadClients.set("thread-resume", {});
+  const client = { threadId: "thread-resume", child: {}, ready: Promise.resolve(), resumePromise: null };
+  provider.startThreadClient = () => client;
+  provider.rpc = async () => { throw new Error("native resume must not replay the thread through thread/read"); };
   provider.clientRpc = async (_client, method, params) => {
     calls.push({ method, params });
+    if (method === "thread/resume") {
+      return { thread: { turns: [{ id: "turn-native-interrupted", status: "interrupted" }] } };
+    }
     return { turn: { id: "turn-resumed" } };
   };
 
@@ -107,7 +105,10 @@ test("native interrupted resume starts an empty Codex turn", async () => {
   assert.equal(provider.supportsInterruptedResume(), true);
   assert.equal(result.resumed, true);
   assert.equal(result.previousTurnId, "turn-native-interrupted");
-  assert.deepEqual(calls, [{ method: "turn/start", params: { threadId: "thread-resume", input: [] } }]);
+  assert.deepEqual(calls, [
+    { method: "thread/resume", params: { threadId: "thread-resume" } },
+    { method: "turn/start", params: { threadId: "thread-resume", input: [] } },
+  ]);
   assert.equal(provider.activeTurnId("thread-resume"), "turn-resumed");
   provider.cancelIdleRelease("thread-resume");
 });
@@ -131,15 +132,23 @@ test("an unsupported provider operation fails before durable dispatch", () => {
 });
 
 test("native resume refuses when Codex does not confirm an interrupted latest turn", async () => {
-  const provider = new CodexProvider(() => {});
-  provider.ready = async () => {};
-  provider.rpc = async () => ({ thread: { turns: [{ id: "turn-complete", status: "completed" }] } });
+  const provider = new CodexProvider(() => {}, { accountObserver: { start() {}, stop() {} } });
+  const client = { threadId: "thread-complete", child: {}, ready: Promise.resolve(), resumePromise: null };
+  let released = 0;
+  provider.startThreadClient = () => client;
+  provider.clientRpc = async (_client, method) => {
+    assert.equal(method, "thread/resume");
+    return { thread: { turns: [{ id: "turn-complete", status: "completed" }] } };
+  };
+  provider.stopThreadClient = async () => { released += 1; };
 
   await assert.rejects(
     provider.resumeInterrupted({ threadId: "thread-complete", requestId: "resume-request-2" }),
     (error) => error.status === 409 && error.code === "no_interrupted_turn",
   );
   assert.equal(provider.startingTurns.has("thread-complete"), false);
+  assert.equal(provider.resumedThreads.has("thread-complete"), false);
+  assert.equal(released, 1);
 });
 
 test("a turn-started notification without an id still blocks idle release", () => {

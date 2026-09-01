@@ -2779,10 +2779,12 @@ async function resumeInterruptedTurn() {
   button.textContent = "…";
   button.setAttribute("aria-busy", "true");
   button.title = "Resuming interrupted Codex turn…";
+  startSendProgress(requestId, t.id, "", null);
   try {
     await api("/api/resume", {
       provider: "codex", threadId: t.id, turnId: button.dataset.turnId || null, requestId,
     });
+    finishSendProgress();
     updateResumeButton(null);
     setBusy(true, { external: false });
     setLivePill(true, "Resuming interrupted turn…", { stalled: false });
@@ -2791,17 +2793,20 @@ async function resumeInterruptedTurn() {
       const query = new URLSearchParams({ provider: "codex", method: "resume", requestId, threadId: t.id });
       const status = await api(`/api/send/status?${query}`);
       if (status.state === "accepted") {
+        finishSendProgress();
         updateResumeButton(null);
         setBusy(true, { external: false });
         setLivePill(true, "Resuming interrupted turn…", { stalled: false });
         return;
       }
       if (status.state === "uncertain" || status.state === "dispatching") {
+        failSendProgress(Object.assign(new Error("Resume delivery could not be confirmed"), { code: "delivery_uncertain" }));
         button.style.display = "none";
         chip("⚠️", "Resume delivery could not be confirmed. Refresh the thread before retrying.");
         return;
       }
     } catch {}
+    failSendProgress(error);
     button.disabled = false;
     button.textContent = "▶";
     button.removeAttribute("aria-busy");
