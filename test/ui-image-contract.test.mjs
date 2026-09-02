@@ -377,7 +377,17 @@ test("desktop workspace keeps session navigation visible and constrains the chat
   assert.match(html, /event\.key === "Escape"/);
   assert.match(server, /const body = renderIndexHtml\(req\.headers\["user-agent"\][\s\S]*?return res\.end\(body\)/);
   assert.match(onboarding, /const readIndexShell = createIndexShellReader\(indexHtmlPath\)/);
-  assert.match(sw, /const CACHE_VERSION = "remote-agents-v24"/);
+  assert.match(sw, /const CACHE_VERSION = "remote-agents-v25"/);
+});
+
+test("rendered response links retain native browser link behavior outside Agents", () => {
+  assert.match(html, /function decorateMarkdownLinks\(root\)/);
+  assert.match(html, /if \(!href \|\| href\.startsWith\("#"\) \|\| localFileTarget\(href\)\) \{ continue; \}/);
+  assert.match(html, /anchor\.target = "_blank";/);
+  assert.match(html, /anchor\.rel = "noopener noreferrer";/);
+  assert.match(html, /function renderFinalMarkdownInto\(el, text\) \{[\s\S]*?decorateMarkdownLinks\(el\);/);
+  assert.match(html, /function appendAgent\(el, delta\) \{[\s\S]*?decorateMarkdownLinks\(el\);/);
+  assert.match(html, /const markdown = el\.querySelector\("\.md\.filebody"\);[\s\S]*?decorateMarkdownLinks\(markdown\);/);
 });
 
 test("project terminal uses passkey step-up, a server-derived cwd, and an isolated interactive transport", () => {

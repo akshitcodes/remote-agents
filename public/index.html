@@ -735,6 +735,22 @@ function renderMarkdown(src) {
   return math.restore(sanitized);
 }
 
+function decorateMarkdownLinks(root) {
+  for (const anchor of root?.querySelectorAll?.("a[href]") ?? []) {
+    const href = anchor.getAttribute("href");
+
+    // Repository paths retain the built-in file viewer, and same-document
+    // anchors retain ordinary in-page navigation. Everything else remains a
+    // real browser link but opens outside the current Agents surface. Using
+    // native anchor attributes preserves Open in New Tab, Copy Link Address,
+    // long-press menus, and PWA handoff to the platform browser.
+    if (!href || href.startsWith("#") || localFileTarget(href)) { continue; }
+
+    anchor.target = "_blank";
+    anchor.rel = "noopener noreferrer";
+  }
+}
+
 // BEGIN math-markdown-protection
 // Marked treats the backslashes in \(...\) and \[...\] as Markdown escapes.
 // Protect complete math spans while Markdown is parsed, then restore them as
@@ -1086,6 +1102,7 @@ function decorateCodeBlocks(root) {
 
 function renderFinalMarkdownInto(el, text) {
   el.innerHTML = renderMarkdown(text);
+  decorateMarkdownLinks(el);
   decorateCodeBlocks(el);
   scheduleMermaidBlocks(el);
   scheduleMath(el, text);
@@ -2106,7 +2123,10 @@ function addAgent(text, streaming, itemId) {
   el.className = "msg agent md" + (streaming ? " streaming" : "");
   if (itemId) { el.dataset.itemId = itemId; }
   el._raw = text || "";
-  if (streaming) { el.innerHTML = renderMarkdown(el._raw); }
+  if (streaming) {
+    el.innerHTML = renderMarkdown(el._raw);
+    decorateMarkdownLinks(el);
+  }
   else { renderFinalMarkdownInto(el, el._raw); }
   registerFilesFromEl(el);
   box().appendChild(el);
@@ -2118,6 +2138,7 @@ function addAgent(text, streaming, itemId) {
 function appendAgent(el, delta) {
   el._raw = (el._raw || "") + (delta || "");
   el.innerHTML = renderMarkdown(el._raw);
+  decorateMarkdownLinks(el);
 }
 
 function makeBlock(cls, iconHtml, label, opts = {}) {
@@ -6050,6 +6071,7 @@ function renderFileInto(el, name, d, staleAt) {
   if (MD_FILE_RE.test(name)) {
     el.innerHTML = note + `<div class="md filebody">${renderMarkdown(d.content)}</div>`;
     const markdown = el.querySelector(".md.filebody");
+    decorateMarkdownLinks(markdown);
     decorateCodeBlocks(markdown);
     scheduleMermaidBlocks(markdown);
     scheduleMath(markdown, d.content);
