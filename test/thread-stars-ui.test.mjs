@@ -31,14 +31,31 @@ test("the agent filter stays literal and reports the favourites it is hiding", (
   assert.match(html, /if \(listView === "recent" && providerScope !== "all"\) \{/);
 });
 
-test("right-click and long-press both open the session actions sheet, favourite first", () => {
+test("right-click and long-press open a menu at the pointer, favourite first", () => {
   assert.match(html, /\$\("listView"\)\.addEventListener\("contextmenu"/);
   assert.match(html, /rowHoldTimer = setTimeout\(/);
-  assert.match(html, /function openThreadActionsSheet\(thread\)/);
-  // The favourite toggle must be the first option in the sheet.
-  assert.match(html, /<h2>Session<\/h2>[\s\S]{0,200}id="starAction"/);
+  assert.match(html, /function openRowMenu\(thread, point\)/);
+  // A context menu that opens anywhere but the pointer is not a context menu:
+  // both entry points must pass the event coordinates through.
+  assert.match(html, /openRowMenu\(thread, \{ x: event\.clientX, y: event\.clientY \}\)/);
+  assert.match(html, /openRowMenu\(thread, rowHoldOrigin\)/);
+  assert.match(html, /openControlPopover\(null, `[\s\S]{0,300}id="rowStarAction"/);
   assert.match(html, /Add to favourites/);
   assert.match(html, /Remove from favourites/);
+  // The bottom sheet this replaced must be gone, not merely unused.
+  assert.doesNotMatch(html, /openThreadActionsSheet/);
+});
+
+test("the anchored menu opens from the click point, flips at the edges, and can render over the list", () => {
+  assert.match(html, /if \(controlPopoverPoint\) \{[\s\S]{0,700}spillsRight[\s\S]{0,200}spillsDown/);
+  assert.match(html, /const spillsRight = controlPopoverPoint\.x \+ rect\.width \+ 8 > window\.innerWidth;/);
+  assert.match(html, /const spillsDown = controlPopoverPoint\.y \+ rect\.height \+ 8 > window\.innerHeight;/);
+  // #chatView is display:none while the list is showing, so the popover cannot
+  // live inside the composer or it would never paint over a row.
+  assert.doesNotMatch(html, /<div id="composerWrap">\s*<div class="control-popover"/);
+  assert.match(html, /<div class="control-popover" id="controlPopover"[^>]*><\/div>\s*<div class="sheet" id="sheet"/);
+  // Pinned to a viewport point, so scrolling the rows away has to dismiss it.
+  assert.match(html, /addEventListener\("scroll", \(\) => \{\s*if \(controlPopoverPoint\) \{ closeControlPopover\(\); \}/);
 });
 
 test("a long press cannot also open the thread, and a drag stays a scroll", () => {
