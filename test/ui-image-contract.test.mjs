@@ -83,6 +83,9 @@ test("failed delivery recovery distinguishes pre-dispatch failures and remains a
   assert.match(html, /if \(!state\.providerAcceptedRequests\.has\(acceptanceKey\)\) \{ advanceThreadUserProgress\(\); \}/);
   assert.match(html, /failed\.bubble = bubble;[\s\S]*?autoCheckStandaloneDelivery\(failed, bubble, 1200\)/);
   assert.match(html, /function restartAutomaticDeliveryChecks\(\)/);
+  assert.match(html, /async function refreshAvailableProviders\(\)/);
+  assert.match(html, /await api\("\/api\/providers"\)/);
+  assert.match(html, /refreshAvailableProviders\(\)\.then/);
   assert.match(html, /probe\.runtime\?\.running && probe\.runtime\?\.source === "bridge"/);
   assert.match(html, /async function reconcileOpenRuntime\(thread = state\.active\)/);
   assert.match(html, /reconcileOpenRuntime\(state\.active\)\.then/);
@@ -384,7 +387,7 @@ test("desktop workspace keeps session navigation visible and constrains the chat
   assert.match(html, /event\.key === "Escape"/);
   assert.match(server, /const body = renderIndexHtml\(req\.headers\["user-agent"\][\s\S]*?return res\.end\(body\)/);
   assert.match(onboarding, /const readIndexShell = createIndexShellReader\(indexHtmlPath\)/);
-  assert.match(sw, /const CACHE_VERSION = "remote-agents-v26"/);
+  assert.match(sw, /const CACHE_VERSION = "remote-agents-v27"/);
 });
 
 test("rendered response links retain native browser link behavior outside Agents", () => {

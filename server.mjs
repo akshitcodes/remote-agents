@@ -2045,6 +2045,10 @@ export async function requireReachableTerminalOrigin(origin, resolveHost = looku
 }
 
 const routes = {
+  "GET /api/providers": async (_req, res) => {
+    json(res, 200, { providers: [...USABLE_PROVIDER_NAMES] });
+  },
+
   "POST /api/attachment": async (req, res) => {
     const body = await readBody(req);
     json(res, 200, storeAttachment(body));

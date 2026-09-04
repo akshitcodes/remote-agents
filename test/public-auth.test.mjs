@@ -391,9 +391,13 @@ test("the authenticated app exposes only providers that passed CLI and login pre
   const shell = await request("/", { headers: auth });
 
   assert.equal(shell.statusCode, 200);
-  assert.match(shell.body, /const AVAILABLE_PROVIDER_NAMES = \["claude"\]/);
+  assert.match(shell.body, /let AVAILABLE_PROVIDER_NAMES = \["claude"\]/);
   assert.match(shell.body, /Object\.fromEntries\(AVAILABLE_PROVIDER_NAMES/);
   assert.match(shell.body, /button\.dataset\.provider === "all" \|\| PROVIDER_LABELS\[button\.dataset\.provider\]/);
+
+  const providers = await request("/api/providers", { headers: auth });
+  assert.equal(providers.statusCode, 200);
+  assert.deepEqual(JSON.parse(providers.body), { providers: ["claude"] });
 
   const deadCodex = await request("/api/models?provider=codex", { headers: auth });
   assert.equal(deadCodex.statusCode, 400);
