@@ -25,6 +25,7 @@ import { rankRecentThreads, sortRecentThreads } from "./recent-threads.mjs";
 import { validateDispatchSettings, validateNewThreadModel, validateThreadSettingsPatch } from "./dispatch-settings.mjs";
 import * as push from "./push.mjs";
 import { SendLedger } from "./send-ledger.mjs";
+import { MAX_STARS, ThreadStars } from "./thread-stars.mjs";
 import { ThreadSubscriptions } from "./thread-subscriptions.mjs";
 import { pruneAttachments, readAttachment, resolveAttachmentIds, storeAttachment } from "./attachments.mjs";
 import { UsageStateStore } from "./usage-state.mjs";
@@ -63,6 +64,7 @@ const AUTH_FAILURE_LIMIT = 5;
 const AUTH_MAX_BACKOFF_SECONDS = 60;
 const authFailures = new Map();
 const threadSubscriptions = new ThreadSubscriptions({ file: join(APP_HOME, "thread-subscriptions.json") });
+const threadStars = new ThreadStars({ file: join(APP_HOME, "thread-stars.json") });
 const threadSettingsStore = new ThreadSettingsStore({ file: join(APP_HOME, "thread-settings.json") });
 const usageState = new UsageStateStore({ file: join(APP_HOME, "usage-state.json") });
 const usageRetryStore = new UsageRetryStore({ file: join(APP_HOME, "usage-retries.json") });
@@ -1748,21 +1750,15 @@ function readProjectFile(cwd, p) {
 
 // ---------- routes ----------
 
-async function listThreadsWithState(p, { search, cursor, limit } = {}) {
-  const listed = await p.listThreads({ search, cursor, limit });
-  rememberThreadTitles(p.name, listed.data);
-
-  // Whether each thread is mid-turn, read off the CLI's own session file, so
-  // the list badges turns this bridge never started (and turns that were
-  // already under way before the app was opened).
-  const threadIds = (listed.data ?? []).flatMap((t) => [t.id, ...(t.subagents ?? []).map((child) => child.id)]);
-  const running = watch.runningDetails(p.name, threadIds);
-
-  for (const t of listed.data ?? []) {
-    for (const child of t.subagents ?? []) {
-      const childOwned = activeTurns.has(turnKey(p.name, child.id));
+// Whether each thread is mid-turn, read off the CLI's own session file, so the
+// list badges turns this bridge never started (and turns that were already under
+// way before the app was opened). Every listing path shares this so a new one
+// cannot drift from the others.
+function applyThreadRunState(p, rows, running) {
+  for (const thread of rows ?? []) {
+    for (const child of thread.subagents ?? []) {
       const childState = resolveThreadRunState({
-        owned: childOwned,
+        owned: activeTurns.has(turnKey(p.name, child.id)),
         observed: running[child.id],
         bridgeTerminal: recentBridgeTerminals.get(turnKey(p.name, child.id)),
         bridgeInterrupted: bridgeTurnState.get(p.name, child.id),
@@ -1772,46 +1768,82 @@ async function listThreadsWithState(p, { search, cursor, limit } = {}) {
     }
 
     // A task is active when its own turn or any grouped subagent is active.
-    const owned = activeTurns.has(turnKey(p.name, t.id));
-    const activeChild = (t.subagents ?? []).some((child) => child.running);
+    const activeChild = (thread.subagents ?? []).some((child) => child.running);
     const taskState = resolveThreadRunState({
-      owned,
-      observed: running[t.id],
-      bridgeTerminal: recentBridgeTerminals.get(turnKey(p.name, t.id)),
-      bridgeInterrupted: bridgeTurnState.get(p.name, t.id),
+      owned: activeTurns.has(turnKey(p.name, thread.id)),
+      observed: running[thread.id],
+      bridgeTerminal: recentBridgeTerminals.get(turnKey(p.name, thread.id)),
+      bridgeInterrupted: bridgeTurnState.get(p.name, thread.id),
     });
-    t.running = taskState.running || activeChild;
-    t.runConfidence = activeChild && !taskState.running ? "subagent" : taskState.confidence;
+    thread.running = taskState.running || activeChild;
+    thread.runConfidence = activeChild && !taskState.running ? "subagent" : taskState.confidence;
   }
 
+  return rows;
+}
+
+function threadRunIds(rows) {
+  return (rows ?? []).flatMap((thread) => [thread.id, ...(thread.subagents ?? []).map((child) => child.id)]);
+}
+
+async function listThreadsWithState(p, { search, cursor, limit } = {}) {
+  const listed = await p.listThreads({ search, cursor, limit });
+  rememberThreadTitles(p.name, listed.data);
+  applyThreadRunState(p, listed.data, watch.runningDetails(p.name, threadRunIds(listed.data)));
   return listed;
 }
 
 async function listProjectThreadsWithState(p, { search } = {}) {
   const listed = await p.listThreads({ search, limit: null });
   rememberThreadTitles(p.name, listed.data);
+  // Resolving run state is the expensive half, and a full project listing only
+  // needs it for rows recent enough to plausibly still be running.
   const candidates = [...(listed.data ?? [])]
     .sort((a, b) => Number(b.updatedAt ?? 0) - Number(a.updatedAt ?? 0))
     .slice(0, PROJECT_RUN_CANDIDATE_LIMIT);
-  const candidateIds = candidates.flatMap((thread) => [thread.id, ...(thread.subagents ?? []).map((child) => child.id)]);
-  const running = watch.runningDetails(p.name, candidateIds);
+  applyThreadRunState(p, listed.data, watch.runningDetails(p.name, threadRunIds(candidates)));
+  return listed;
+}
 
-  for (const thread of listed.data ?? []) {
-    for (const child of thread.subagents ?? []) {
-      const owned = activeTurns.has(turnKey(p.name, child.id));
-      const state = resolveThreadRunState({ owned, observed: running[child.id], bridgeTerminal: recentBridgeTerminals.get(turnKey(p.name, child.id)), bridgeInterrupted: bridgeTurnState.get(p.name, child.id) });
-      child.running = state.running;
-      child.runConfidence = state.confidence;
-    }
+// A starred session can be older than everything on the recent page, so it is
+// simply absent from that response — which is exactly the case starring exists
+// for. Hydrate those rows by id from the full listing (the same read the
+// projects view already does) so a pin cannot silently stop pinning.
+async function listPinnedThreadsWithState(p, threadIds) {
+  const wanted = new Set(threadIds.map(String));
 
-    const owned = activeTurns.has(turnKey(p.name, thread.id));
-    const activeChild = (thread.subagents ?? []).some((child) => child.running);
-    const state = resolveThreadRunState({ owned, observed: running[thread.id], bridgeTerminal: recentBridgeTerminals.get(turnKey(p.name, thread.id)), bridgeInterrupted: bridgeTurnState.get(p.name, thread.id) });
-    thread.running = state.running || activeChild;
-    thread.runConfidence = activeChild && !state.running ? "subagent" : state.confidence;
+  if (!wanted.size) { return []; }
+
+  const listed = await p.listThreads({ limit: null });
+  rememberThreadTitles(p.name, listed.data);
+  const rows = (listed.data ?? []).filter((thread) => wanted.has(String(thread.id)));
+  applyThreadRunState(p, rows, watch.runningDetails(p.name, threadRunIds(rows)));
+  return rows;
+}
+
+// Only the stars the current filter can legitimately show, and only the ones the
+// page did not already carry. The common case is that every star is on the page,
+// in which case this costs nothing.
+async function hydrateMissingPins(providerEntries, rows) {
+  const scoped = new Map(providerEntries);
+  const present = new Set(rows.map((thread) => `${thread.provider}:${thread.id}`));
+  const missing = new Map();
+
+  for (const star of threadStars.list()) {
+    if (!scoped.has(star.provider) || present.has(`${star.provider}:${star.threadId}`)) { continue; }
+    if (!missing.has(star.provider)) { missing.set(star.provider, []); }
+    missing.get(star.provider).push(star.threadId);
   }
 
-  return listed;
+  if (!missing.size) { return []; }
+
+  const settled = await Promise.allSettled(
+    [...missing].map(([name, ids]) => listPinnedThreadsWithState(scoped.get(name), ids)),
+  );
+
+  // A provider that cannot be read is already reported through
+  // unavailableProviders by the caller; losing its pins must not fail the list.
+  return settled.flatMap((result) => (result.status === "fulfilled" ? result.value : []));
 }
 
 function decodeRecentCursor(value) {
@@ -2050,9 +2082,14 @@ const routes = {
     const more = sortRecentThreads(groups.flat().filter((thread) => !featured.has(`${thread.provider}:${thread.id}`)), { runningFirst: false });
     const hasMore = Object.values(nextState).some((providerCursor) => typeof providerCursor === "string");
 
+    // Pins belong to the first page only: a continuation is already past the
+    // pinned block, and a search is a query that pinning must not fight.
+    const pinned = continuation || search ? [] : await hydrateMissingPins(providerEntries, groups.flat());
+
     json(res, 200, {
       data: ranked.concat(more),
       featuredCount: ranked.length,
+      pinned,
       nextCursor: hasMore ? encodeRecentCursor(nextState) : null,
       unavailableProviders,
     });
@@ -2164,6 +2201,27 @@ const routes = {
       json(res, 200, rule);
     } catch (e) {
       json(res, e.status ?? 500, { error: String(e.message ?? e) });
+    }
+  },
+
+  "GET /api/thread/stars": async (_req, res) => {
+    json(res, 200, { stars: threadStars.list(), max: MAX_STARS });
+  },
+
+  "POST /api/thread/stars": async (req, res) => {
+    const body = await readBody(req);
+
+    try {
+      json(res, 200, {
+        stars: threadStars.set({
+          provider: String(body?.provider || "codex"),
+          threadId: String(body?.threadId ?? ""),
+          starred: body?.starred !== false,
+        }),
+        max: MAX_STARS,
+      });
+    } catch (e) {
+      json(res, e.status ?? 500, { error: String(e.message ?? e), code: e.code });
     }
   },
 

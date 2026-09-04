@@ -25,6 +25,7 @@ function extractFunction(name) {
 }
 
 const rankLiveThreads = extractFunction("rankLiveThreads");
+const partitionStarredThreads = extractFunction("partitionStarredThreads");
 
 test("a newly running task is promoted immediately from below the fold", () => {
   const threads = [
@@ -91,4 +92,51 @@ test("live ranking does not mutate the cached input order", () => {
   rankLiveThreads(threads, new Set(["grok:running"]));
 
   assert.deepEqual(threads.map((thread) => thread.id), ["idle", "running"]);
+});
+
+test("starred sessions pin above the list without disturbing the rest of the order", () => {
+  const threads = [
+    { id: "a", provider: "codex", updatedAt: 600 },
+    { id: "b", provider: "claude", updatedAt: 500 },
+    { id: "c", provider: "codex", updatedAt: 400 },
+    { id: "d", provider: "grok", updatedAt: 300 },
+  ];
+
+  const { starred, rest } = partitionStarredThreads(threads, new Set(["codex:c", "grok:d"]));
+
+  assert.deepEqual(starred.map((t) => t.id), ["c", "d"]);
+  assert.deepEqual(rest.map((t) => t.id), ["a", "b"]);
+});
+
+test("a running favourite outranks an idle one inside the pinned block", () => {
+  const threads = [
+    { id: "idle", provider: "codex", updatedAt: 900 },
+    { id: "running", provider: "claude", updatedAt: 100 },
+    { id: "plain", provider: "grok", updatedAt: 800 },
+  ];
+  const running = new Set(["claude:running"]);
+
+  const { starred, rest } = partitionStarredThreads(
+    threads,
+    new Set(["codex:idle", "claude:running"]),
+    (rows) => rankLiveThreads(rows, running),
+  );
+
+  assert.deepEqual(starred.map((t) => t.id), ["running", "idle"]);
+  assert.deepEqual(rest.map((t) => t.id), ["plain"]);
+});
+
+test("a provider-less row is treated as codex, matching how stars are keyed", () => {
+  const { starred, rest } = partitionStarredThreads([{ id: "legacy", updatedAt: 1 }], new Set(["codex:legacy"]));
+
+  assert.deepEqual(starred.map((t) => t.id), ["legacy"]);
+  assert.deepEqual(rest, []);
+});
+
+test("no favourites leaves every row in the ordinary list", () => {
+  const threads = [{ id: "a", provider: "codex", updatedAt: 2 }, { id: "b", provider: "codex", updatedAt: 1 }];
+  const { starred, rest } = partitionStarredThreads(threads, new Set());
+
+  assert.deepEqual(starred, []);
+  assert.deepEqual(rest.map((t) => t.id), ["a", "b"]);
 });

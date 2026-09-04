@@ -81,7 +81,12 @@
   #providerSeg button img { object-fit: contain; }
   .chip.prov { width: 19px; height: 19px; flex: 0 0 19px; display: inline-flex; align-items: center; justify-content: center; padding: 2px; border-radius: 6px; background: var(--bg3); }
   .chip.prov img { width: 100%; height: 100%; display: block; object-fit: contain; border-radius: 4px; }
-  .row { padding: 8px 12px; border-bottom: 1px solid #21262dcc; cursor: pointer; transition: background .12s ease; }
+  /* Long-press opens the session actions sheet, so iOS must not raise its own
+     selection callout over it. touch-action is deliberately left alone: the
+     list still has to scroll from a row. */
+  .row { padding: 8px 12px; border-bottom: 1px solid #21262dcc; cursor: pointer; transition: background .12s ease; -webkit-touch-callout: none; user-select: none; }
+  #pinnedRows:empty { display: none; }
+  #pinnedRows .row { background: #161b2266; }
   .row:active { background: linear-gradient(90deg, #161b22, #1b2129); }
   .row-head { display: flex; align-items: center; gap: 7px; min-height: 44px; }
   .row-copy { flex: 1; min-width: 0; border: 0; padding: 0; background: transparent; color: inherit; text-align: left; font: inherit; cursor: pointer; }
@@ -390,6 +395,7 @@
   .opt.sel { border-color: var(--accent); background: #2ea04314; }
   .opt .radio { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--fg-faint); flex-shrink: 0; margin-top: 1px; }
   .opt-button { width: 100%; background: transparent; color: inherit; text-align: left; font: inherit; }
+  .opt-button:disabled { opacity: .45; cursor: default; }
   .opt.sel .radio { border-color: var(--accent); background: radial-gradient(circle, var(--accent) 42%, transparent 46%); }
   .opt .on { font-weight: 600; font-size: 14.5px; }
   .opt .od { font-size: 12.5px; color: var(--fg-dim); margin-top: 2px; }
@@ -643,6 +649,7 @@
       </div>
     </div>
     <div id="listNotice" class="usage-note" role="status" style="display:none;margin:8px 12px"></div>
+    <div id="pinnedRows"></div>
     <div id="rows"></div>
     <button id="loadMore" style="display:none">Load more</button>
   </aside>
@@ -1174,6 +1181,9 @@ const state = {
   projectGroups: [],
   collapsedProjects: new Set(),
   threads: [], nextCursor: null,
+  starred: new Map(),        // "provider:threadId" -> star, mirrored from the bridge
+  starredThreads: [],        // the rows rendered in the pinned block
+  maxStars: 10,
   active: null, activeTurnId: null,
   items: new Map(),          // itemId -> {kind, el, bodyEl}
   approvalId: null,
@@ -1549,12 +1559,18 @@ function bellSvg() {
 
 function threadRuleKey(provider, threadId) { return `${provider || "codex"}:${threadId}`; }
 
+// Every session currently on screen. Starred sessions are held separately so
+// they can be pinned above the list, so anything that looks a thread up by id
+// has to consult both.
+function listedThreads() { return state.starredThreads.concat(state.threads); }
+
 // A child is part of the parent task for notification purposes. This avoids a
 // burst when several workers finish while still letting the child transcript
 // remain independently navigable.
 function notificationTarget(thread) {
   if (!thread?.parentThreadId) { return thread; }
-  return state.threads.find((candidate) => candidate.id === thread.parentThreadId) || {
+  // A starred parent lives in the pinned block, not in state.threads.
+  return listedThreads().find((candidate) => candidate.id === thread.parentThreadId) || {
     id: thread.parentThreadId,
     provider: thread.provider || "codex",
     name: "Parent task",
@@ -1626,7 +1642,7 @@ function rebuildProjectGroups() {
 function renderRows(append) {
   const rows = $("rows");
 
-  if (!append) { rows.innerHTML = ""; }
+  if (!append) { rows.innerHTML = ""; renderPinnedRows(); }
 
   const start = append ? rows.querySelectorAll(".row").length : 0;
   const projectStarts = new Map();
@@ -1670,106 +1686,169 @@ function renderRows(append) {
     }
 
     const t = state.threads[index];
-    const threadProject = projectByThread.get(threadRuleKey(t.provider, t.id));
-    const div = document.createElement("div");
-    const selected = !!state.active && (state.active.parentThreadId || state.active.id) === t.id && activeProvider() === (t.provider || "codex");
-    div.className = "row" + (selected ? " active-thread" : "");
-    div.dataset.tid = t.id;
-    div.dataset.provider = t.provider || "codex";
-    if (threadProject) {
-      div.dataset.project = threadProject.key;
-      div.hidden = state.collapsedProjects.has(threadProject.key);
-    }
-    const dir = (t.cwd || "").split("/").pop() || "";
-    const runningNow = isThreadRunning(t);
-    const runState = runPresentation(runningNow, state.runConfidence.get(runKey(t.provider, t.id)) ?? t.runConfidence);
-    const childCount = t.subagents?.length ?? 0;
-    const expanded = state.expandedSubagents.has(t.id);
-    const notifyMode = state.notificationRules.get(threadRuleKey(t.provider, t.id));
-    const showReady = state.listView === "recent" && !runningNow && runState.className !== "abnormal";
-    const subagentListId = "subagents-" + String(t.id).replace(/[^a-zA-Z0-9_-]/g, "");
-    div.innerHTML = `<div class="row-head"><button class="row-copy" type="button"${selected ? ' aria-current="true"' : ""}><div class="titleline"><span class="chip prov"></span><div class="preview"></div></div><div class="meta">
-      <span class="chip run-badge ${runState.className}" style="display:${runState.visible ? "inline-flex" : "none"}"><span class="run-dot"></span><span class="run-label">${runState.label}</span></span>
-      <span class="chip ready-badge" style="display:${showReady ? "inline-flex" : "none"}">ready</span>
-      <span class="chip dir"></span>
-      <span class="chip time"></span></div></button><div class="row-actions">
-      ${childCount ? `<button class="row-action subagent-action ${expanded ? "expanded" : ""}" aria-expanded="${expanded}" aria-controls="${subagentListId}"><span>${childCount} subagent${childCount === 1 ? "" : "s"}</span><span class="chevron">›</span></button>` : ""}
-      <button class="row-action notify-action ${notifyMode ? "on" : ""}" aria-label="${notifyMode ? "Task notifications on" : "Task notifications"}" aria-haspopup="dialog" title="Task notifications">${bellSvg()}</button>
-      </div></div><div class="subagents ${expanded ? "open" : ""}" id="${subagentListId}"></div>`;
-    div.querySelector(".preview").textContent = t.name || t.preview || "(empty session)";
-    const providerMark = div.querySelector(".prov");
-    const providerName = PROVIDER_LABELS[t.provider] || "Codex";
-    const providerIcon = document.createElement("img");
-    providerIcon.src = PROVIDER_ICONS[t.provider] || PROVIDER_ICONS.codex;
-    providerIcon.alt = "";
-    providerMark.appendChild(providerIcon);
-    providerMark.title = providerName;
-    providerMark.setAttribute("role", "img");
-    providerMark.setAttribute("aria-label", providerName);
-    providerMark.style.display = state.providerScope === "all" ? "inline-flex" : "none";
-    div.querySelector(".dir").textContent = "📁 " + dir;
-
-    div.querySelector(".time").textContent = relTime(t.updatedAt);
-    div.querySelector(".notify-action").onclick = (event) => {
-      event.stopPropagation();
-      openTaskNotificationSheet(t);
-    };
-
-    const disclosure = div.querySelector(".subagent-action");
-    const childList = div.querySelector(".subagents");
-
-    if (disclosure) {
-      disclosure.onclick = (event) => {
-        event.stopPropagation();
-        const on = !state.expandedSubagents.has(t.id);
-        if (on) { state.expandedSubagents.add(t.id); } else { state.expandedSubagents.delete(t.id); }
-        disclosure.classList.toggle("expanded", on);
-        disclosure.setAttribute("aria-expanded", String(on));
-        childList.classList.toggle("open", on);
-      };
-    }
-
-    for (const child of t.subagents ?? []) {
-      const childRow = document.createElement("button");
-      const childRunning = isRunning(child.provider || t.provider, child.id);
-      const childProvider = child.provider || t.provider || "codex";
-      const childRunState = runPresentation(childRunning, state.runConfidence.get(runKey(childProvider, child.id)) ?? child.runConfidence);
-      const childSelected = !!state.active && state.active.id === child.id && activeProvider() === (child.provider || t.provider || "codex");
-      childRow.className = "subagent-row" + (childSelected ? " active-subagent" : "");
-      childRow.type = "button";
-      childRow.dataset.tid = child.id;
-      childRow.dataset.provider = childProvider;
-      if (childSelected) { childRow.setAttribute("aria-current", "true"); }
-      childRow.innerHTML = `<div class="subagent-copy"><div class="subagent-name"></div><div class="subagent-path"></div></div>
-        <span class="chip run-badge ${childRunState.className}" style="display:${childRunState.visible ? "inline-flex" : "none"}"><span class="run-dot"></span><span class="run-label">${childRunState.label}</span></span>
-        <span class="chip time"></span>`;
-      childRow.querySelector(".subagent-name").textContent = child.agentNickname || child.name || child.preview || "Subagent";
-      childRow.querySelector(".subagent-path").textContent = child.agentPath || child.preview || "Child task";
-      childRow.querySelector(".time").textContent = relTime(child.updatedAt);
-      childRow.onclick = (event) => {
-        event.stopPropagation();
-        openThread({
-          ...child,
-          name: child.agentNickname || child.name || "Subagent",
-          provider: child.provider || t.provider,
-          parentThreadId: t.id,
-        });
-      };
-      childList.appendChild(childRow);
-    }
-
-    div.querySelector(".row-copy").onclick = (event) => {
-      event.stopPropagation();
-      openThread(t);
-    };
-    div.onclick = () => openThread(t);
-    rows.appendChild(div);
+    rows.appendChild(buildThreadRow(t, projectByThread.get(threadRuleKey(t.provider, t.id))));
   }
 
-  if (!state.threads.length) { rows.innerHTML = '<div class="empty">No sessions found</div>'; }
+  if (!state.threads.length && !state.starredThreads.length) { rows.innerHTML = '<div class="empty">No sessions found</div>'; }
 
   $("loadMore").textContent = "Load more sessions";
   $("loadMore").style.display = state.listView === "recent" && state.nextCursor ? "block" : "none";
+}
+
+function applyStarredPartition({ pinned = [], append = false, search = "" } = {}) {
+  // While searching, everything stays in the ordinary list. Pulling favourites
+  // out while the pinned block is suppressed would hide them from their own
+  // search results.
+  if (search) {
+    state.starredThreads = [];
+    return;
+  }
+
+  if (append) {
+    // The pinned block was built from page one and is already complete. An
+    // appended page only has to avoid drawing a pinned session a second time.
+    state.threads = partitionStarredThreads(state.threads, state.starred).rest;
+    return;
+  }
+
+  // Server-hydrated pins are sessions too old to be on the page at all; merge
+  // them in so they take exactly the same path as everything else.
+  const seen = new Set();
+  const rows = [];
+
+  for (const thread of state.threads.concat(pinned ?? [])) {
+    const key = threadRuleKey(thread.provider, thread.id);
+    if (seen.has(key)) { continue; }
+    seen.add(key);
+    rows.push(thread);
+  }
+
+  const starredInFeatured = rows.slice(0, state.featuredCount)
+    .filter((thread) => state.starred.has(threadRuleKey(thread.provider, thread.id))).length;
+  const { starred, rest } = partitionStarredThreads(rows, state.starred, (subset) => rankLiveThreads(subset, state.running));
+
+  state.starredThreads = starred;
+  state.threads = rest;
+  // featuredCount is a position, not a property of any row, so it has to shrink
+  // by however many pinned rows sat inside it or the "More sessions" divider
+  // lands in the wrong place.
+  state.featuredCount = Math.max(0, state.featuredCount - starredInFeatured);
+}
+
+// The pinned block lives in its own container rather than at the top of #rows.
+// renderRows' append path derives its start index from a count of DOM rows, so
+// pinned rows inside #rows would desync that index and silently skip sessions
+// on every "Load more".
+function renderPinnedRows() {
+  const host = $("pinnedRows");
+  host.innerHTML = "";
+  // A search is a query; pinning must not fight it.
+  const pinned = $("search").value.trim() ? [] : state.starredThreads;
+
+  if (!pinned.length) { return; }
+
+  const divider = document.createElement("div");
+  divider.className = "section-divider";
+  divider.textContent = "Starred";
+  host.appendChild(divider);
+
+  for (const thread of pinned) { host.appendChild(buildThreadRow(thread, null)); }
+}
+
+function buildThreadRow(t, threadProject) {
+  const div = document.createElement("div");
+  const selected = !!state.active && (state.active.parentThreadId || state.active.id) === t.id && activeProvider() === (t.provider || "codex");
+  div.className = "row" + (selected ? " active-thread" : "");
+  div.dataset.tid = t.id;
+  div.dataset.provider = t.provider || "codex";
+  if (threadProject) {
+    div.dataset.project = threadProject.key;
+    div.hidden = state.collapsedProjects.has(threadProject.key);
+  }
+  const dir = (t.cwd || "").split("/").pop() || "";
+  const runningNow = isThreadRunning(t);
+  const runState = runPresentation(runningNow, state.runConfidence.get(runKey(t.provider, t.id)) ?? t.runConfidence);
+  const childCount = t.subagents?.length ?? 0;
+  const expanded = state.expandedSubagents.has(t.id);
+  const notifyMode = state.notificationRules.get(threadRuleKey(t.provider, t.id));
+  const showReady = state.listView === "recent" && !runningNow && runState.className !== "abnormal";
+  const subagentListId = "subagents-" + String(t.id).replace(/[^a-zA-Z0-9_-]/g, "");
+  div.innerHTML = `<div class="row-head"><button class="row-copy" type="button"${selected ? ' aria-current="true"' : ""}><div class="titleline"><span class="chip prov"></span><div class="preview"></div></div><div class="meta">
+    <span class="chip run-badge ${runState.className}" style="display:${runState.visible ? "inline-flex" : "none"}"><span class="run-dot"></span><span class="run-label">${runState.label}</span></span>
+    <span class="chip ready-badge" style="display:${showReady ? "inline-flex" : "none"}">ready</span>
+    <span class="chip dir"></span>
+    <span class="chip time"></span></div></button><div class="row-actions">
+    ${childCount ? `<button class="row-action subagent-action ${expanded ? "expanded" : ""}" aria-expanded="${expanded}" aria-controls="${subagentListId}"><span>${childCount} subagent${childCount === 1 ? "" : "s"}</span><span class="chevron">›</span></button>` : ""}
+    <button class="row-action notify-action ${notifyMode ? "on" : ""}" aria-label="${notifyMode ? "Task notifications on" : "Task notifications"}" aria-haspopup="dialog" title="Task notifications">${bellSvg()}</button>
+    </div></div><div class="subagents ${expanded ? "open" : ""}" id="${subagentListId}"></div>`;
+  div.querySelector(".preview").textContent = t.name || t.preview || "(empty session)";
+  const providerMark = div.querySelector(".prov");
+  const providerName = PROVIDER_LABELS[t.provider] || "Codex";
+  const providerIcon = document.createElement("img");
+  providerIcon.src = PROVIDER_ICONS[t.provider] || PROVIDER_ICONS.codex;
+  providerIcon.alt = "";
+  providerMark.appendChild(providerIcon);
+  providerMark.title = providerName;
+  providerMark.setAttribute("role", "img");
+  providerMark.setAttribute("aria-label", providerName);
+  providerMark.style.display = state.providerScope === "all" ? "inline-flex" : "none";
+  div.querySelector(".dir").textContent = "📁 " + dir;
+
+  div.querySelector(".time").textContent = relTime(t.updatedAt);
+  div.querySelector(".notify-action").onclick = (event) => {
+    event.stopPropagation();
+    openTaskNotificationSheet(t);
+  };
+
+  const disclosure = div.querySelector(".subagent-action");
+  const childList = div.querySelector(".subagents");
+
+  if (disclosure) {
+    disclosure.onclick = (event) => {
+      event.stopPropagation();
+      const on = !state.expandedSubagents.has(t.id);
+      if (on) { state.expandedSubagents.add(t.id); } else { state.expandedSubagents.delete(t.id); }
+      disclosure.classList.toggle("expanded", on);
+      disclosure.setAttribute("aria-expanded", String(on));
+      childList.classList.toggle("open", on);
+    };
+  }
+
+  for (const child of t.subagents ?? []) {
+    const childRow = document.createElement("button");
+    const childRunning = isRunning(child.provider || t.provider, child.id);
+    const childProvider = child.provider || t.provider || "codex";
+    const childRunState = runPresentation(childRunning, state.runConfidence.get(runKey(childProvider, child.id)) ?? child.runConfidence);
+    const childSelected = !!state.active && state.active.id === child.id && activeProvider() === (child.provider || t.provider || "codex");
+    childRow.className = "subagent-row" + (childSelected ? " active-subagent" : "");
+    childRow.type = "button";
+    childRow.dataset.tid = child.id;
+    childRow.dataset.provider = childProvider;
+    if (childSelected) { childRow.setAttribute("aria-current", "true"); }
+    childRow.innerHTML = `<div class="subagent-copy"><div class="subagent-name"></div><div class="subagent-path"></div></div>
+      <span class="chip run-badge ${childRunState.className}" style="display:${childRunState.visible ? "inline-flex" : "none"}"><span class="run-dot"></span><span class="run-label">${childRunState.label}</span></span>
+      <span class="chip time"></span>`;
+    childRow.querySelector(".subagent-name").textContent = child.agentNickname || child.name || child.preview || "Subagent";
+    childRow.querySelector(".subagent-path").textContent = child.agentPath || child.preview || "Child task";
+    childRow.querySelector(".time").textContent = relTime(child.updatedAt);
+    childRow.onclick = (event) => {
+      event.stopPropagation();
+      openThread({
+        ...child,
+        name: child.agentNickname || child.name || "Subagent",
+        provider: child.provider || t.provider,
+        parentThreadId: t.id,
+      });
+    };
+    childList.appendChild(childRow);
+  }
+
+  div.querySelector(".row-copy").onclick = (event) => {
+    event.stopPropagation();
+    openThread(t);
+  };
+  div.onclick = () => openThread(t);
+  return div;
 }
 
 async function loadThreads(append) {
@@ -1843,7 +1922,7 @@ async function loadThreads(append) {
     if (requestSeq !== state.listRequestSeq || state.listView !== listView || state.providerScope !== providerScope) { return; }
 
     if (append && listView === "recent") {
-      const existing = new Set(state.threads.map((thread) => `${thread.provider}:${thread.id}`));
+      const existing = new Set(listedThreads().map((thread) => `${thread.provider}:${thread.id}`));
       state.threads = state.threads.concat((res.data ?? []).filter((thread) => !existing.has(`${thread.provider}:${thread.id}`)));
     } else if (listView === "recent") {
       state.threads = append ? state.threads.concat(res.data) : res.data;
@@ -1873,8 +1952,14 @@ async function loadThreads(append) {
     // running set immediately before painting so an older response can never
     // put a now-running task back in its previous position. This is an invariant
     // in both Recent Work and the provider-specific Agents view.
+    if (listView === "recent") { state.threads = rankLiveThreads(state.threads, state.running); }
+
+    // Partition before the project grouping so a pinned session is never also
+    // drawn inside its folder: the header count would stop matching the rows
+    // beneath it, and the selected row would highlight in two places at once.
+    applyStarredPartition({ pinned: res.pinned, append: listView === "recent" && append, search });
+
     if (listView === "projects") { rebuildProjectGroups(); }
-    else { state.threads = rankLiveThreads(state.threads, state.running); }
 
     const previousListTop = $("listView").scrollTop;
     renderRows(listView === "recent" && append);
@@ -1883,7 +1968,7 @@ async function loadThreads(append) {
     setOfflineNote(false);
 
     // Cache the first page (no search) so the list renders offline.
-    if (!append && !search) { idbSet(listCacheKey(`${listView}:${providerScope}`), { data: state.threads, groups: state.projectGroups, nextCursor: state.nextCursor, featuredCount: state.featuredCount }); }
+    if (!append && !search) { idbSet(listCacheKey(`${listView}:${providerScope}`), { data: listedThreads(), groups: state.projectGroups, nextCursor: state.nextCursor, featuredCount: state.featuredCount }); }
   } catch (e) {
     // Offline / unreachable — fall back to the last cached copy of this view.
     if (append || search) { throw e; }
@@ -1904,6 +1989,8 @@ async function loadThreads(append) {
       state.nextCursor = null;
       state.featuredCount = listView === "recent" ? (cached.featuredCount ?? Math.min(10, cached.data.length)) : 0;
       state.unavailableProviders = [];
+      // The cache stores the unpartitioned list, so favourites survive offline.
+      applyStarredPartition();
       renderRows(false);
       updateListChrome();
       setOfflineNote(true, e.reach);
@@ -1925,11 +2012,24 @@ function updateListChrome() {
     button.classList.toggle("on", selected);
     button.setAttribute("aria-pressed", String(selected));
   });
+  // The agent filter stays literal — an out-of-scope favourite is not shown —
+  // but a favourite you cannot find is the failure this notice exists to
+  // prevent. Both notes share the line so neither can hide the other.
+  const notes = [];
+
+  if (state.unavailableProviders.length) {
+    notes.push("Some sessions may be missing: " + state.unavailableProviders.map((p) => PROVIDER_LABELS[p] || p).join(", ") + " could not be refreshed.");
+  }
+
+  const hidden = hiddenStarCount();
+
+  if (hidden) {
+    notes.push(`★ ${hidden} starred session${hidden === 1 ? "" : "s"} hidden by the current agent filter.`);
+  }
+
   const notice = $("listNotice");
-  notice.style.display = state.unavailableProviders.length ? "block" : "none";
-  notice.textContent = state.unavailableProviders.length
-    ? "Some sessions may be missing: " + state.unavailableProviders.map((p) => PROVIDER_LABELS[p] || p).join(", ") + " could not be refreshed."
-    : "";
+  notice.style.display = notes.length ? "block" : "none";
+  notice.textContent = notes.join(" · ");
 
   // On desktop the list remains a live sidebar while a conversation is open.
   // Keep its filters accurate without replacing the chat title in the header.
@@ -1940,6 +2040,20 @@ function updateListChrome() {
   $("hSub").textContent = state.unavailableProviders.length
     ? "Partial sync · " + state.unavailableProviders.map((p) => PROVIDER_LABELS[p] || p).join(", ") + " unavailable"
     : "";
+}
+
+// Stars are held keyed by provider, so this never has to parse a provider back
+// out of a "provider:threadId" string.
+function hiddenStarCount() {
+  if (state.providerScope === "all" || $("search").value.trim()) { return 0; }
+
+  let hidden = 0;
+
+  for (const star of state.starred.values()) {
+    if ((star.provider || "codex") !== state.providerScope) { hidden += 1; }
+  }
+
+  return hidden;
 }
 
 function syncSidebarToggle() {
@@ -1970,11 +2084,13 @@ async function switchListView(view) {
 
   state.listView = view;
   state.threads = [];
+  state.starredThreads = [];
   state.projectGroups = [];
   state.nextCursor = null;
   state.featuredCount = 0;
   state.unavailableProviders = [];
   $("search").value = "";
+  $("pinnedRows").innerHTML = "";
   $("rows").innerHTML = '<div class="empty">Loading…</div>';
   updateListChrome();
   persistPrefs();
@@ -3645,9 +3761,11 @@ async function switchProvider(name) {
   syncProviderSeg();
   updateListChrome();
   state.threads = [];
+  state.starredThreads = [];
   state.projectGroups = [];
   state.nextCursor = null;
   $("search").value = "";
+  $("pinnedRows").innerHTML = "";
   $("rows").innerHTML = '<div class="empty">Loading…</div>';
 
   // On desktop this is a sidebar filter while a task remains open. Do not let
@@ -6829,6 +6947,38 @@ async function ensurePushSubscription() {
   return fresh;
 }
 
+function setStarState(payload) {
+  state.starred = new Map((payload?.stars ?? []).map((star) => [threadRuleKey(star.provider, star.threadId), star]));
+  state.maxStars = Number(payload?.max) || state.maxStars;
+}
+
+async function loadThreadStars() {
+  try {
+    setStarState(await api("/api/thread/stars"));
+  } catch {
+    // The list stays usable without favourites; they refresh on the next load.
+  }
+}
+
+// Reloads the list rather than moving the row between state.threads and
+// state.starredThreads by hand. The server owns both the star set and the
+// hydration of pins that have aged off the page, so re-reading it is the only
+// way the two stay consistent.
+async function setThreadStar(thread, starred) {
+  const target = notificationTarget(thread);
+
+  try {
+    setStarState(await api("/api/thread/stars", {
+      provider: target.provider || "codex",
+      threadId: target.id,
+      starred,
+    }));
+    await loadThreads(false);
+  } catch (e) {
+    chip("⚠️", e.code === "star_limit_reached" ? e.message : "Could not update favourites: " + e.message);
+  }
+}
+
 async function loadNotificationRules() {
   state.notificationRules.clear();
   if (!PUSH_SUPPORTED) { return; }
@@ -6870,6 +7020,30 @@ async function setTaskNotification(thread, mode) {
   if (mode === "off") { state.notificationRules.delete(k); } else { state.notificationRules.set(k, mode); }
   renderRows(false);
   syncNotifyButton();
+}
+
+function openThreadActionsSheet(thread) {
+  const target = notificationTarget(thread);
+  const starred = state.starred.has(threadRuleKey(target.provider, target.id));
+  const full = !starred && state.starred.size >= state.maxStars;
+  const title = target.name || target.preview || "this session";
+
+  openSheet(`<h2>Session</h2>
+    <div class="hint">${esc(title)}</div>
+    <button type="button" class="opt opt-button" id="starAction"${full ? " disabled" : ""}>
+      <div><div class="on">${starred ? "Remove from favourites" : "Add to favourites"}</div>
+      <div class="od">${starred
+        ? "Stop pinning this session above the list."
+        : full
+          ? `You already have ${state.maxStars} favourites. Remove one first.`
+          : "Pin it to the top of Recent Sessions and Projects."}</div></div>
+    </button>
+    <button type="button" class="opt opt-button" id="notifyAction"><div><div class="on">Task notifications</div><div class="od">Choose how this device follows this session.</div></div></button>
+    <button type="button" class="opt opt-button" id="openAction"><div><div class="on">Open session</div><div class="od">Go to the transcript.</div></div></button>`);
+
+  $("starAction").onclick = () => { closeSheet(); setThreadStar(target, !starred); };
+  $("notifyAction").onclick = () => openTaskNotificationSheet(thread);
+  $("openAction").onclick = () => { closeSheet(); openThread(thread); };
 }
 
 async function openTaskNotificationSheet(thread) {
@@ -7409,6 +7583,22 @@ function isThreadRunning(thread, runningKeys = state.running) {
   );
 }
 
+// Starred sessions pin above every view, but active work still wins inside the
+// pinned block: a running favourite outranks an idle one. Self-contained, and
+// takes its ranker as an argument, so it can be extracted and tested the same
+// way rankLiveThreads is.
+function partitionStarredThreads(threads, starKeys, rank = (rows) => rows) {
+  const starred = [];
+  const rest = [];
+
+  for (const thread of threads ?? []) {
+    const key = (thread?.provider || "codex") + ":" + thread?.id;
+    (starKeys?.has(key) ? starred : rest).push(thread);
+  }
+
+  return { starred: rank(starred), rest };
+}
+
 // Pure ordering used by the live UI and exercised directly in tests. The
 // server remains canonical, but a start event must promote the task before a
 // network round-trip; a running subagent promotes its parent task as well.
@@ -7940,6 +8130,82 @@ $("input").addEventListener("paste", (event) => {
     uploadImages(images);
   }
 });
+// Right-click on desktop, long-press on touch: one place for per-session
+// actions. Delegated to the list container because rows are rebuilt from
+// scratch on every refresh.
+let rowHoldTimer = null;
+let rowHoldOrigin = null;
+let suppressRowClick = false;
+
+function threadFromRowEvent(event) {
+  const row = event.target?.closest?.(".row");
+
+  if (!row) { return null; }
+
+  const key = threadRuleKey(row.dataset.provider, row.dataset.tid);
+  return listedThreads().find((thread) => threadRuleKey(thread.provider, thread.id) === key) ?? null;
+}
+
+function cancelRowHold() {
+  clearTimeout(rowHoldTimer);
+  rowHoldTimer = null;
+  rowHoldOrigin = null;
+}
+
+$("listView").addEventListener("contextmenu", (event) => {
+  const thread = threadFromRowEvent(event);
+
+  if (!thread) { return; }
+
+  event.preventDefault();
+  cancelRowHold();
+  // iOS raises contextmenu for the same long press the timer below already
+  // handled. Opening the sheet twice would recapture the focus-return target.
+  if ($("sheet").classList.contains("show")) { return; }
+
+  openThreadActionsSheet(thread);
+});
+
+$("listView").addEventListener("pointerdown", (event) => {
+  // Cleared per gesture rather than on a timer: openSheet marks #app inert, so
+  // the click this flag exists to swallow may never be dispatched at all.
+  suppressRowClick = false;
+  cancelRowHold();
+
+  if (event.pointerType === "mouse") { return; }
+  if (event.target?.closest?.(".row-action, .subagent-row")) { return; }
+
+  const thread = threadFromRowEvent(event);
+
+  if (!thread) { return; }
+
+  rowHoldOrigin = { x: event.clientX, y: event.clientY };
+  rowHoldTimer = setTimeout(() => {
+    rowHoldTimer = null;
+    suppressRowClick = true;
+    navigator.vibrate?.(15);
+    openThreadActionsSheet(thread);
+  }, 500);
+});
+
+// A drag that starts on a row is the list scrolling, not a press.
+$("listView").addEventListener("pointermove", (event) => {
+  if (!rowHoldTimer || !rowHoldOrigin) { return; }
+  if (Math.abs(event.clientX - rowHoldOrigin.x) > 10 || Math.abs(event.clientY - rowHoldOrigin.y) > 10) { cancelRowHold(); }
+});
+
+for (const eventName of ["pointerup", "pointercancel", "pointerleave"]) {
+  $("listView").addEventListener(eventName, cancelRowHold);
+}
+
+// Capture phase, so a long press cannot also run the row's own open handler.
+$("listView").addEventListener("click", (event) => {
+  if (!suppressRowClick) { return; }
+  suppressRowClick = false;
+  event.stopPropagation();
+  event.preventDefault();
+}, true);
+
 $("imageViewer").onclick = closeAttachmentViewer;
 $("stopBtn").onclick = stopAgent;
 $("okBtn").onclick = () => answerApproval("approve");
@@ -8103,7 +8369,7 @@ initProvider();
 state.failedSends = loadFailedSends();
 connectEvents();
 if (state.provider) { initModels(); }
-Promise.all([loadNotificationRules(), loadThreads(false)]).then(() => {
+Promise.all([loadNotificationRules(), loadThreadStars().then(() => loadThreads(false))]).then(() => {
   openLinkedThread().catch(() => {});
 });
 </script>
