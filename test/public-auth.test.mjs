@@ -83,6 +83,17 @@ test("vendored math fonts use a font MIME type", async () => {
   assert.equal(unknown.statusCode, 404);
 });
 
+test("the terminal document can be embedded only by the authenticated same origin app", async () => {
+  fixture();
+  const response = await request("/terminal?provider=codex&threadId=thread-embedded", {
+    headers: { authorization: `Bearer ${TOKEN}`, "sec-fetch-dest": "iframe" },
+  });
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.getHeader("x-frame-options"), "SAMEORIGIN");
+  assert.match(response.getHeader("content-security-policy"), /frame-ancestors 'self'/);
+  assert.doesNotMatch(response.getHeader("content-security-policy"), /frame-ancestors 'none'/);
+});
+
 test("the loopback setup challenge proves token knowledge without returning the token", async () => {
   fixture();
   const nonce = "a".repeat(64);

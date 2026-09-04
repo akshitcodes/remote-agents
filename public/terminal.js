@@ -5,6 +5,8 @@ const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
 const provider = params.get("provider") || "codex";
 const threadId = params.get("threadId") || "";
+const embedded = params.get("embedded") === "1";
+document.body.classList.toggle("embedded", embedded);
 let enrollmentCapability = new URLSearchParams(location.hash.slice(1)).get("enroll") || "";
 if (enrollmentCapability) { history.replaceState(null, "", location.pathname + location.search); }
 
@@ -245,7 +247,7 @@ async function beginLocalSetup() {
   $("gateAction").disabled = true;
   $("gateAction").textContent = "Opening local setup…";
   try {
-    const handoff = await api("/api/terminal/local-handoff", { provider, threadId });
+    const handoff = await api("/api/terminal/local-handoff", { provider, threadId, embedded });
     location.assign(handoff.url);
   } catch (error) {
     setError(error.message);
@@ -255,7 +257,7 @@ async function beginLocalSetup() {
 }
 
 async function routeToCanonicalOrigin(canonicalOrigin) {
-  const handoff = await api("/api/terminal/browser-handoff", { provider, threadId });
+  const handoff = await api("/api/terminal/browser-handoff", { provider, threadId, embedded });
   const target = new URL(handoff.url);
   if (target.origin !== canonicalOrigin) { throw new Error("The bridge returned an unexpected terminal address"); }
   location.replace(target.toString());

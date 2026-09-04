@@ -1268,6 +1268,7 @@ export class CodexProvider extends BaseProvider {
       threadId, text, attachments = [], model, effort, approvalPolicy, sandbox,
       preserveProviderPolicy = false, summary, requestId, resume = false,
       resumeReason = "interrupted", expectedPreviousTurnId = null,
+      deliveryMethod = "send",
     } = body;
 
     if (!threadId || (!resume && !String(text ?? "").trim() && !attachments.length)) {
@@ -1381,26 +1382,29 @@ export class CodexProvider extends BaseProvider {
     if (!alreadyFinished) { this.activeTurns.set(threadId, turnId || "__unknown__"); }
 
     if (requestId) {
-      this.emit("send-stage", { threadId, requestId, stage: "turn_started", turnId: turnId ?? null });
+      this.emit("send-stage", {
+        threadId, requestId, stage: "turn_started", turnId: turnId ?? null,
+        resume: !!resume, method: deliveryMethod,
+      });
     }
 
     return resume ? { ...(result ?? {}), previousTurnId: previousTurn?.id ?? null } : result;
   }
 
-  async resumeInterrupted({ threadId, turnId, requestId } = {}) {
+  async resumeInterrupted({ threadId, turnId, requestId, deliveryMethod = "resume" } = {}) {
     if (!threadId) {
       throw Object.assign(new Error("threadId required"), { status: 400, code: "invalid_thread" });
     }
     if (this.activeTurns.has(threadId) || this.startingTurns.has(threadId)) {
       throw Object.assign(new Error("a turn is already in progress"), { status: 409, code: "turn_in_progress" });
     }
-    const result = await this.send({ threadId, requestId, resume: true });
+    const result = await this.send({ threadId, requestId, resume: true, deliveryMethod });
     return { ...result, resumed: true, previousTurnId: result.previousTurnId ?? turnId ?? null };
   }
 
   async resumeUsageLimited({
     threadId, turnId, requestId, model, effort, summary,
-    approvalPolicy, sandbox, preserveProviderPolicy,
+    approvalPolicy, sandbox, preserveProviderPolicy, deliveryMethod = "resumeUsage",
   } = {}) {
     if (!threadId || !turnId) {
       throw Object.assign(new Error("threadId and turnId required"), { status: 400, code: "invalid_usage_resume" });
@@ -1413,6 +1417,7 @@ export class CodexProvider extends BaseProvider {
       resume: true,
       resumeReason: "usage",
       expectedPreviousTurnId: turnId,
+      deliveryMethod,
     });
     return { ...result, resumed: true, previousTurnId: result.previousTurnId ?? bareTurnId(turnId) };
   }
@@ -1467,12 +1472,18 @@ export class CodexProvider extends BaseProvider {
         throw Object.assign(new Error("the active turn is not owned by this bridge"), { status: 409, code: "not_our_turn" });
       }
 
-      return await this.clientRpc(client, "turn/steer", {
+      const result = await this.clientRpc(client, "turn/steer", {
         threadId,
         input: codexUserInput(text, attachments),
         expectedTurnId: expected,
         clientUserMessageId: requestId ?? null,
       });
+      if (requestId) {
+        this.emit("send-stage", {
+          threadId, requestId, stage: "provider_accepted", method: "steer", turnId: expected,
+        });
+      }
+      return result;
     } catch (e) {
       throw mapSteerError(e);
     }

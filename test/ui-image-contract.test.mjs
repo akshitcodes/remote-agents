@@ -75,6 +75,13 @@ test("failed delivery recovery distinguishes pre-dispatch failures and remains a
   assert.match(html, /\/api\/send\/reconcile/);
   assert.match(html, /canonical\.state === "accepted"/);
   assert.match(html, /canonical\.state === "not_sent"/);
+  assert.match(html, /\["turn_started", "provider_accepted"\]\.includes\(frame\.stage\)\) \{ confirmProviderAcceptedInUi\(frame\); \}/);
+  assert.match(html, /if \(!frame\?\.requestId\) \{ return; \}/);
+  assert.match(html, /finishSendProgress\(\);\s*dropFailedSend\(id\)/);
+  assert.match(html, /function providerAcceptanceKey\(\{ provider, method, threadId, requestId \}\)/);
+  assert.match(html, /if \(state\.providerAcceptedRequests\.has\(acceptanceKey\)\) \{/);
+  assert.match(html, /if \(!state\.providerAcceptedRequests\.has\(acceptanceKey\)\) \{ advanceThreadUserProgress\(\); \}/);
+  assert.match(html, /failed\.bubble = bubble;[\s\S]*?autoCheckStandaloneDelivery\(failed, bubble, 1200\)/);
   assert.match(html, /function restartAutomaticDeliveryChecks\(\)/);
   assert.match(html, /probe\.runtime\?\.running && probe\.runtime\?\.source === "bridge"/);
   assert.match(html, /async function reconcileOpenRuntime\(thread = state\.active\)/);
@@ -392,7 +399,7 @@ test("rendered response links retain native browser link behavior outside Agents
 
 test("project terminal uses passkey step-up, a server-derived cwd, and an isolated interactive transport", () => {
   assert.match(html, /id="terminalBtn"[^>]*aria-label="Project terminal"/);
-  assert.match(html, /async function openNativeTerminal\(\)/);
+  assert.match(html, /function openNativeTerminal\(\)/);
   assert.match(html, /\/api\/terminal\/browser-handoff/);
   assert.match(terminalHtml, /simplewebauthn\.min\.js/);
   assert.match(terminalHtml, /xterm\.css/);

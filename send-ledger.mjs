@@ -15,6 +15,17 @@ function publicError(error) {
   };
 }
 
+function mergeAcceptedResult(previous, next) {
+  if (!previous || typeof previous !== "object") { return next; }
+  if (!next || typeof next !== "object") { return previous; }
+  return {
+    ...previous,
+    ...next,
+    ...(previous.turn || next.turn ? { turn: { ...(previous.turn ?? {}), ...(next.turn ?? {}) } } : {}),
+    ...(previous.dispatch || next.dispatch ? { dispatch: { ...(previous.dispatch ?? {}), ...(next.dispatch ?? {}) } } : {}),
+  };
+}
+
 export class SendLedger {
   constructor({ file, ttlMs = DEFAULT_TTL_MS, now = () => Date.now() } = {}) {
     if (!file) { throw new Error("send ledger file required"); }
@@ -71,6 +82,26 @@ export class SendLedger {
     };
   }
 
+  // A request-correlated provider turn-start is stronger than the HTTP
+  // response: it exists only after the provider accepted this exact request.
+  confirmProviderAccepted({ provider, method, requestId, threadId, result } = {}) {
+    if (!provider || !method || !requestId) { return 0; }
+    const key = this.key(provider, method, requestId);
+    const entry = this.entries.get(key);
+    if (!entry || entry.threadId !== threadId || !["dispatching", "uncertain", "accepted"].includes(entry.state)) {
+      return 0;
+    }
+    this.entries.set(key, {
+      ...entry,
+      state: "accepted",
+      result: mergeAcceptedResult(entry.result, result ?? { ok: true, threadId }),
+      error: undefined,
+      at: this.now(),
+    });
+    this.persist();
+    return 1;
+  }
+
   prune() {
     const cutoff = this.now() - this.ttlMs;
 
@@ -97,7 +128,15 @@ export class SendLedger {
     const key = this.key(provider, method, requestId);
     const live = this.inFlight.get(key);
 
-    if (live) { return live; }
+    if (live) {
+      try {
+        return await live;
+      } catch (error) {
+        const confirmed = this.entries.get(key);
+        if (confirmed?.state === "accepted") { return confirmed.result; }
+        throw error;
+      }
+    }
 
     const previous = this.entries.get(key);
 
@@ -128,6 +167,7 @@ export class SendLedger {
 
     try {
       const result = await promise;
+      const confirmed = this.entries.get(key);
       this.entries.set(key, {
         key,
         provider: provider || "codex",
@@ -135,7 +175,7 @@ export class SendLedger {
         requestId,
         threadId: threadId ?? null,
         state: "accepted",
-        result,
+        result: mergeAcceptedResult(confirmed?.state === "accepted" ? confirmed.result : null, result),
         at: this.now(),
       });
 
@@ -145,8 +185,15 @@ export class SendLedger {
         console.error("failed to persist accepted send operation:", error);
       }
 
-      return result;
+      return this.entries.get(key)?.result ?? result;
     } catch (error) {
+      // A request-correlated provider acknowledgement may have arrived while
+      // the surrounding operation was still unwinding. Once that stronger
+      // proof has been persisted, a later transport/broadcast exception must
+      // not downgrade the same request back to uncertain.
+      const confirmed = this.entries.get(key);
+      if (confirmed?.state === "accepted") { return confirmed.result; }
+
       // Once `operation` has started, only an explicit client/provider refusal
       // proves that no message was accepted. An untyped exception or 5xx can
       // happen after stdin/RPC delivery but before our acknowledgement; making

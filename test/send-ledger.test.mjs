@@ -102,6 +102,93 @@ test("a provider delivery timeout stays uncertain across restarts and is never r
   assert.equal(called, false);
 });
 
+test("a request-correlated provider turn start closes the crash window durably", async (t) => {
+  const file = fixture(t);
+  const input = { provider: "codex", method: "send", requestId: "provider-confirmed", threadId: "thread-confirmed" };
+  const first = new SendLedger({ file });
+  const key = first.key(input.provider, input.method, input.requestId);
+  first.entries.set(key, { key, ...input, state: "dispatching", at: Date.now() });
+  first.persist();
+
+  assert.equal(first.confirmProviderAccepted({ ...input, result: { turn: { id: "turn-accepted" } } }), 1);
+  assert.equal(first.status(input).state, "accepted");
+  assert.deepEqual(first.status(input).result, { turn: { id: "turn-accepted" } });
+
+  const restarted = new SendLedger({ file });
+  assert.equal(restarted.status(input).state, "accepted");
+});
+
+test("provider acceptance is scoped to the exact operation and later results enrich it", async (t) => {
+  const file = fixture(t);
+  const common = { provider: "codex", requestId: "same-request", threadId: "thread-method" };
+  const ledger = new SendLedger({ file });
+  const sendKey = ledger.key(common.provider, "send", common.requestId);
+  const steerKey = ledger.key(common.provider, "steer", common.requestId);
+  ledger.entries.set(sendKey, { key: sendKey, ...common, method: "send", state: "dispatching", at: Date.now() });
+  ledger.entries.set(steerKey, { key: steerKey, ...common, method: "steer", state: "dispatching", at: Date.now() });
+  ledger.persist();
+
+  assert.equal(ledger.confirmProviderAccepted({
+    ...common,
+    method: "send",
+    result: { ok: true, dispatch: { accepted: true }, turn: { id: "turn-1" } },
+  }), 1);
+  assert.equal(ledger.status({ ...common, method: "send" }).state, "accepted");
+  assert.equal(ledger.status({ ...common, method: "steer" }).state, "uncertain");
+
+  const enriched = await ledger.run({ ...common, method: "send" }, async () => {
+    throw new Error("accepted operations must replay without executing");
+  });
+  assert.equal(enriched.dispatch.accepted, true);
+  assert.equal(enriched.turn.id, "turn-1");
+
+  const completing = { provider: "codex", method: "send", requestId: "enriched-request", threadId: "thread-method" };
+  const completed = await ledger.run(completing, async () => {
+    assert.equal(ledger.confirmProviderAccepted({
+      ...completing,
+      result: { ok: true, dispatch: { accepted: true }, turn: { id: "turn-2", status: "inProgress" } },
+    }), 1);
+    return { threadId: completing.threadId, dispatch: { model: "gpt-5.6-sol" }, turn: { status: "completed" } };
+  });
+  assert.deepEqual(completed.dispatch, { accepted: true, model: "gpt-5.6-sol" });
+  assert.deepEqual(completed.turn, { id: "turn-2", status: "completed" });
+});
+
+test("a later transport exception cannot downgrade provider acceptance", async (t) => {
+  const file = fixture(t);
+  const input = { provider: "codex", method: "send", requestId: "accepted-then-disconnected", threadId: "thread-confirmed" };
+  const ledger = new SendLedger({ file });
+
+  const result = await ledger.run(input, async () => {
+    assert.equal(ledger.confirmProviderAccepted({ ...input, result: { turn: { id: "turn-survived" } } }), 1);
+    throw new Error("browser response stream disconnected");
+  });
+
+  assert.deepEqual(result, { turn: { id: "turn-survived" } });
+  assert.equal(ledger.status(input).state, "accepted");
+  assert.equal(new SendLedger({ file }).status(input).state, "accepted");
+});
+
+test("a concurrent retry observes sticky provider acceptance after a later exception", async (t) => {
+  const file = fixture(t);
+  const input = { provider: "codex", method: "send", requestId: "concurrent-confirmed", threadId: "thread-confirmed" };
+  const ledger = new SendLedger({ file });
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+
+  const first = ledger.run(input, async () => {
+    assert.equal(ledger.confirmProviderAccepted({ ...input, result: { turn: { id: "turn-concurrent" } } }), 1);
+    await gate;
+    throw new Error("response transport disconnected");
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const retry = ledger.run(input, async () => { throw new Error("must not execute twice"); });
+  release();
+
+  assert.deepEqual(await first, { turn: { id: "turn-concurrent" } });
+  assert.deepEqual(await retry, { turn: { id: "turn-concurrent" } });
+});
+
 test("an untyped provider exit is uncertain and can never be replayed", async (t) => {
   const file = fixture(t);
   const input = { provider: "codex", method: "send", requestId: "provider-exit", threadId: "t-exit" };

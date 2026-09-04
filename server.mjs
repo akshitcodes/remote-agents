@@ -576,7 +576,11 @@ async function sendOnce(provider, body, method = "send") {
   }
 
   const deliver = async () => {
-    const providerBody = { ...body, attachments: resolveAttachmentIds(body?.attachmentIds ?? []) };
+    const providerBody = {
+      ...body,
+      deliveryMethod: method,
+      attachments: resolveAttachmentIds(body?.attachmentIds ?? []),
+    };
     if (dispatch?.mode === "provider-exact") { providerBody.preserveProviderPolicy = true; }
     delete providerBody.attachmentIds;
     const result = await operate(providerBody);
@@ -862,6 +866,25 @@ function makeEmit(name) {
       threadSettings?.adopt(name, data.params.threadId, data.params.sessionId);
     }
 
+    if (event === "send-stage" && ["turn_started", "provider_accepted"].includes(data?.stage)
+      && data.method && data.requestId && data.threadId) {
+      try {
+        sendLedger.confirmProviderAccepted({
+          provider: name,
+          method: data.method,
+          requestId: data.requestId,
+          threadId: data.threadId,
+          result: {
+            ok: true,
+            threadId: data.threadId,
+            ...(data.method === "send" ? { dispatch: { accepted: true } } : {}),
+            ...(data.turnId ? { turn: { id: data.turnId, status: "inProgress" } } : {}),
+          },
+        });
+      } catch (error) {
+        console.error("failed to persist provider-confirmed delivery:", error);
+      }
+    }
     broadcast(event, { ...data, provider: name });
   };
 }
@@ -1894,6 +1917,7 @@ export function startLocalTerminalBrowserHandoff({
   provider,
   threadId,
   browserSecret,
+  embedded = false,
   ttlMs = 60_000,
   browserBootstrapTtlMs,
   createEnrollment = () => terminalSecurity.createEnrollment(),
@@ -1941,7 +1965,7 @@ export function startLocalTerminalBrowserHandoff({
         const bootstrap = createBrowserBootstrap({
           browserSecret,
           enrollmentSecret: enrollment.secret,
-          context: { provider, threadId },
+          context: { provider, threadId, ...(embedded ? { embedded: true } : {}) },
           ttlMs: browserBootstrapTtlMs,
         });
         const target = new URL("/api/terminal/handoff", bootstrap.origin ?? enrollment.origin);
@@ -1970,7 +1994,7 @@ export function startLocalTerminalBrowserHandoff({
       }
       local.unref?.();
       resolveHandoff({
-        url: `http://127.0.0.1:${port}/terminal-enable?handoff=${encodeURIComponent(secret)}`,
+        url: `http://127.0.0.1:${port}/terminal-enable?handoff=${encodeURIComponent(secret)}${embedded ? "&embedded=1" : ""}`,
         expiresAt,
         close: () => { if (local.listening) { local.close(); } },
       });
@@ -2292,8 +2316,8 @@ const routes = {
     if (!p) { return; }
 
     const method = url.searchParams.get("method");
-    if (!["send", "steer", "resume"].includes(method)) {
-      return json(res, 400, { error: "method must be send, steer, or resume", code: "invalid_send_status_request" });
+    if (!["send", "steer", "resume", "resumeUsage"].includes(method)) {
+      return json(res, 400, { error: "method must be send, steer, resume, or resumeUsage", code: "invalid_send_status_request" });
     }
 
     json(res, 200, sendLedger.status({
@@ -2558,12 +2582,13 @@ const routes = {
     const body = await readBody(req, 16 * 1024);
     const provider = String(body?.provider ?? "");
     const threadId = String(body?.threadId ?? "");
+    const embedded = body?.embedded === true;
     if (!USABLE_PROVIDER_NAMES.has(provider) || !threadId || threadId.length > 500) {
       return json(res, 400, { error: "provider and threadId are required", code: "terminal_context_invalid" });
     }
     await requireReachableTerminalOrigin(PUBLIC_ORIGIN);
     const browserSecret = ensureBrowserIdentity(req, res);
-    json(res, 200, await startLocalTerminalBrowserHandoff({ provider, threadId, browserSecret }));
+    json(res, 200, await startLocalTerminalBrowserHandoff({ provider, threadId, browserSecret, embedded }));
   },
 
   // A terminal opened from localhost or a LAN address must still perform
@@ -2577,13 +2602,14 @@ const routes = {
     const body = await readBody(req, 16 * 1024);
     const provider = String(body?.provider ?? "");
     const threadId = String(body?.threadId ?? "");
+    const embedded = body?.embedded === true;
     if (!USABLE_PROVIDER_NAMES.has(provider) || !threadId || threadId.length > 500) {
       return json(res, 400, { error: "provider and threadId are required", code: "terminal_context_invalid" });
     }
     await requireReachableTerminalOrigin(PUBLIC_ORIGIN);
     const bootstrap = terminalSecurity.createBrowserBootstrap({
       browserSecret: ensureBrowserIdentity(req, res),
-      context: { provider, threadId },
+      context: { provider, threadId, ...(embedded ? { embedded: true } : {}) },
     });
     const target = new URL("/api/terminal/handoff", bootstrap.origin ?? PUBLIC_ORIGIN);
     target.searchParams.set("handoff", bootstrap.secret);
@@ -2989,7 +3015,7 @@ export async function handleRequest(req, res) {
       res.setHeader("retry-after", String(blocked));
       return json(res, 429, { error: "too_many_attempts" });
     }
-    if (!expectedOrigin || !trustedHttpsRequest(req) || !exactHost || (fetchDestination && fetchDestination !== "document")) {
+    if (!expectedOrigin || !trustedHttpsRequest(req) || !exactHost || (fetchDestination && !["document", "iframe"].includes(fetchDestination))) {
       return rejectAuth(req, res, url, { attempted: true });
     }
     const bootstrap = terminalSecurity.consumeBrowserBootstrap(url.searchParams.get("handoff") ?? "");
@@ -3005,6 +3031,7 @@ export async function handleRequest(req, res) {
     const target = new URL("/terminal", PUBLIC_ORIGIN);
     target.searchParams.set("provider", bootstrap.context.provider);
     target.searchParams.set("threadId", bootstrap.context.threadId);
+    if (bootstrap.context.embedded === true) { target.searchParams.set("embedded", "1"); }
     if (bootstrap.enrollmentSecret) {
       target.hash = `enroll=${encodeURIComponent(bootstrap.enrollmentSecret)}`;
     }
@@ -3108,7 +3135,9 @@ export async function handleRequest(req, res) {
     if (!existsSync(file)) { return json(res, 404, { error: "not found" }); }
     // xterm computes cell geometry with inline style properties. Keep scripts
     // self-only and allow inline CSS solely in this isolated terminal document.
-    res.setHeader("content-security-policy", "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self'; font-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'");
+    // Only the authenticated same-origin workspace may embed this route.
+    res.setHeader("x-frame-options", "SAMEORIGIN");
+    res.setHeader("content-security-policy", "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self'; font-src 'self'; base-uri 'none'; frame-ancestors 'self'; form-action 'none'");
     res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
     return res.end(readFileSync(file));
   }

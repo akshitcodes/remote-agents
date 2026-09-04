@@ -14,6 +14,8 @@
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text); }
 body { min-height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
+body.embedded header { display: none; }
+body.embedded .mode-switch { margin-top: 6px; }
 button, input { font: inherit; }
 .hidden { display: none !important; }
 
