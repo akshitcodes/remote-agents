@@ -240,8 +240,8 @@ export function tailscalePreflight() {
   };
 }
 
-export function providerPreflight(cfg = readConfig()) {
-  return detectProviders({ cfg });
+export function providerPreflight(cfg = readConfig(), { probe = true } = {}) {
+  return detectProviders({ cfg, probe });
 }
 
 function printProviderPreflight(result) {
@@ -855,7 +855,12 @@ async function serve(args) {
   // process owns reachability checks, Funnel/Serve changes, and QR output; this
   // avoids two processes racing to configure transport during first install.
   if (args.service) {
-    await startLocalBridge(cfg);
+    // Availability must be stable across unattended restarts. Authentication
+    // and model probes are point-in-time network/process observations: a
+    // transient `grok models` failure (or an account being switched) must not
+    // remove an installed provider until the next restart. The actual session
+    // attempt remains authoritative and reports a useful sign-in error.
+    await startLocalBridge(cfg, providerPreflight(cfg, { probe: false }));
     return;
   }
 

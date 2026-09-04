@@ -379,6 +379,20 @@ test("a Claude-only machine marks only Claude usable", (t) => {
   ]);
 });
 
+test("supervised restart keeps every installed provider selectable without an auth probe", (t) => {
+  const grok = fakeCommand(t, `printf '%s\n' 'Not logged in. Run grok login.'; exit 1`, "grok");
+  confineProviderSearch(t, [join(grok, "..")]);
+
+  const interactive = providerPreflight({ codexBinary: "/definitely/missing/codex" });
+  assert.equal(interactive.rows.find((row) => row.name === "grok").usable, false);
+
+  const supervised = providerPreflight({ codexBinary: "/definitely/missing/codex" }, { probe: false });
+  const row = supervised.rows.find((candidate) => candidate.name === "grok");
+  assert.equal(row.installed, true);
+  assert.notEqual(row.state, "signed_out");
+  assert.equal(row.usable, true);
+});
+
 test("origin-change refusal explains the phone impact and explicit replacement path", () => {
   const message = originChangeMessage("https://old.example.ts.net", "https://new.example.ts.net");
   assert.match(message, /public web address changed/);
@@ -434,6 +448,7 @@ test("the supervised service starts only the local bridge and cannot race setup 
   const transportChoice = source.indexOf("await chooseTransport", serveStart);
 
   assert.ok(serviceBranch > serveStart && serviceBranch < transportChoice);
+  assert.match(source.slice(serviceBranch, transportChoice), /providerPreflight\(cfg, \{ probe: false \}\)/);
   assert.match(source, /<string>serve<\/string><string>--service<\/string>/);
   assert.match(source, /ExecStart=\$\{stableNodePath\(\)\} \$\{CLI_PATH\} serve --service/);
   assert.match(source, /bridgeAlreadyRunning[\s\S]*Keeping it alive so active agent turns are not interrupted/);
