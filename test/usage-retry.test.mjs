@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { isUsageLimitError, usageCapacityKey, usageRetryTrigger, userProgressFromThread, userProgressThroughTurn, UsageRetryPolicyStore, UsageRetryRunner, UsageRetryStore, usageAvailability } from "../usage-retry.mjs";
+import { isUsageLimitError, latestUnresolvedUsageStop, usageCapacityKey, usageRetryTrigger, userProgressFromThread, userProgressThroughTurn, UsageRetryPolicyStore, UsageRetryRunner, UsageRetryStore, usageAvailability } from "../usage-retry.mjs";
 import { UsageStateStore } from "../usage-state.mjs";
 
 function fixture(t, name = "retries.json") {
@@ -39,6 +39,35 @@ test("a manual usage resume is anchored to the turn that actually hit the limit"
   assert.deepEqual(userProgressThroughTurn(thread, "codex:turn-limit"), { userCount: 2, lastUserId: "user-2" });
   assert.equal(userProgressFromThread(thread).userCount, 3);
   assert.equal(userProgressThroughTurn(thread, "codex:missing"), null);
+});
+
+test("latest usage stop is provider-neutral and stale stops are not resumable", () => {
+  const claude = { thread: { turns: [{ items: [
+    { type: "userMessage", content: [{ type: "text", text: "work" }] },
+    { type: "turnError", terminalId: "claude:error-record-1", message: "You've hit your monthly spend limit" },
+  ] }] } };
+  assert.deepEqual(latestUnresolvedUsageStop(claude, "claude"), {
+    provider: "claude",
+    triggerId: "claude:error-record-1",
+    terminalId: "error-record-1",
+    progressGuard: { userCount: 1, lastUserId: null },
+  });
+
+  claude.thread.turns.push({ items: [{ type: "userMessage", content: [{ type: "text", text: "continued manually" }] }] });
+  assert.equal(latestUnresolvedUsageStop(claude, "claude"), null);
+});
+
+test("latest Codex usage stop preserves native turn identity", () => {
+  const codex = { thread: { turns: [{ id: "turn-limit", items: [
+    { type: "userMessage", id: "user-1" },
+    { type: "turnError", terminalId: "codex:turn-limit", code: "usage_limit_exceeded", message: "limit" },
+  ] }] } };
+  assert.deepEqual(latestUnresolvedUsageStop(codex, "codex"), {
+    provider: "codex",
+    triggerId: "codex:turn-limit",
+    terminalId: "turn-limit",
+    progressGuard: { userCount: 1, lastUserId: "user-1" },
+  });
 });
 
 test("capacity requires a fresh provider check and every measured window to have room", () => {

@@ -29,7 +29,7 @@ import { MAX_STARS, ThreadStars } from "./thread-stars.mjs";
 import { ThreadSubscriptions } from "./thread-subscriptions.mjs";
 import { pruneAttachments, readAttachment, resolveAttachmentIds, storeAttachment } from "./attachments.mjs";
 import { UsageStateStore } from "./usage-state.mjs";
-import { isUsageLimitError, usageRetryTrigger, userProgressFromThread, userProgressThroughTurn, UsageRetryPolicyStore, UsageRetryRunner, UsageRetryStore } from "./usage-retry.mjs";
+import { isUsageLimitError, latestUnresolvedUsageStop, usageRetryTrigger, userProgressFromThread, UsageRetryPolicyStore, UsageRetryRunner, UsageRetryStore } from "./usage-retry.mjs";
 import { captureReplyStart, notificationBody, notificationTitle } from "./notification-content.mjs";
 import { localBridgeProof, localControlProofMatches, validLocalProofNonce } from "./local-proof.mjs";
 import { TerminalRunner } from "./terminal-runner.mjs";
@@ -1112,7 +1112,7 @@ export function confirmCanonicalNonDelivery(reconciliation, baseline, runtime) {
 
 const autoQueueUsageLocks = new Map();
 
-async function autoQueueUsageResumeInner({ provider: providerName, threadId, triggerId, terminalId = null }) {
+async function autoQueueUsageResumeInner({ provider: providerName, threadId, triggerId, terminalId = null, progressGuard: discoveredProgress = null }) {
   if (!usageRetryPolicies.get(providerName, threadId).enabled) { return null; }
   const prior = terminalId ? usageRetryStore.findByDispatchedTurn(providerName, threadId, terminalId) : null;
   if (prior) {
@@ -1143,9 +1143,16 @@ async function autoQueueUsageResumeInner({ provider: providerName, threadId, tri
   if (usageRetryStore.list({ provider: providerName, threadId }).some((entry) => entry.triggerId === triggerId)) { return null; }
   const provider = pickProvider(providerName);
   if (!provider) { return null; }
-  let progressGuard;
+  let progressGuard = discoveredProgress;
   try {
-    progressGuard = await threadUserProgress(provider, threadId);
+    const currentProgress = await threadUserProgress(provider, threadId);
+    if (progressGuard) {
+      const unchanged = currentProgress.userCount === progressGuard.userCount
+        && (!progressGuard.lastUserId || !currentProgress.lastUserId || currentProgress.lastUserId === progressGuard.lastUserId);
+      if (!unchanged) { return null; }
+    } else {
+      progressGuard = currentProgress;
+    }
   } catch (error) {
     const failed = createUsageRetry(provider, { threadId, text: "Continue." }, {
       triggerId,
@@ -1195,6 +1202,21 @@ async function autoQueueUsageResumeInner({ provider: providerName, threadId, tri
   publishUsageRetry(entry);
   scheduleUsageRetryCheck(entry.id);
   return entry;
+}
+
+async function latestUsageRetryTrigger(providerName, threadId) {
+  const provider = pickProvider(providerName);
+  if (!provider || !threadId) { return null; }
+  const full = await provider.readThread(threadId);
+  const stop = latestUnresolvedUsageStop(full, providerName);
+  return stop ? { ...stop, threadId } : null;
+}
+
+async function armLatestUsageResume(providerName, threadId) {
+  const existing = usageRetryStore.list({ provider: providerName, threadId, activeOnly: true })[0];
+  if (existing) { return existing; }
+  const trigger = await latestUsageRetryTrigger(providerName, threadId);
+  return trigger ? autoQueueUsageResume(trigger) : null;
 }
 
 async function autoQueueUsageResume(trigger) {
@@ -2430,10 +2452,12 @@ const routes = {
     let progressGuard;
     if (body.terminalId) {
       const full = await provider.readThread(body.threadId);
-      progressGuard = userProgressThroughTurn(full, body.terminalId);
-      if (!progressGuard) {
+      const stop = latestUnresolvedUsageStop(full, provider.name);
+      const expected = String(body.terminalId).replace(new RegExp(`^${provider.name}:`), "");
+      if (!stop || stop.terminalId !== expected) {
         return json(res, 409, { error: "This usage stop is no longer present in the provider transcript", code: "usage_stop_not_found" });
       }
+      progressGuard = stop.progressGuard;
       const current = userProgressFromThread(full);
       const runtime = await resolveProviderRuntime(provider, body.threadId, threadRuntime(provider, body.threadId));
       if (runtime.running || current.userCount > progressGuard.userCount) {
@@ -2483,15 +2507,35 @@ const routes = {
     if (body?.scope === "global") {
       usageRetryPolicies.setGlobal(body.enabled);
       queueMicrotask(() => refreshGlobalUsageInterests());
-      return json(res, 200, body.provider && body.threadId
+      const policy = body.provider && body.threadId
         ? usageRetryPolicies.get(body.provider, body.threadId)
-        : { globalEnabled: body.enabled });
+        : { globalEnabled: body.enabled };
+      let retry = null;
+      if (policy.enabled && body.provider && body.threadId) {
+        try {
+          retry = await armLatestUsageResume(body.provider, body.threadId);
+        } catch (error) {
+          return json(res, 200, { ...policy, retry: null, armError: String(error?.message ?? error) });
+        }
+      }
+      return json(res, 200, { ...policy, retry: publicUsageRetry(retry) });
     }
     if (body?.scope !== "thread") { return json(res, 400, { error: "scope must be global or thread", code: "invalid_usage_retry" }); }
     if (!pickProvider(body.provider)) { return json(res, 400, { error: `unknown provider: ${body.provider}`, code: "invalid_usage_retry" }); }
     const policy = usageRetryPolicies.setThread(body.provider, body.threadId, body.enabled);
     refreshInterest();
-    json(res, 200, policy);
+    let retry = null;
+    if (policy.enabled) {
+      try {
+        retry = await armLatestUsageResume(body.provider, body.threadId);
+      } catch (error) {
+        // The policy is durable even if this immediate transcript probe is
+        // temporarily unavailable. The watcher/restart recovery path will try
+        // again, while the response tells the UI why no job is visible yet.
+        return json(res, 200, { ...policy, retry: null, armError: String(error?.message ?? error) });
+      }
+    }
+    json(res, 200, { ...policy, retry: publicUsageRetry(retry) });
   },
 
   "GET /api/terminal/security/status": async (req, res) => {

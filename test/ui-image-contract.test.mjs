@@ -438,7 +438,9 @@ test("usage-limit auto-resume is explicit, durable, cancellable, and defaults of
   assert.match(html, /refreshModelsAfterAccountChange\(provider\)/);
   assert.match(html, /const alreadyResumed = state\.busy && !active/);
   assert.match(html, /queueUsageResume\(error\?\.terminalId \|\| el\.dataset\.terminalId/);
-  assert.match(server, /userProgressThroughTurn\(full, body\.terminalId\)/);
+  assert.match(server, /latestUnresolvedUsageStop\(full, provider\.name\)/);
+  assert.match(server, /retry = await armLatestUsageResume\(body\.provider, body\.threadId\)/);
+  assert.match(html, /if \(saved\.retry\) \{ updateUsageRetry\(saved\.retry\); \}/);
   assert.match(server, /code: "usage_already_resumed"/);
 });
 

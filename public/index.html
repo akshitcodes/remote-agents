@@ -7148,11 +7148,15 @@ async function openTaskSettingsSheet() {
         try {
           const scope = button.dataset.retryScope;
           const enabled = scope === "global" ? !policy.globalEnabled : !policy.enabled;
+          const saved = await api("/api/usage-retry-policy", { scope, enabled, provider, threadId: thread.id });
           state.usageRetryPolicy = {
-            ...await api("/api/usage-retry-policy", { scope, enabled, provider, threadId: thread.id }),
+            ...saved,
             provider,
             threadId: thread.id,
           };
+          if (saved.retry) { updateUsageRetry(saved.retry); }
+          if (saved.armError) { chip("⚠️", `Auto-resume is on; initial check will retry: ${saved.armError}`); }
+          await loadUsageRetryState(thread);
           syncUsageRetryButtons();
           render();
         } catch (error) {

@@ -63,6 +63,45 @@ export function userProgressThroughTurn(full, terminalId) {
   return null;
 }
 
+// Locate the newest usage-limit stop from the provider's normalized transcript
+// and anchor it to the user-message position at which it happened. Provider
+// adapters do not expose identical parent-turn identities: Codex does, while
+// Claude's durable error identity belongs to the JSONL record itself. The
+// transcript position is the shared safety boundary; any later user message
+// proves that this stop has already been resumed.
+export function latestUnresolvedUsageStop(full, provider) {
+  const providerName = clip(provider, 40);
+  if (!providerName) { return null; }
+  let userCount = 0;
+  let lastUserId = null;
+  let candidate = null;
+
+  for (const turn of full?.thread?.turns ?? []) {
+    for (const item of turn?.items ?? []) {
+      if (item?.type === "userMessage") {
+        userCount += 1;
+        lastUserId = item.id ? String(item.id).slice(0, 300) : null;
+        continue;
+      }
+      if (item?.type !== "turnError" || !isUsageLimitError({ code: item.code, message: item.message })) { continue; }
+      const rawTerminalId = clip(item.terminalId, 300) ?? clip(turn?.id, 300);
+      if (!rawTerminalId) { continue; }
+      const prefix = `${providerName}:`;
+      const terminalId = rawTerminalId.startsWith(prefix) ? rawTerminalId.slice(prefix.length) : rawTerminalId;
+      candidate = {
+        provider: providerName,
+        triggerId: rawTerminalId.startsWith(prefix) ? rawTerminalId : `${providerName}:${rawTerminalId}`,
+        terminalId,
+        progressGuard: { userCount, lastUserId },
+      };
+    }
+  }
+
+  if (!candidate || candidate.progressGuard.userCount !== userCount) { return null; }
+  if (candidate.progressGuard.lastUserId && lastUserId && candidate.progressGuard.lastUserId !== lastUserId) { return null; }
+  return candidate;
+}
+
 function progressRelation(guard, current) {
   const before = Number(guard?.userCount);
   const after = Number(current?.userCount);
