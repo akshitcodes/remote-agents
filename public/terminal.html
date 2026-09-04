@@ -37,6 +37,10 @@
           <span>Enrollment code</span>
           <input id="enrollmentCode" inputmode="numeric" autocomplete="one-time-code" placeholder="1234-5678">
         </label>
+        <button id="scanQr" class="scan-qr secondary hidden" type="button">
+          <span class="scan-icon" aria-hidden="true"></span>
+          Scan enrollment QR
+        </button>
         <label id="labelField" class="field hidden">
           <span>Device name</span>
           <input id="deviceLabel" autocomplete="off" maxlength="80">
@@ -89,6 +93,22 @@
       </div>
       <p id="deviceError" class="error hidden"></p>
     </form>
+  </dialog>
+
+  <dialog id="scanDialog" class="scan-dialog">
+    <div class="scan-card">
+      <div class="device-title-row">
+        <h2>Scan enrollment QR</h2>
+        <button id="closeScanner" class="dialog-close" type="button" aria-label="Close scanner">×</button>
+      </div>
+      <p>Point your camera at the QR shown on a trusted device.</p>
+      <div class="camera-frame">
+        <video id="scannerVideo" muted playsinline aria-label="QR scanner camera"></video>
+        <div class="camera-target" aria-hidden="true"></div>
+      </div>
+      <p id="scannerStatus" class="scanner-status">Starting camera…</p>
+      <button id="scannerCancel" class="secondary" type="button">Enter code instead</button>
+    </div>
   </dialog>
 </body>
 </html>

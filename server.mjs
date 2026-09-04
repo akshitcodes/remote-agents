@@ -7,6 +7,7 @@
 import { execFileSync } from "node:child_process";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
+import { createRequire } from "node:module";
 import { lookup } from "node:dns/promises";
 import { readFileSync, existsSync, statSync, realpathSync } from "node:fs";
 import { basename, dirname, extname, join, resolve, sep, isAbsolute } from "node:path";
@@ -47,6 +48,8 @@ import {
 } from "./thread-settings.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const require = createRequire(import.meta.url);
+const JSQR_BROWSER_FILE = require.resolve("jsqr/dist/jsQR.js");
 
 // ---------- config (set by startServer) ----------
 
@@ -3154,7 +3157,10 @@ export async function handleRequest(req, res) {
   // Vendored static assets. basename() prevents traversal; an explicit MIME
   // map keeps the terminal stylesheet from being served as executable script.
   if (req.method === "GET" && url.pathname.startsWith("/vendor/")) {
-    const file = join(__dirname, "public", "vendor", basename(url.pathname));
+    const assetName = basename(url.pathname);
+    const file = assetName === "jsqr.js"
+      ? JSQR_BROWSER_FILE
+      : join(__dirname, "public", "vendor", assetName);
 
     if (existsSync(file)) {
       const body = readFileSync(file);

@@ -51,6 +51,7 @@
     "@inquirer/select": "^5.2.2",
     "@simplewebauthn/server": "13.3.3",
     "@zed-industries/agent-client-protocol": "^0.4.5",
+    "jsqr": "^1.4.0",
     "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0",
     "web-push": "^3.6.7",

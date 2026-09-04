@@ -16,6 +16,9 @@ let inputSequence = 0;
 let fallbackJob = null;
 let terminalBackendAvailable = false;
 let terminalMode = null;
+let scannerStream = null;
+let scannerFrame = 0;
+let qrDecoderPromise = null;
 const TERMINAL_MODE_KEY = "remote-agents-terminal-mode-v1";
 
 function setError(message = "") {
@@ -32,12 +35,96 @@ function gate({ title, copy, action, disabled = false, code = false, label = fal
   $("gateTitle").textContent = title;
   $("gateCopy").textContent = copy;
   $("codeField").classList.toggle("hidden", !code);
+  $("scanQr").classList.toggle("hidden", !code);
   $("labelField").classList.toggle("hidden", !label);
   $("gateAction").textContent = action;
   $("gateAction").disabled = disabled;
   $("gateAction").onclick = onclick;
   $("connection").textContent = "Locked";
   $("connection").classList.remove("live");
+}
+
+function loadQrDecoder() {
+  if (globalThis.jsQR) { return Promise.resolve(globalThis.jsQR); }
+  if (qrDecoderPromise) { return qrDecoderPromise; }
+  qrDecoderPromise = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "/vendor/jsqr.js";
+    script.onload = () => globalThis.jsQR ? resolve(globalThis.jsQR) : reject(new Error("QR scanner failed to load"));
+    script.onerror = () => reject(new Error("QR scanner failed to load"));
+    document.head.append(script);
+  });
+  return qrDecoderPromise;
+}
+
+function stopScanner() {
+  cancelAnimationFrame(scannerFrame);
+  scannerFrame = 0;
+  scannerStream?.getTracks().forEach((track) => track.stop());
+  scannerStream = null;
+  $("scannerVideo").srcObject = null;
+  if ($("scanDialog").open) { $("scanDialog").close(); }
+}
+
+function acceptEnrollmentQr(value) {
+  let target;
+  try { target = new URL(value); } catch { return false; }
+  if (target.origin !== location.origin) { return false; }
+  const isHandoff = target.pathname === "/api/terminal/handoff" && !!target.searchParams.get("handoff");
+  const enrollment = target.pathname === "/terminal" && new URLSearchParams(target.hash.slice(1)).get("enroll");
+  if (!isHandoff && !enrollment) { return false; }
+  stopScanner();
+  location.assign(target.toString());
+  return true;
+}
+
+async function scanEnrollmentQr() {
+  setError();
+  if (!navigator.mediaDevices?.getUserMedia) {
+    return setError("Camera scanning is unavailable in this browser. Enter the enrollment code instead.");
+  }
+  $("scannerStatus").textContent = "Starting camera…";
+  $("scanDialog").showModal();
+  try {
+    const decoder = await loadQrDecoder();
+    scannerStream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: { facingMode: { ideal: "environment" } },
+    });
+    const video = $("scannerVideo");
+    video.srcObject = scannerStream;
+    await video.play();
+    $("scannerStatus").textContent = "Looking for this bridge’s enrollment QR…";
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    let lastRead = 0;
+    const readFrame = (now) => {
+      if (!scannerStream || !$("scanDialog").open) { return; }
+      if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && now - lastRead >= 120) {
+        lastRead = now;
+        const width = video.videoWidth;
+        const height = video.videoHeight;
+        if (width && height) {
+          canvas.width = width;
+          canvas.height = height;
+          context.drawImage(video, 0, 0, width, height);
+          const pixels = context.getImageData(0, 0, width, height);
+          const result = decoder(pixels.data, width, height, { inversionAttempts: "dontInvert" });
+          if (result?.data) {
+            if (acceptEnrollmentQr(result.data)) { return; }
+            $("scannerStatus").textContent = "That is not a Remote Agents enrollment QR.";
+          }
+        }
+      }
+      scannerFrame = requestAnimationFrame(readFrame);
+    };
+    scannerFrame = requestAnimationFrame(readFrame);
+  } catch (error) {
+    stopScanner();
+    setError(error.name === "NotAllowedError"
+      ? "Camera access was denied. Allow camera access or enter the enrollment code instead."
+      : `${error.message}. Enter the enrollment code instead.`);
+  }
 }
 
 function preferredTerminalMode() {
@@ -342,6 +429,10 @@ async function initialize() {
 }
 
 $("commandForm").addEventListener("submit", runFallback);
+$("scanQr").addEventListener("click", scanEnrollmentQr);
+$("closeScanner").addEventListener("click", stopScanner);
+$("scannerCancel").addEventListener("click", stopScanner);
+$("scanDialog").addEventListener("cancel", (event) => { event.preventDefault(); stopScanner(); });
 $("addDevice").addEventListener("click", addTrustedDevice);
 $("copyDeviceLink").addEventListener("click", async () => {
   await navigator.clipboard.writeText($("deviceLink").value);
@@ -361,6 +452,6 @@ $("modeSwitch").addEventListener("click", (event) => {
   });
 });
 $("reconnect").addEventListener("click", () => connectTerminal().catch((error) => { $("terminalStatus").textContent = error.message; }));
-window.addEventListener("beforeunload", () => { try { socket?.close(1000, "page closed"); } catch {} });
+window.addEventListener("beforeunload", () => { stopScanner(); try { socket?.close(1000, "page closed"); } catch {} });
 
 initialize();

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import jsQR from "jsqr";
+import QRCode from "qrcode";
 
 const html = readFileSync(new URL("../public/terminal.html", import.meta.url), "utf8");
 const js = readFileSync(new URL("../public/terminal.js", import.meta.url), "utf8");
@@ -26,4 +28,39 @@ test("terminal enrollment routes new devices through the canonical origin", () =
   assert.doesNotMatch(js, /!status\.access\.enabled \|\| \(!status\.access\.enrolled/);
   assert.match(server, /"POST \/api\/terminal\/device-handoff"/);
   assert.match(server, /terminalSecurity\.requireUnlock/);
+});
+
+test("an untrusted mobile device can scan a constrained one-use enrollment QR", () => {
+  assert.match(html, /id="scanQr"/);
+  assert.match(html, /id="scannerVideo"[^>]*playsinline/);
+  assert.match(js, /navigator\.mediaDevices\.getUserMedia/);
+  assert.match(js, /script\.src = "\/vendor\/jsqr\.js"/);
+  assert.match(js, /target\.origin !== location\.origin/);
+  assert.match(js, /target\.pathname === "\/api\/terminal\/handoff"/);
+  assert.match(js, /target\.searchParams\.get\("handoff"\)/);
+  assert.match(js, /scannerStream\?\.getTracks\(\)\.forEach\(\(track\) => track\.stop\(\)\)/);
+  assert.match(server, /assetName === "jsqr\.js"[\s\S]*?JSQR_BROWSER_FILE/);
+});
+
+test("the mobile decoder reads the bridge's generated enrollment URL", () => {
+  const url = "https://agents.example.test/api/terminal/handoff?handoff=one-use-secret";
+  const qr = QRCode.create(url, { errorCorrectionLevel: "M" });
+  const quiet = 4;
+  const scale = 5;
+  const width = (qr.modules.size + quiet * 2) * scale;
+  const pixels = new Uint8ClampedArray(width * width * 4).fill(255);
+  for (let y = 0; y < qr.modules.size; y += 1) {
+    for (let x = 0; x < qr.modules.size; x += 1) {
+      if (!qr.modules.get(x, y)) { continue; }
+      for (let py = 0; py < scale; py += 1) {
+        for (let px = 0; px < scale; px += 1) {
+          const offset = (((y + quiet) * scale + py) * width + ((x + quiet) * scale + px)) * 4;
+          pixels[offset] = 0;
+          pixels[offset + 1] = 0;
+          pixels[offset + 2] = 0;
+        }
+      }
+    }
+  }
+  assert.equal(jsQR(pixels, width, width)?.data, url);
 });
