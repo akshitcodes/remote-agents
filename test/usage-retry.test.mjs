@@ -70,6 +70,20 @@ test("latest Codex usage stop preserves native turn identity", () => {
   });
 });
 
+test("a newer provider turn resolves an older usage stop without a new user message", () => {
+  const codex = { thread: { turns: [
+    { id: "turn-limit", items: [
+      { type: "userMessage", id: "user-1" },
+      { type: "turnError", terminalId: "codex:turn-limit", code: "usage_limit_exceeded", message: "limit" },
+    ] },
+    // Native Codex resume starts an empty-input turn, so userCount does not
+    // advance even though the old usage stop has already been consumed.
+    { id: "turn-resumed", items: [{ type: "agentMessage", text: "working" }] },
+  ] } };
+
+  assert.equal(latestUnresolvedUsageStop(codex, "codex"), null);
+});
+
 test("capacity requires a fresh provider check and every measured window to have room", () => {
   const futureReset = Math.floor(Date.now() / 1000) + 3600;
   assert.equal(usageAvailability({ rateLimits: { primary: { usedPercent: 20 } } }).available, false);
@@ -441,6 +455,22 @@ test("runner rechecks the active account, waits for idle, and sends exactly once
   assert.equal((await runner.check("resume-1")).state, "accepted");
   assert.equal(sends, 1);
   assert.equal(store.get("resume-1").account.email, "switched@example.com");
+});
+
+test("an obsolete native usage turn is superseded instead of polled forever", async (t) => {
+  const store = new UsageRetryStore({ file: fixture(t) });
+  create(store, { progressGuard: { userCount: 1, lastUserId: "before" } });
+  const runner = new UsageRetryRunner({
+    store,
+    readUsage: async () => ({ _capacityFresh: true, rateLimits: { primary: { usedPercent: 1 } } }),
+    readProgress: async () => ({ userCount: 1, lastUserId: "before" }),
+    readRuntime: async () => ({ running: false }),
+    send: async () => { throw Object.assign(new Error("expected turn is no longer resumable"), { code: "no_usage_limited_turn", status: 409 }); },
+  });
+
+  assert.equal((await runner.check("resume-1")).state, "superseded");
+  assert.equal(store.get("resume-1").nextCheckAt, null);
+  assert.equal((await runner.check("resume-1")).state, "superseded");
 });
 
 test("a bridge restart during dispatch becomes durable uncertainty and never sends", async (t) => {

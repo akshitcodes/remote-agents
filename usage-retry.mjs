@@ -72,11 +72,13 @@ export function userProgressThroughTurn(full, terminalId) {
 export function latestUnresolvedUsageStop(full, provider) {
   const providerName = clip(provider, 40);
   if (!providerName) { return null; }
+  const turns = full?.thread?.turns ?? [];
   let userCount = 0;
   let lastUserId = null;
   let candidate = null;
+  let candidateTurnIndex = -1;
 
-  for (const turn of full?.thread?.turns ?? []) {
+  for (const [turnIndex, turn] of turns.entries()) {
     for (const item of turn?.items ?? []) {
       if (item?.type === "userMessage") {
         userCount += 1;
@@ -94,11 +96,18 @@ export function latestUnresolvedUsageStop(full, provider) {
         terminalId,
         progressGuard: { userCount, lastUserId },
       };
+      candidateTurnIndex = turnIndex;
     }
   }
 
   if (!candidate || candidate.progressGuard.userCount !== userCount) { return null; }
   if (candidate.progressGuard.lastUserId && lastUserId && candidate.progressGuard.lastUserId !== lastUserId) { return null; }
+  // Native provider resume can start a new turn without appending a user
+  // message (Codex uses turn/start with an empty input). User-message progress
+  // alone therefore cannot prove that an old usage stop is still unresolved.
+  // Any later provider turn is authoritative evidence that the stopped turn
+  // was already resumed, even if that newer turn later fails for usage too.
+  if (candidateTurnIndex < turns.length - 1) { return null; }
   return candidate;
 }
 
@@ -716,6 +725,18 @@ export class UsageRetryRunner {
         // that newer work ends. This also closes the race where turn/started
         // arrived while this entry was briefly `dispatching`.
         if (error?.code === "turn_in_progress") {
+          return this.publish(this.store.update(id, {
+            state: "superseded",
+            nextCheckAt: null,
+            error: null,
+          }));
+        }
+        // Codex performs this check after loading the canonical thread but
+        // before turn/start. A mismatch means the exact failed turn represented
+        // by this retry is no longer the latest resumable usage stop. Retrying
+        // the same turn id can never succeed and must not remain as a queued
+        // watcher.
+        if (error?.code === "no_usage_limited_turn") {
           return this.publish(this.store.update(id, {
             state: "superseded",
             nextCheckAt: null,
