@@ -53,7 +53,9 @@ test("the anchored menu opens from the click point, flips at the edges, and can 
   // #chatView is display:none while the list is showing, so the popover cannot
   // live inside the composer or it would never paint over a row.
   assert.doesNotMatch(html, /<div id="composerWrap">\s*<div class="control-popover"/);
-  assert.match(html, /<div class="control-popover" id="controlPopover"[^>]*><\/div>\s*<div class="sheet" id="sheet"/);
+  // What matters is that it is a body-level sibling of the other overlays, not
+  // which one happens to follow it.
+  assert.match(html, /<div class="control-popover" id="controlPopover"[^>]*><\/div>\s*<div id="settingsWindow"/);
   // Pinned to a viewport point, so scrolling the rows away has to dismiss it.
   assert.match(html, /addEventListener\("scroll", \(\) => \{\s*if \(controlPopoverPoint\) \{ closeControlPopover\(\); \}/);
 });

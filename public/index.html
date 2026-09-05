@@ -121,9 +121,39 @@
   .sidebar-foot button { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 40px; border: 0; border-radius: 9px; padding: 8px 9px; background: transparent; color: var(--fg-dim); font: inherit; font-size: 13.5px; font-weight: 600; text-align: left; cursor: pointer; }
   .sidebar-foot button:hover, .sidebar-foot button:focus-visible { background: var(--bg3); color: var(--fg); outline: none; }
   .sidebar-foot svg { width: 17px; height: 17px; flex: 0 0 17px; stroke: currentColor; fill: none; stroke-width: 2; }
-  .settings-nav { margin: 10px 0 4px; }
-  .settings-section { display: none; }
-  .settings-section.on { display: block; }
+  /* Full-screen settings: a two-pane window, not a sheet. Above .onboard's 80
+     so nothing can paint over it, and its own scroll container per pane. */
+  #settingsWindow { position: fixed; inset: 0; z-index: 90; display: flex; background: var(--bg); }
+  #settingsWindow[hidden] { display: none; }
+  .settings-side { display: flex; flex-direction: column; width: 260px; flex: 0 0 260px; padding: calc(env(safe-area-inset-top) + 14px) 10px 14px; border-right: 1px solid var(--border); background: var(--bg2); overflow-y: auto; overscroll-behavior: contain; }
+  .settings-back { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 40px; margin-bottom: 14px; border: 0; border-radius: 9px; padding: 8px 9px; background: transparent; color: var(--fg); font: inherit; font-size: 14px; font-weight: 600; text-align: left; cursor: pointer; }
+  .settings-back:hover, .settings-back:focus-visible { background: var(--bg3); outline: none; }
+  .settings-back svg { width: 17px; height: 17px; flex: 0 0 17px; stroke: currentColor; fill: none; stroke-width: 2; }
+  .settings-group { margin: 12px 0 4px; padding: 0 9px; color: var(--fg-faint); font-size: 11px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; }
+  .settings-tab { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 38px; margin-bottom: 2px; border: 0; border-radius: 9px; padding: 7px 9px; background: transparent; color: var(--fg-dim); font: inherit; font-size: 13.5px; text-align: left; cursor: pointer; }
+  .settings-tab:hover, .settings-tab:focus-visible { background: var(--bg3); color: var(--fg); outline: none; }
+  .settings-tab[aria-selected="true"] { background: var(--bg3); color: var(--fg); font-weight: 600; }
+  .settings-tab .settings-tab-count { margin-left: auto; color: var(--fg-faint); font-size: 11px; }
+  .settings-main { flex: 1; min-width: 0; overflow-y: auto; overscroll-behavior: contain; padding: calc(env(safe-area-inset-top) + 26px) clamp(18px, 4vw, 48px) calc(env(safe-area-inset-bottom) + 40px); }
+  .settings-body { width: min(100%, 720px); }
+  .settings-body h1 { margin-bottom: 22px; font-size: 26px; font-weight: 600; }
+  .settings-card { margin-bottom: 22px; border: 1px solid var(--border); border-radius: 14px; background: var(--bg2); padding: 2px 14px; }
+  .settings-card .toggle-row:last-child { border-bottom: 0; }
+  .settings-card-label { margin: 0 0 8px 2px; color: var(--fg-dim); font-size: 13px; font-weight: 600; }
+  .settings-empty { padding: 18px 2px; color: var(--fg-faint); font-size: 13px; }
+  .hidden-row { display: flex; align-items: center; gap: 10px; padding: 11px 0; border-bottom: 1px solid var(--border); }
+  .hidden-row:last-child { border-bottom: 0; }
+  .hidden-copy { flex: 1; min-width: 0; }
+  .hidden-title { font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hidden-meta { margin-top: 2px; color: var(--fg-faint); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hidden-row button { flex-shrink: 0; border: 1px solid var(--border); border-radius: 8px; padding: 7px 11px; background: var(--bg3); color: var(--accent2); font: inherit; font-size: 12px; cursor: pointer; }
+  .hidden-row button:disabled { opacity: .5; cursor: default; }
+  @media (max-width: 720px) {
+    .settings-side { width: 100%; flex: 1 1 auto; }
+    .settings-main { display: none; }
+    #settingsWindow.on-detail .settings-side { display: none; }
+    #settingsWindow.on-detail .settings-main { display: block; }
+  }
   #agentToggle { display: flex; align-items: center; gap: 7px; margin-top: 9px; color: var(--fg-dim); font-size: 12px; cursor: pointer; user-select: none; }
   #agentToggle input { width: 15px; height: 15px; flex: 0 0 15px; margin: 0; accent-color: var(--accent); cursor: pointer; }
   .chip.origin-badge { color: var(--purple); background: #bc8cff14; border: 1px solid #bc8cff3d; }
@@ -769,6 +799,10 @@
 <!-- Anchored menus have to outlive #chatView, which is display:none while the
      session list is showing, so this cannot live inside the composer. -->
 <div class="control-popover" id="controlPopover" role="dialog" aria-modal="false" aria-hidden="true"></div>
+<div id="settingsWindow" role="dialog" aria-modal="true" aria-labelledby="settingsHeading" hidden>
+  <nav class="settings-side" id="settingsSide" aria-label="Settings sections"></nav>
+  <div class="settings-main" id="settingsMain"><div class="settings-body" id="settingsBody"></div></div>
+</div>
 <div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="sheetTitle" inert><div class="grip"></div><div id="sheetBody"></div></div>
 
 <script src="/vendor/marked.min.js"></script>
@@ -1248,6 +1282,7 @@ const state = {
   projectGroups: [],
   collapsedProjects: new Set(),
   threads: [], nextCursor: null,
+  hiddenThreadKeys: new Set(), // "provider:threadId" hidden by hand, mirrored from the bridge
   showAgentSessions: false,  // agent-made sessions are hidden by default
   hiddenAgentCount: 0,
   starred: new Map(),        // "provider:threadId" -> star, mirrored from the bridge
@@ -7298,6 +7333,16 @@ function setStarState(payload) {
   state.maxStars = Number(payload?.max) || state.maxStars;
 }
 
+async function loadHiddenThreads() {
+  try {
+    const res = await api("/api/thread/hidden");
+    settingsState.hidden = res.hidden ?? [];
+    state.hiddenThreadKeys = new Set(settingsState.hidden.map((row) => threadRuleKey(row.provider, row.threadId)));
+  } catch {
+    // The list still renders; the bridge is the authority on what is filtered.
+  }
+}
+
 async function loadThreadStars() {
   try {
     setStarState(await api("/api/thread/stars"));
@@ -7374,6 +7419,7 @@ async function setTaskNotification(thread, mode) {
 function openRowMenu(thread, point) {
   const target = notificationTarget(thread);
   const starred = state.starred.has(threadRuleKey(target.provider, target.id));
+  const hidden = state.hiddenThreadKeys.has(threadRuleKey(target.provider, target.id));
   const full = !starred && state.starred.size >= state.maxStars;
   const notifyMode = state.notificationRules.get(threadRuleKey(target.provider, target.id));
 
@@ -7389,6 +7435,10 @@ function openRowMenu(thread, point) {
       <span class="menu-label">Task notifications</span>
       <span class="menu-value">${notifyMode ? esc(notifyMode) : "Off"}</span>
     </button>
+    <button type="button" class="control-menu-row" id="rowHideAction">
+      <span class="menu-check" aria-hidden="true">${hidden ? "\u25c9" : "\u25cb"}</span>
+      <span class="menu-label">${hidden ? "Unhide session" : "Hide session"}</span>
+    </button>
     <button type="button" class="control-menu-row" id="rowOpenAction">
       <span class="menu-check" aria-hidden="true"></span>
       <span class="menu-label">Open session</span>
@@ -7396,6 +7446,7 @@ function openRowMenu(thread, point) {
     </button>`, "session", { point });
 
   $("rowStarAction").onclick = () => { closeControlPopover(); setThreadStar(target, !starred); };
+  $("rowHideAction").onclick = () => { closeControlPopover(); setThreadHidden(target, !hidden); };
   // openSheet closes this popover on its own; closing first keeps the order obvious.
   $("rowNotifyAction").onclick = () => { closeControlPopover(); openTaskNotificationSheet(thread); };
   $("rowOpenAction").onclick = () => { closeControlPopover(); openThread(thread); };
@@ -7440,91 +7491,242 @@ function setShowAgentSessions(checked) {
   loadThreads(false);
 }
 
-async function openAppSettingsSheet(section = "general") {
-  openSheet('<h2>Settings</h2><div class="hint">Loading…</div>');
+// A full-screen window rather than a sheet: settings are a place you go, not a
+// thing that slides over what you were doing. Two panes on desktop; on narrow
+// screens the section list is the first screen and picking one swaps to it.
+const SETTINGS_SECTIONS = [
+  { key: "general", group: "App", title: "General" },
+  { key: "sessions", group: "App", title: "Sessions" },
+  { key: "usage", group: "App", title: "Usage & limits" },
+  { key: "hidden", group: "App", title: "Hidden sessions" },
+  { key: "session", group: "Current session", title: "This session", needsThread: true },
+];
 
-  // The only app setting that lives on the bridge rather than in this browser.
-  let globalResume = null;
-  try { globalResume = (await api("/api/usage-retry-policy"))?.globalEnabled === true; } catch {}
-  if (!$("sheet").classList.contains("show")) { return; }
+const settingsState = { section: "general", globalResume: null, hidden: null, loading: true };
 
-  let current = section;
+function setShowAgentSessions(checked) {
+  if (state.showAgentSessions === !!checked) { return; }
+  state.showAgentSessions = !!checked;
+  persistPrefs();
+  loadThreads(false);
+}
 
-  const render = () => {
-    const thread = state.active;
-    const sections = [
-      ["general", "General"],
-      ["usage", "Usage & limits"],
-      ...(thread ? [["session", "This session"]] : []),
-    ];
-
-    $("sheetBody").innerHTML = `<h2 id="sheetTitle">Settings</h2>
-      <div class="seg settings-nav" role="tablist" aria-label="Settings sections">
-        ${sections.map(([key, label]) => `<button type="button" role="tab" data-settings-section="${key}" aria-selected="${key === current}" class="${key === current ? "on" : ""}">${label}</button>`).join("")}
-      </div>
-
-      <div class="settings-section ${current === "general" ? "on" : ""}">
-        <div class="seclabel">Sessions</div>
-        <div class="toggle-row">
-          <div class="toggle-copy"><div class="toggle-title">Show agent-made sessions</div><div class="toggle-desc">Subagents, headless codex exec runs, and other machine-driven sessions. Hidden from Recent and Projects by default; starred ones always show.</div></div>
-          <button type="button" class="toggle ${state.showAgentSessions ? "on" : ""}" id="settingsAgentToggle" role="switch" aria-checked="${state.showAgentSessions}"></button>
-        </div>
-      </div>
-
-      <div class="settings-section ${current === "usage" ? "on" : ""}">
-        <div class="seclabel">Usage & limits</div>
-        <div class="toggle-row">
-          <div class="toggle-copy"><div class="toggle-title">Auto-resume after usage resets</div><div class="toggle-desc">Global default for Codex, Claude, and Grok chats on this bridge. A chat can still override this in its task settings. New installs start with this off.</div></div>
-          <button type="button" class="toggle ${globalResume ? "on" : ""}" id="settingsResumeToggle" role="switch" aria-checked="${globalResume === true}" ${globalResume === null ? "disabled" : ""}></button>
-        </div>
-        ${globalResume === null ? '<div class="hint">Could not load the bridge setting. Close and reopen to retry.</div>' : ""}
-        <button type="button" class="opt opt-button" id="settingsUsageOpen"><div><div class="on">Usage dashboard</div><div class="od">Account limits for every provider.</div></div></button>
-      </div>
-
-      ${thread ? `<div class="settings-section ${current === "session" ? "on" : ""}">
-        <div class="seclabel">This session</div>
-        <div class="hint" style="margin-bottom:10px">Settings that belong to <b>${esc(thread.name || thread.preview || "this session")}</b>, not the app.</div>
-        <button type="button" class="opt opt-button" id="settingsTaskOpen"><div><div class="on">Task settings</div><div class="od">Codex account for this task and its auto-resume override.</div></div></button>
-        <button type="button" class="opt opt-button" id="settingsNotifyOpen"><div><div class="on">Task notifications</div><div class="od">How this device follows this session.</div></div></button>
-      </div>` : ""}`;
-
-    $("sheetBody").querySelectorAll("[data-settings-section]").forEach((tab) => {
-      tab.onclick = () => { current = tab.dataset.settingsSection; render(); };
+async function setThreadHidden(thread, hidden) {
+  try {
+    const res = await api("/api/thread/hidden", {
+      provider: thread.provider || "codex",
+      threadId: thread.id,
+      hidden,
+      // Kept server-side so the settings list can still name a session that has
+      // aged off every page the list endpoints return.
+      title: thread.name || thread.preview || "",
+      cwd: thread.cwd || "",
     });
+    settingsState.hidden = res.hidden ?? [];
+    state.hiddenThreadKeys = new Set(settingsState.hidden.map((row) => threadRuleKey(row.provider, row.threadId)));
+    await loadThreads(false);
+    if (!$("settingsWindow").hidden) { renderSettings(); }
+  } catch (e) {
+    chip("\u26a0\ufe0f", "Could not update hidden sessions: " + e.message);
+  }
+}
 
-    const agentToggle = $("settingsAgentToggle");
-    agentToggle.onclick = () => {
-      setShowAgentSessions(!state.showAgentSessions);
-      agentToggle.classList.toggle("on", state.showAgentSessions);
-      agentToggle.setAttribute("aria-checked", String(state.showAgentSessions));
+function settingsSections() {
+  return SETTINGS_SECTIONS.filter((section) => !section.needsThread || state.active);
+}
+
+function renderSettingsNav() {
+  const sections = settingsSections();
+  const groups = [];
+
+  for (const section of sections) {
+    const last = groups[groups.length - 1];
+    if (last?.name === section.group) { last.items.push(section); }
+    else { groups.push({ name: section.group, items: [section] }); }
+  }
+
+  $("settingsSide").innerHTML = `
+    <button type="button" class="settings-back" id="settingsBack"><svg viewBox="0 0 24 24"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg>Back to app</button>
+    ${groups.map((group) => `<div class="settings-group">${esc(group.name)}</div>${group.items.map((section) => `
+      <button type="button" class="settings-tab" role="tab" data-settings-section="${section.key}" aria-selected="${section.key === settingsState.section}">
+        <span>${esc(section.title)}</span>
+        ${section.key === "hidden" && settingsState.hidden?.length ? `<span class="settings-tab-count">${settingsState.hidden.length}</span>` : ""}
+      </button>`).join("")}`).join("")}`;
+
+  $("settingsBack").onclick = closeSettingsWindow;
+  $("settingsSide").querySelectorAll("[data-settings-section]").forEach((tab) => {
+    tab.onclick = () => {
+      settingsState.section = tab.dataset.settingsSection;
+      $("settingsWindow").classList.add("on-detail");
+      renderSettings();
+      $("settingsMain").scrollTop = 0;
     };
+  });
+}
 
-    const resumeToggle = $("settingsResumeToggle");
-    resumeToggle.onclick = async () => {
-      resumeToggle.disabled = true;
-      try {
-        const thread = state.active;
-        const saved = await api("/api/usage-retry-policy", {
-          scope: "global",
-          enabled: !globalResume,
-          // With a chat open, the bridge can arm its pending stop immediately.
-          ...(thread ? { provider: thread.provider || state.provider, threadId: thread.id } : {}),
-        });
-        globalResume = saved.globalEnabled === true;
-        if (saved.retry) { updateUsageRetry(saved.retry); }
-        if (saved.armError) { chip("\u26a0\ufe0f", `Auto-resume is on; initial check will retry: ${saved.armError}`); }
-        if (thread) { state.usageRetryPolicy = { ...saved, provider: thread.provider || state.provider, threadId: thread.id }; }
-      } catch (error) {
-        chip("\u26a0\ufe0f", "Could not save auto-resume setting: " + error.message);
-      }
-      render();
+function renderSettingsBody() {
+  const sections = settingsSections();
+  const section = sections.find((candidate) => candidate.key === settingsState.section) ?? sections[0];
+  settingsState.section = section.key;
+  const thread = state.active;
+  let html = `<h1 id="settingsHeading">${esc(section.title)}</h1>`;
+
+  if (section.key === "general") {
+    html += `<div class="settings-card-label">Appearance</div>
+      <div class="settings-card">
+        <div class="toggle-row">
+          <div class="toggle-copy"><div class="toggle-title">Collapse the session sidebar</div><div class="toggle-desc">Start with the desktop sidebar collapsed so the conversation gets the full width.</div></div>
+          <button type="button" class="toggle ${state.sidebarCollapsed ? "on" : ""}" data-setting="sidebar" role="switch" aria-checked="${!!state.sidebarCollapsed}"></button>
+        </div>
+      </div>`;
+  }
+
+  if (section.key === "sessions") {
+    html += `<div class="settings-card-label">Which sessions appear in the list</div>
+      <div class="settings-card">
+        <div class="toggle-row">
+          <div class="toggle-copy"><div class="toggle-title">Show agent-made sessions</div><div class="toggle-desc">Subagents, headless runs, and other machine-driven sessions. Hidden from Recent and Projects by default; starred ones always show.</div></div>
+          <button type="button" class="toggle ${state.showAgentSessions ? "on" : ""}" data-setting="agents" role="switch" aria-checked="${state.showAgentSessions}"></button>
+        </div>
+      </div>
+      <div class="hint">Right-click a session (or long-press on a phone) to hide it by hand. Manual hides always apply, whatever this toggle says.</div>`;
+  }
+
+  if (section.key === "usage") {
+    const resume = settingsState.globalResume;
+    html += `<div class="settings-card-label">Usage limits</div>
+      <div class="settings-card">
+        <div class="toggle-row">
+          <div class="toggle-copy"><div class="toggle-title">Auto-resume after usage resets</div><div class="toggle-desc">Global default for Codex, Claude, and Grok chats on this bridge. A chat can still override this in its own task settings.</div></div>
+          <button type="button" class="toggle ${resume ? "on" : ""}" data-setting="resume" role="switch" aria-checked="${resume === true}" ${resume === null ? "disabled" : ""}></button>
+        </div>
+      </div>
+      ${resume === null ? '<div class="hint">Could not load this setting from the bridge. Reopen settings to retry.</div>' : ""}
+      <button type="button" class="opt opt-button" data-setting="usage-dashboard"><div><div class="on">Usage dashboard</div><div class="od">Account limits for every provider.</div></div></button>`;
+  }
+
+  if (section.key === "hidden") {
+    const rows = settingsState.hidden;
+    html += rows === null
+      ? '<div class="settings-empty">Loading…</div>'
+      : !rows.length
+        ? '<div class="settings-empty">Nothing hidden by hand. Right-click a session in the list — or long-press it on a phone — to hide it.</div>'
+        : `<div class="settings-card-label">${rows.length} session${rows.length === 1 ? "" : "s"} hidden by hand</div>
+          <div class="settings-card">${rows.map((row) => `
+            <div class="hidden-row">
+              <div class="hidden-copy">
+                <div class="hidden-title">${esc(row.title || "(untitled session)")}</div>
+                <div class="hidden-meta">${esc(PROVIDER_LABELS[row.provider] || row.provider)}${row.cwd ? " \u00b7 " + esc(row.cwd) : ""}</div>
+              </div>
+              <button type="button" data-unhide="${esc(row.provider)}" data-unhide-id="${esc(row.threadId)}">Unhide</button>
+            </div>`).join("")}</div>`;
+  }
+
+  if (section.key === "session" && thread) {
+    html += `<div class="hint" style="margin-bottom:12px">Settings that belong to <b>${esc(thread.name || thread.preview || "this session")}</b>, not the app.</div>
+      <button type="button" class="opt opt-button" data-setting="task">
+        <div><div class="on">Task settings</div><div class="od">Codex account for this task and its auto-resume override.</div></div>
+      </button>
+      <button type="button" class="opt opt-button" data-setting="notify">
+        <div><div class="on">Task notifications</div><div class="od">How this device follows this session.</div></div>
+      </button>
+      <button type="button" class="opt opt-button" data-setting="hide-current">
+        <div><div class="on">Hide this session</div><div class="od">Remove it from the list without deleting anything.</div></div>
+      </button>`;
+  }
+
+  $("settingsBody").innerHTML = html;
+  wireSettingsBody(section, thread);
+}
+
+function wireSettingsBody(section, thread) {
+  const body = $("settingsBody");
+
+  body.querySelector('[data-setting="sidebar"]')?.addEventListener("click", () => {
+    toggleSidebar();
+    renderSettingsBody();
+  });
+
+  body.querySelector('[data-setting="agents"]')?.addEventListener("click", () => {
+    setShowAgentSessions(!state.showAgentSessions);
+    renderSettingsBody();
+  });
+
+  body.querySelector('[data-setting="resume"]')?.addEventListener("click", async (event) => {
+    event.currentTarget.disabled = true;
+    try {
+      const saved = await api("/api/usage-retry-policy", {
+        scope: "global",
+        enabled: !settingsState.globalResume,
+        // With a chat open the bridge can arm its pending stop immediately.
+        ...(thread ? { provider: thread.provider || state.provider, threadId: thread.id } : {}),
+      });
+      settingsState.globalResume = saved.globalEnabled === true;
+      if (saved.retry) { updateUsageRetry(saved.retry); }
+      if (saved.armError) { chip("\u26a0\ufe0f", `Auto-resume is on; initial check will retry: ${saved.armError}`); }
+      if (thread) { state.usageRetryPolicy = { ...saved, provider: thread.provider || state.provider, threadId: thread.id }; }
+    } catch (error) {
+      chip("\u26a0\ufe0f", "Could not save auto-resume setting: " + error.message);
+    }
+    renderSettingsBody();
+  });
+
+  body.querySelector('[data-setting="usage-dashboard"]')?.addEventListener("click", () => { closeSettingsWindow(); openUsageSheet(); });
+  body.querySelector('[data-setting="task"]')?.addEventListener("click", () => { closeSettingsWindow(); openTaskSettingsSheet(); });
+  body.querySelector('[data-setting="notify"]')?.addEventListener("click", () => { closeSettingsWindow(); state.active && openTaskNotificationSheet(state.active); });
+  body.querySelector('[data-setting="hide-current"]')?.addEventListener("click", async () => {
+    if (!state.active) { return; }
+    const target = state.active;
+    closeSettingsWindow();
+    backToList();
+    await setThreadHidden(target, true);
+  });
+
+  body.querySelectorAll("[data-unhide]").forEach((button) => {
+    button.onclick = async () => {
+      button.disabled = true;
+      button.textContent = "Unhiding…";
+      await setThreadHidden({ provider: button.dataset.unhide, id: button.dataset.unhideId }, false);
     };
+  });
+}
 
-    $("settingsUsageOpen").onclick = openUsageSheet;
-    $("settingsTaskOpen")?.addEventListener("click", () => openTaskSettingsSheet());
-    $("settingsNotifyOpen")?.addEventListener("click", () => state.active && openTaskNotificationSheet(state.active));
-  };
-  render();
+function renderSettings() {
+  renderSettingsNav();
+  renderSettingsBody();
+}
+
+function closeSettingsWindow() {
+  const panel = $("settingsWindow");
+  if (panel.hidden) { return; }
+  panel.hidden = true;
+  panel.classList.remove("on-detail");
+  $("app").removeAttribute("inert");
+  state.settingsReturnFocus?.focus?.();
+  state.settingsReturnFocus = null;
+}
+
+async function openSettingsWindow(section = "general") {
+  closeControlPopover();
+  state.settingsReturnFocus = document.activeElement;
+  settingsState.section = section;
+  settingsState.globalResume = null;
+  settingsState.hidden = null;
+  $("settingsWindow").hidden = false;
+  // Narrow screens start on the section list; a directly requested section
+  // opens straight into its detail pane.
+  $("settingsWindow").classList.toggle("on-detail", section !== "general" || window.innerWidth > 720);
+  $("app").setAttribute("inert", "");
+  renderSettings();
+  requestAnimationFrame(() => $("settingsBack")?.focus());
+
+  const [resume, hidden] = await Promise.allSettled([
+    api("/api/usage-retry-policy"),
+    api("/api/thread/hidden"),
+  ]);
+  settingsState.globalResume = resume.status === "fulfilled" ? resume.value?.globalEnabled === true : null;
+  settingsState.hidden = hidden.status === "fulfilled" ? hidden.value?.hidden ?? [] : [];
+  if (!$("settingsWindow").hidden) { renderSettings(); }
 }
 
 async function openTaskSettingsSheet() {
@@ -8539,7 +8741,7 @@ $("attachBtn").onclick = () => {
 $("draftStrip").onclick = openDraftsSheet;
 $("agentToggleInput").onchange = () => setShowAgentSessions($("agentToggleInput").checked);
 $("usageFootBtn").onclick = openUsageSheet;
-$("appSettingsBtn").onclick = () => openAppSettingsSheet();
+$("appSettingsBtn").onclick = () => openSettingsWindow();
 $("imageInput").onchange = () => uploadImages($("imageInput").files);
 let composerDragDepth = 0;
 const composerWrap = $("composerWrap");
@@ -8735,6 +8937,8 @@ document.addEventListener("keydown", (event) => {
     if (state.active && state.sidebarCollapsed) { toggleSidebar(true); }
     $("search").focus();
     $("search").select();
+  } else if (event.key === "Escape" && !$("settingsWindow").hidden) {
+    closeSettingsWindow();
   } else if (event.key === "Escape" && $("imageViewer").classList.contains("show")) {
     closeAttachmentViewer();
   } else if (event.key === "Escape" && $("controlPopover").classList.contains("show")) {
@@ -8866,7 +9070,7 @@ state.failedSends = loadFailedSends();
 connectEvents();
 refreshAvailableProviders().then(() => {
   if (state.provider) { initModels(); }
-  return Promise.all([loadNotificationRules(), loadThreadStars().then(() => loadThreads(false))]);
+  return Promise.all([loadNotificationRules(), Promise.all([loadThreadStars(), loadHiddenThreads()]).then(() => loadThreads(false))]);
 }).then(() => openLinkedThread().catch(() => {}));
 </script>
 </body>

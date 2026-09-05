@@ -27,6 +27,7 @@ import { validateDispatchSettings, validateNewThreadModel, validateThreadSetting
 import * as push from "./push.mjs";
 import { SendLedger } from "./send-ledger.mjs";
 import { ProjectStore } from "./project-store.mjs";
+import { HiddenThreads } from "./thread-hidden.mjs";
 import { ThreadOrigins } from "./thread-origins.mjs";
 import { MAX_STARS, ThreadStars } from "./thread-stars.mjs";
 import { ThreadSubscriptions } from "./thread-subscriptions.mjs";
@@ -72,6 +73,7 @@ const threadSubscriptions = new ThreadSubscriptions({ file: join(APP_HOME, "thre
 const threadStars = new ThreadStars({ file: join(APP_HOME, "thread-stars.json") });
 const projectStore = new ProjectStore({ file: join(APP_HOME, "projects.json") });
 const threadOrigins = new ThreadOrigins({ file: join(APP_HOME, "thread-origins.json") });
+const hiddenThreads = new HiddenThreads({ file: join(APP_HOME, "thread-hidden.json") });
 const threadSettingsStore = new ThreadSettingsStore({ file: join(APP_HOME, "thread-settings.json") });
 const usageState = new UsageStateStore({ file: join(APP_HOME, "usage-state.json") });
 const usageRetryStore = new UsageRetryStore({ file: join(APP_HOME, "usage-retries.json") });
@@ -1847,19 +1849,25 @@ function applyThreadOrigins(providerName, rows) {
   return rows;
 }
 
-// Starred sessions are exempt: an explicit star outranks the default filter.
-function withoutAgentThreads(rows, includeAgents) {
-  if (includeAgents) { return { rows: rows ?? [], hiddenAgentCount: 0 }; }
-
+// Two independent filters, deliberately ordered.
+//
+// A manual hide is a decision, so it always wins — over a star, and over the
+// agent toggle. "Hide" that sometimes does not hide would be useless. The
+// origin filter is the softer rule-based one, and a star exempts a session
+// from it because starring is the user overriding a rule, not a decision to
+// hide something they later starred.
+function visibleThreads(rows, { includeAgents }) {
   const kept = [];
   let hiddenAgentCount = 0;
+  let manuallyHiddenCount = 0;
 
   for (const thread of rows ?? []) {
-    if (thread.origin === "agent" && !threadStars.has(thread.provider, thread.id)) { hiddenAgentCount += 1; continue; }
+    if (hiddenThreads.has(thread.provider, thread.id)) { manuallyHiddenCount += 1; continue; }
+    if (!includeAgents && thread.origin === "agent" && !threadStars.has(thread.provider, thread.id)) { hiddenAgentCount += 1; continue; }
     kept.push(thread);
   }
 
-  return { rows: kept, hiddenAgentCount };
+  return { rows: kept, hiddenAgentCount, manuallyHiddenCount };
 }
 
 function threadRunIds(rows) {
@@ -1913,6 +1921,10 @@ async function hydrateMissingPins(providerEntries, rows) {
 
   for (const star of threadStars.list()) {
     if (!scoped.has(star.provider) || present.has(`${star.provider}:${star.threadId}`)) { continue; }
+    // A manually hidden session is filtered out of the page, which makes it
+    // look absent — hydrating it here would fetch it straight back in and let
+    // a star defeat a hide.
+    if (hiddenThreads.has(star.provider, star.threadId)) { continue; }
     if (!missing.has(star.provider)) { missing.set(star.provider, []); }
     missing.get(star.provider).push(star.threadId);
   }
@@ -2165,9 +2177,11 @@ const routes = {
 
     const includeAgents = url.searchParams.get("origin") !== "mine";
     let hiddenAgentCount = 0;
+    let manuallyHiddenCount = 0;
     const visibleGroups = groups.map((rows) => {
-      const filtered = withoutAgentThreads(rows, includeAgents);
+      const filtered = visibleThreads(rows, { includeAgents });
       hiddenAgentCount += filtered.hiddenAgentCount;
+      manuallyHiddenCount += filtered.manuallyHiddenCount;
       return filtered.rows;
     });
 
@@ -2188,6 +2202,7 @@ const routes = {
       featuredCount: ranked.length,
       pinned,
       hiddenAgentCount,
+      manuallyHiddenCount,
       nextCursor: hasMore ? encodeRecentCursor(nextState) : null,
       unavailableProviders,
     });
@@ -2211,11 +2226,14 @@ const routes = {
       else { unavailableProviders.push(providerEntries[index][0]); }
     });
 
-    const { rows: visible, hiddenAgentCount } = withoutAgentThreads(rows, url.searchParams.get("origin") !== "mine");
+    const { rows: visible, hiddenAgentCount, manuallyHiddenCount } = visibleThreads(rows, {
+      includeAgents: url.searchParams.get("origin") !== "mine",
+    });
 
     json(res, 200, {
       data: visible,
       hiddenAgentCount,
+      manuallyHiddenCount,
       unavailableProviders,
     });
   },
@@ -2302,6 +2320,28 @@ const routes = {
       json(res, 200, rule);
     } catch (e) {
       json(res, e.status ?? 500, { error: String(e.message ?? e) });
+    }
+  },
+
+  "GET /api/thread/hidden": async (_req, res) => {
+    json(res, 200, { hidden: hiddenThreads.list() });
+  },
+
+  "POST /api/thread/hidden": async (req, res) => {
+    const body = await readBody(req);
+
+    try {
+      json(res, 200, {
+        hidden: hiddenThreads.set({
+          provider: String(body?.provider || "codex"),
+          threadId: String(body?.threadId ?? ""),
+          hidden: body?.hidden !== false,
+          title: body?.title,
+          cwd: body?.cwd,
+        }),
+      });
+    } catch (e) {
+      json(res, e.status ?? 500, { error: String(e.message ?? e), code: e.code });
     }
   },
 

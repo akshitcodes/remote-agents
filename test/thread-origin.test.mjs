@@ -93,10 +93,10 @@ test("the server filters agent sessions only when asked, and stars are exempt", 
   // Default stays "all" so an older shell that sends no origin parameter keeps
   // seeing exactly what it saw before this bridge upgrade.
   assert.match(server, /url\.searchParams\.get\("origin"\) !== "mine"/);
-  assert.match(server, /function withoutAgentThreads\(rows, includeAgents\)/);
+  assert.match(server, /function visibleThreads\(rows, \{ includeAgents \}\)/);
   assert.match(server, /thread\.origin === "agent" && !threadStars\.has\(thread\.provider, thread\.id\)/);
   // Recent filters per provider page *before* ranking, so featuredCount stays honest.
-  assert.match(server, /const visibleGroups = groups\.map[\s\S]{0,200}withoutAgentThreads/);
+  assert.match(server, /const visibleGroups = groups\.map[\s\S]{0,200}visibleThreads/);
   assert.match(server, /rankRecentThreads\(visibleGroups, \{ limit: 10 \}\)/);
   // Creation stamps the ledger; adoption carries it to the real session id.
   assert.match(server, /threadOrigins\.markUi\(p\.name, created\.thread\.id\)/);
