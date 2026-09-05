@@ -399,8 +399,14 @@ export function claudeSessionArgs({ emitThreadId, model, effort, modeKey, isDraf
 // human works in /var/folders). UI-created sessions are identified separately
 // by the bridge's own origin ledger; everything else classifies as native so an
 // unclassifiable session is shown, never hidden.
-export function claudeOrigin({ cwd, sidechain = false, agentName = false } = {}) {
+// records carry an entrypoint: humans arrive as "cli", "claude-vscode", or
+// "claude-desktop"; every SDK/print-mode run — agents dispatching claude -p —
+// arrives as "sdk-cli". The bridge itself also drives claude -p, so its own
+// sessions look sdk-driven here; the origin ledger re-marks those as "ui" and
+// wins over this classification.
+export function claudeOrigin({ cwd, sidechain = false, agentName = false, entrypoint = null } = {}) {
   if (sidechain || agentName) { return "agent"; }
+  if (String(entrypoint ?? "").startsWith("sdk")) { return "agent"; }
   if (/^\/(?:private\/)?(?:var\/folders|tmp)\//.test(String(cwd ?? ""))) { return "agent"; }
   return "native";
 }
@@ -802,6 +808,7 @@ export class ClaudeProvider extends BaseProvider {
     let preview = "";
     let sidechain = false;
     let agentName = false;
+    let entrypoint = null;
 
     for (const line of head.split("\n")) {
       if (!line.trim()) {
@@ -822,6 +829,7 @@ export class ClaudeProvider extends BaseProvider {
 
       if (obj.isSidechain === true) { sidechain = true; }
       if (obj.type === "agent-name") { agentName = true; }
+      if (!entrypoint && obj.entrypoint) { entrypoint = obj.entrypoint; }
 
       if (!preview && obj.type === "user") {
         const blocks = toBlocks(obj.message?.content);
@@ -839,7 +847,7 @@ export class ClaudeProvider extends BaseProvider {
 
     const summary = {
       id: file.id,
-      origin: claudeOrigin({ cwd, sidechain, agentName }),
+      origin: claudeOrigin({ cwd, sidechain, agentName, entrypoint }),
       preview: preview || "(no prompt)",
       name: readTailTitle(file.path) || null,
       cwd,

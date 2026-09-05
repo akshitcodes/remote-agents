@@ -33,6 +33,13 @@ test("an unclassifiable codex session is shown, never hidden", () => {
 test("claude agent sessions classify from sidechain, agent-name, and mktemp cwds", () => {
   assert.equal(claudeOrigin({ sidechain: true }), "agent");
   assert.equal(claudeOrigin({ agentName: true }), "agent");
+  // Every SDK/print-mode dispatch — an agent driving claude -p in a real
+  // project folder — records an sdk entrypoint. Humans arrive as cli, vscode,
+  // or desktop.
+  assert.equal(claudeOrigin({ cwd: "/Users/dev/code/project", entrypoint: "sdk-cli" }), "agent");
+  assert.equal(claudeOrigin({ cwd: "/Users/dev/code/project", entrypoint: "cli" }), "native");
+  assert.equal(claudeOrigin({ cwd: "/Users/dev/code/project", entrypoint: "claude-vscode" }), "native");
+  assert.equal(claudeOrigin({ cwd: "/Users/dev/code/project", entrypoint: "claude-desktop" }), "native");
   assert.equal(claudeOrigin({ cwd: "/private/var/folders/02/x/T/steer-http-abc" }), "agent");
   assert.equal(claudeOrigin({ cwd: "/var/folders/02/x/T/harness" }), "agent");
   assert.equal(claudeOrigin({ cwd: "/tmp/scratch" }), "agent");
@@ -110,4 +117,14 @@ test("the UI hides agent sessions by default behind a checkmark that reports the
   // Visible agent-made rows are labelled.
   assert.match(html, /class="chip origin-badge"/);
   assert.match(html, /showAgentSessions: state\.showAgentSessions,/);
+});
+
+test("origin means creation: engagement never reclassifies an agent session", () => {
+  // Only POST /api/thread/new (plus draft adoption) marks "ui". Steering or
+  // opening an agent's session from the phone does not make it yours — the
+  // send ledger and thread-settings are deliberately not origin sources.
+  assert.equal((server.match(/threadOrigins\.markUi\(/g) ?? []).length, 1);
+  assert.match(server, /threadOrigins\.markUi\(p\.name, created\.thread\.id\)/);
+  assert.doesNotMatch(server, /sendLedger[\s\S]{0,200}threadOrigins\.markUi/);
+  assert.doesNotMatch(server, /threadSettingsStore[\s\S]{0,200}threadOrigins\.markUi/);
 });
