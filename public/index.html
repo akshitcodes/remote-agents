@@ -1283,6 +1283,7 @@ const state = {
   collapsedProjects: new Set(),
   threads: [], nextCursor: null,
   hiddenThreadKeys: new Set(), // "provider:threadId" hidden by hand, mirrored from the bridge
+  mineThreadKeys: new Set(),   // "provider:threadId" reclassified as mine by hand
   showAgentSessions: false,  // agent-made sessions are hidden by default
   hiddenAgentCount: 0,
   starred: new Map(),        // "provider:threadId" -> star, mirrored from the bridge
@@ -7333,6 +7334,37 @@ function setStarState(payload) {
   state.maxStars = Number(payload?.max) || state.maxStars;
 }
 
+// Correcting a misclassification, as opposed to starring around it. A star is
+// a shortcut that stops working the moment you unstar; this changes what the
+// session *is*, so it survives the agent filter permanently.
+async function setThreadMine(thread, mine) {
+  try {
+    const res = await api("/api/thread/origin", {
+      provider: thread.provider || "codex",
+      threadId: thread.id,
+      mine,
+      title: thread.name || thread.preview || "",
+      cwd: thread.cwd || "",
+    });
+    settingsState.mine = res.mine ?? [];
+    state.mineThreadKeys = new Set(settingsState.mine.map((row) => threadRuleKey(row.provider, row.threadId)));
+    await loadThreads(false);
+    if (!$("settingsWindow").hidden) { renderSettings(); }
+  } catch (e) {
+    chip("\u26a0\ufe0f", "Could not reclassify this session: " + e.message);
+  }
+}
+
+async function loadManualOrigins() {
+  try {
+    const res = await api("/api/thread/origin");
+    settingsState.mine = res.mine ?? [];
+    state.mineThreadKeys = new Set(settingsState.mine.map((row) => threadRuleKey(row.provider, row.threadId)));
+  } catch {
+    // The list still renders; the bridge remains the authority on origin.
+  }
+}
+
 async function loadHiddenThreads() {
   try {
     const res = await api("/api/thread/hidden");
@@ -7419,7 +7451,12 @@ async function setTaskNotification(thread, mode) {
 function openRowMenu(thread, point) {
   const target = notificationTarget(thread);
   const starred = state.starred.has(threadRuleKey(target.provider, target.id));
-  const hidden = state.hiddenThreadKeys.has(threadRuleKey(target.provider, target.id));
+  const targetKey = threadRuleKey(target.provider, target.id);
+  const hidden = state.hiddenThreadKeys.has(targetKey);
+  const targetRow = listedThreads().find((row) => threadRuleKey(row.provider, row.id) === targetKey) ?? thread;
+  const markedMine = state.mineThreadKeys.has(targetKey);
+  // Only meaningful for a session the rules got wrong, or one already corrected.
+  const canReclassify = targetRow?.origin === "agent" || markedMine;
   const full = !starred && state.starred.size >= state.maxStars;
   const notifyMode = state.notificationRules.get(threadRuleKey(target.provider, target.id));
 
@@ -7435,6 +7472,10 @@ function openRowMenu(thread, point) {
       <span class="menu-label">Task notifications</span>
       <span class="menu-value">${notifyMode ? esc(notifyMode) : "Off"}</span>
     </button>
+    ${canReclassify ? `<button type="button" class="control-menu-row" id="rowMineAction">
+      <span class="menu-check" aria-hidden="true">${markedMine ? "\u25c9" : "\u25cb"}</span>
+      <span class="menu-label">${markedMine ? "Classify as agent-made" : "Keep in my sessions"}</span>
+    </button>` : ""}
     <button type="button" class="control-menu-row" id="rowHideAction">
       <span class="menu-check" aria-hidden="true">${hidden ? "\u25c9" : "\u25cb"}</span>
       <span class="menu-label">${hidden ? "Unhide session" : "Hide session"}</span>
@@ -7447,6 +7488,7 @@ function openRowMenu(thread, point) {
 
   $("rowStarAction").onclick = () => { closeControlPopover(); setThreadStar(target, !starred); };
   $("rowHideAction").onclick = () => { closeControlPopover(); setThreadHidden(target, !hidden); };
+  $("rowMineAction")?.addEventListener("click", () => { closeControlPopover(); setThreadMine(target, !markedMine); });
   // openSheet closes this popover on its own; closing first keeps the order obvious.
   $("rowNotifyAction").onclick = () => { closeControlPopover(); openTaskNotificationSheet(thread); };
   $("rowOpenAction").onclick = () => { closeControlPopover(); openThread(thread); };
@@ -7499,10 +7541,11 @@ const SETTINGS_SECTIONS = [
   { key: "sessions", group: "App", title: "Sessions" },
   { key: "usage", group: "App", title: "Usage & limits" },
   { key: "hidden", group: "App", title: "Hidden sessions" },
+  { key: "mine", group: "App", title: "Kept as mine" },
   { key: "session", group: "Current session", title: "This session", needsThread: true },
 ];
 
-const settingsState = { section: "general", globalResume: null, hidden: null, loading: true };
+const settingsState = { section: "general", globalResume: null, hidden: null, mine: null, loading: true };
 
 function setShowAgentSessions(checked) {
   if (state.showAgentSessions === !!checked) { return; }
@@ -7551,6 +7594,7 @@ function renderSettingsNav() {
       <button type="button" class="settings-tab" role="tab" data-settings-section="${section.key}" aria-selected="${section.key === settingsState.section}">
         <span>${esc(section.title)}</span>
         ${section.key === "hidden" && settingsState.hidden?.length ? `<span class="settings-tab-count">${settingsState.hidden.length}</span>` : ""}
+        ${section.key === "mine" && settingsState.mine?.length ? `<span class="settings-tab-count">${settingsState.mine.length}</span>` : ""}
       </button>`).join("")}`).join("")}`;
 
   $("settingsBack").onclick = closeSettingsWindow;
@@ -7622,6 +7666,24 @@ function renderSettingsBody() {
             </div>`).join("")}</div>`;
   }
 
+  if (section.key === "mine") {
+    const rows = settingsState.mine;
+    html += `<div class="hint" style="margin-bottom:14px">Sessions the automatic rules call agent-made, that you have marked as yours. They stay visible whatever the agent toggle says \u2014 unlike starring, which only works while the star is there.</div>`;
+    html += rows === null
+      ? '<div class="settings-empty">Loading\u2026</div>'
+      : !rows.length
+        ? '<div class="settings-empty">Nothing reclassified yet. Turn on <b>Show agent-made sessions</b>, then right-click one of yours and choose <b>Keep in my sessions</b>.</div>'
+        : `<div class="settings-card-label">${rows.length} session${rows.length === 1 ? "" : "s"} kept as mine</div>
+          <div class="settings-card">${rows.map((row) => `
+            <div class="hidden-row">
+              <div class="hidden-copy">
+                <div class="hidden-title">${esc(row.title || "(untitled session)")}</div>
+                <div class="hidden-meta">${esc(PROVIDER_LABELS[row.provider] || row.provider)}${row.cwd ? " \u00b7 " + esc(row.cwd) : ""}</div>
+              </div>
+              <button type="button" data-unmine="${esc(row.provider)}" data-unmine-id="${esc(row.threadId)}">Undo</button>
+            </div>`).join("")}</div>`;
+  }
+
   if (section.key === "session" && thread) {
     html += `<div class="hint" style="margin-bottom:12px">Settings that belong to <b>${esc(thread.name || thread.preview || "this session")}</b>, not the app.</div>
       <button type="button" class="opt opt-button" data-setting="task">
@@ -7682,6 +7744,14 @@ function wireSettingsBody(section, thread) {
     await setThreadHidden(target, true);
   });
 
+  body.querySelectorAll("[data-unmine]").forEach((button) => {
+    button.onclick = async () => {
+      button.disabled = true;
+      button.textContent = "Undoing\u2026";
+      await setThreadMine({ provider: button.dataset.unmine, id: button.dataset.unmineId }, false);
+    };
+  });
+
   body.querySelectorAll("[data-unhide]").forEach((button) => {
     button.onclick = async () => {
       button.disabled = true;
@@ -7712,6 +7782,7 @@ async function openSettingsWindow(section = "general") {
   settingsState.section = section;
   settingsState.globalResume = null;
   settingsState.hidden = null;
+  settingsState.mine = null;
   $("settingsWindow").hidden = false;
   // Narrow screens start on the section list; a directly requested section
   // opens straight into its detail pane.
@@ -7720,12 +7791,14 @@ async function openSettingsWindow(section = "general") {
   renderSettings();
   requestAnimationFrame(() => $("settingsBack")?.focus());
 
-  const [resume, hidden] = await Promise.allSettled([
+  const [resume, hidden, mine] = await Promise.allSettled([
     api("/api/usage-retry-policy"),
     api("/api/thread/hidden"),
+    api("/api/thread/origin"),
   ]);
   settingsState.globalResume = resume.status === "fulfilled" ? resume.value?.globalEnabled === true : null;
   settingsState.hidden = hidden.status === "fulfilled" ? hidden.value?.hidden ?? [] : [];
+  settingsState.mine = mine.status === "fulfilled" ? mine.value?.mine ?? [] : [];
   if (!$("settingsWindow").hidden) { renderSettings(); }
 }
 
@@ -9070,7 +9143,7 @@ state.failedSends = loadFailedSends();
 connectEvents();
 refreshAvailableProviders().then(() => {
   if (state.provider) { initModels(); }
-  return Promise.all([loadNotificationRules(), Promise.all([loadThreadStars(), loadHiddenThreads()]).then(() => loadThreads(false))]);
+  return Promise.all([loadNotificationRules(), Promise.all([loadThreadStars(), loadHiddenThreads(), loadManualOrigins()]).then(() => loadThreads(false))]);
 }).then(() => openLinkedThread().catch(() => {}));
 </script>
 </body>

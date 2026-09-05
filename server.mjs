@@ -1842,8 +1842,12 @@ function applyThreadRunState(p, rows, running) {
 // sessions must be shown, never hidden.
 function applyThreadOrigins(providerName, rows) {
   for (const thread of rows ?? []) {
-    if (threadOrigins.isUi(providerName, thread.id)) { thread.origin = "ui"; }
-    else if (!thread.origin) { thread.origin = "native"; }
+    // These rows come out of a provider's summary cache and are reused across
+    // requests, so writing origin back onto them is sticky. Keep the
+    // provider's own verdict once and recompute the effective origin every
+    // time, or clearing an override would never take effect.
+    if (thread.baseOrigin === undefined) { thread.baseOrigin = thread.origin ?? "native"; }
+    thread.origin = threadOrigins.isUi(providerName, thread.id) ? "ui" : thread.baseOrigin;
   }
 
   return rows;
@@ -2321,6 +2325,28 @@ const routes = {
     } catch (e) {
       json(res, e.status ?? 500, { error: String(e.message ?? e) });
     }
+  },
+
+  "GET /api/thread/origin": async (_req, res) => {
+    json(res, 200, { mine: threadOrigins.listManual() });
+  },
+
+  // Lets the user correct a misclassification. Marking a session mine survives
+  // the agent filter permanently, which is the difference between this and
+  // starring it — a star is a shortcut, not a statement about what it is.
+  "POST /api/thread/origin": async (req, res) => {
+    const body = await readBody(req);
+    const provider = String(body?.provider || "codex");
+    const threadId = String(body?.threadId ?? "");
+
+    if (!threadId) {
+      return json(res, 400, { error: "threadId is required", code: "invalid_thread_origin" });
+    }
+
+    if (body?.mine === false) { threadOrigins.clearUi(provider, threadId); }
+    else { threadOrigins.markUi(provider, threadId, { source: "manual", title: body?.title, cwd: body?.cwd }); }
+
+    json(res, 200, { mine: threadOrigins.listManual() });
   },
 
   "GET /api/thread/hidden": async (_req, res) => {

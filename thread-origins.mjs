@@ -28,7 +28,17 @@ export class ThreadOrigins {
         if (!raw?.threadId) { continue; }
         const provider = String(raw.provider || "codex");
         const threadId = String(raw.threadId);
-        this.records.set(key(provider, threadId), { provider, threadId, createdAt: Number(raw.createdAt) || 0 });
+        this.records.set(key(provider, threadId), {
+          provider,
+          threadId,
+          // "created" was stamped by POST /api/thread/new; "manual" is the user
+          // correcting a misclassification by hand. Only the latter is worth
+          // listing back to them.
+          source: raw.source === "manual" ? "manual" : "created",
+          title: String(raw.title ?? "").slice(0, 200),
+          cwd: String(raw.cwd ?? "").slice(0, 400),
+          createdAt: Number(raw.createdAt) || 0,
+        });
       }
     } catch {
       // A damaged ledger must not prevent the bridge from starting. Worst case
@@ -46,14 +56,24 @@ export class ThreadOrigins {
     renameSync(temp, this.file);
   }
 
-  markUi(provider, threadId) {
+  markUi(provider, threadId, { source = "created", title = "", cwd = "" } = {}) {
     if (!threadId) { return; }
 
     const k = key(provider, String(threadId));
 
-    if (this.records.has(k)) { return; }
+    // A hand-made correction is stronger than the creation stamp, so it may
+    // upgrade an existing record; the reverse would silently drop the label
+    // the user chose.
+    if (this.records.has(k) && !(source === "manual" && this.records.get(k).source !== "manual")) { return; }
 
-    this.records.set(k, { provider: String(provider || "codex"), threadId: String(threadId), createdAt: Date.now() });
+    this.records.set(k, {
+      provider: String(provider || "codex"),
+      threadId: String(threadId),
+      source: source === "manual" ? "manual" : "created",
+      title: String(title ?? "").slice(0, 200),
+      cwd: String(cwd ?? "").slice(0, 400),
+      createdAt: Date.now(),
+    });
 
     // Bound the file. Dropping the oldest records only ever reclassifies old
     // UI sessions as native, which keeps them visible.
@@ -85,5 +105,21 @@ export class ThreadOrigins {
 
   isUi(provider, threadId) {
     return this.records.has(key(provider, String(threadId ?? "")));
+  }
+
+  // Undo. Removing the entry hands classification back to the provider
+  // metadata, which is what the user is asking for when they say a session is
+  // not theirs after all.
+  clearUi(provider, threadId) {
+    if (this.records.delete(key(provider, String(threadId ?? "")))) { this.save(); return true; }
+    return false;
+  }
+
+  // Only hand-made corrections. Listing every session ever created from the UI
+  // would bury the handful the user actually reclassified.
+  listManual() {
+    return [...this.records.values()]
+      .filter((record) => record.source === "manual")
+      .sort((a, b) => b.createdAt - a.createdAt);
   }
 }

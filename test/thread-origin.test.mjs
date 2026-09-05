@@ -101,8 +101,8 @@ test("the server filters agent sessions only when asked, and stars are exempt", 
   // Creation stamps the ledger; adoption carries it to the real session id.
   assert.match(server, /threadOrigins\.markUi\(p\.name, created\.thread\.id\)/);
   assert.match(server, /threadOrigins\.adopt\(name, data\.params\.threadId, data\.params\.sessionId\)/);
-  // Ledger beats provider metadata; unmarked rows default to native.
-  assert.match(server, /if \(threadOrigins\.isUi\(providerName, thread\.id\)\) \{ thread\.origin = "ui"; \}\s*\n\s*else if \(!thread\.origin\) \{ thread\.origin = "native"; \}/);
+  // Ledger beats provider metadata; unmarked rows fall back to it.
+  assert.match(server, /thread\.origin = threadOrigins\.isUi\(providerName, thread\.id\) \? "ui" : thread\.baseOrigin;/);
 });
 
 test("the UI hides agent sessions by default behind a checkmark that reports the count", () => {
@@ -119,12 +119,68 @@ test("the UI hides agent sessions by default behind a checkmark that reports the
   assert.match(html, /showAgentSessions: state\.showAgentSessions,/);
 });
 
-test("origin means creation: engagement never reclassifies an agent session", () => {
-  // Only POST /api/thread/new (plus draft adoption) marks "ui". Steering or
-  // opening an agent's session from the phone does not make it yours — the
-  // send ledger and thread-settings are deliberately not origin sources.
-  assert.equal((server.match(/threadOrigins\.markUi\(/g) ?? []).length, 1);
+test("origin means creation or an explicit correction — never engagement", () => {
+  // Exactly two ways a session becomes "mine": it was created here, or the
+  // user said so. Steering or opening an agent's session from the phone is
+  // neither, so the send ledger and thread-settings stay out of it.
+  assert.equal((server.match(/threadOrigins\.markUi\(/g) ?? []).length, 2);
   assert.match(server, /threadOrigins\.markUi\(p\.name, created\.thread\.id\)/);
+  assert.match(server, /threadOrigins\.markUi\(provider, threadId, \{ source: "manual"/);
   assert.doesNotMatch(server, /sendLedger[\s\S]{0,200}threadOrigins\.markUi/);
   assert.doesNotMatch(server, /threadSettingsStore[\s\S]{0,200}threadOrigins\.markUi/);
+});
+
+test("a misclassified session can be reclassified as mine, and undone", () => {
+  const file = join(mkdtempSync(join(tmpdir(), "codex-phone-origins-mark-")), "origins.json");
+  const origins = new ThreadOrigins({ file });
+
+  origins.markUi("claude", "agentish", { source: "manual", title: "A review", cwd: "/Users/dev/code" });
+  assert.equal(origins.isUi("claude", "agentish"), true);
+  assert.deepEqual(origins.listManual().map((r) => r.threadId), ["agentish"]);
+  assert.equal(origins.listManual()[0].title, "A review");
+  assert.equal(new ThreadOrigins({ file }).isUi("claude", "agentish"), true);
+
+  assert.equal(origins.clearUi("claude", "agentish"), true);
+  assert.equal(origins.isUi("claude", "agentish"), false);
+  assert.equal(origins.clearUi("claude", "agentish"), false);
+});
+
+test("only hand-made corrections are listed back, not every UI-created session", () => {
+  const { origins } = fixture();
+  origins.markUi("codex", "created-here");
+  origins.markUi("codex", "corrected", { source: "manual" });
+
+  assert.equal(origins.isUi("codex", "created-here"), true);
+  assert.deepEqual(origins.listManual().map((r) => r.threadId), ["corrected"]);
+});
+
+test("a hand correction upgrades a creation stamp, never the reverse", () => {
+  const { origins } = fixture();
+  origins.markUi("codex", "t");
+  origins.markUi("codex", "t", { source: "manual", title: "kept" });
+  assert.deepEqual(origins.listManual().map((r) => r.threadId), ["t"]);
+
+  // A later creation stamp must not silently strip the label the user chose.
+  origins.markUi("codex", "t");
+  assert.deepEqual(origins.listManual().map((r) => r.threadId), ["t"]);
+});
+
+test("reclassifying is reachable from the row menu and reversible in settings", () => {
+  assert.match(server, /"POST \/api\/thread\/origin"/);
+  assert.match(server, /if \(body\?\.mine === false\) \{ threadOrigins\.clearUi\(provider, threadId\); \}/);
+  assert.match(server, /threadOrigins\.markUi\(provider, threadId, \{ source: "manual"/);
+  // Offered only where it means something: a session the rules called agent,
+  // or one already corrected.
+  assert.match(html, /const canReclassify = targetRow\?\.origin === "agent" \|\| markedMine;/);
+  assert.match(html, /\$\{markedMine \? "Classify as agent-made" : "Keep in my sessions"\}/);
+  assert.match(html, /\[data-unmine\]/);
+  assert.match(html, /\{ key: "mine", group: "App", title: "Kept as mine" \}/);
+});
+
+test("clearing an override actually takes effect on cached provider rows", () => {
+  // Provider summaries are cached objects reused across requests. Deriving the
+  // effective origin from the previous value would make an override permanent,
+  // so the provider's verdict is preserved separately and recomputed.
+  assert.match(server, /if \(thread\.baseOrigin === undefined\) \{ thread\.baseOrigin = thread\.origin \?\? "native"; \}/);
+  assert.match(server, /thread\.origin = threadOrigins\.isUi\(providerName, thread\.id\) \? "ui" : thread\.baseOrigin;/);
 });
