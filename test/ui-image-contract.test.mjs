@@ -387,7 +387,7 @@ test("desktop workspace keeps session navigation visible and constrains the chat
   assert.match(html, /event\.key === "Escape"/);
   assert.match(server, /const body = renderIndexHtml\(req\.headers\["user-agent"\][\s\S]*?return res\.end\(body\)/);
   assert.match(onboarding, /const readIndexShell = createIndexShellReader\(indexHtmlPath\)/);
-  assert.match(sw, /const CACHE_VERSION = "remote-agents-v28"/);
+  assert.match(sw, /const CACHE_VERSION = "remote-agents-v29"/);
 });
 
 test("rendered response links retain native browser link behavior outside Agents", () => {

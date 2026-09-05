@@ -393,6 +393,18 @@ export function claudeSessionArgs({ emitThreadId, model, effort, modeKey, isDraf
 }
 
 // Read only the first bytes of a (potentially huge) transcript.
+// Claude session files carry no originator, but agent-made sessions still leave
+// marks: sidechain records (the Task tool), agent-name records (named agents),
+// and a cwd inside a mktemp folder (a harness driving claude headlessly — no
+// human works in /var/folders). UI-created sessions are identified separately
+// by the bridge's own origin ledger; everything else classifies as native so an
+// unclassifiable session is shown, never hidden.
+export function claudeOrigin({ cwd, sidechain = false, agentName = false } = {}) {
+  if (sidechain || agentName) { return "agent"; }
+  if (/^\/(?:private\/)?(?:var\/folders|tmp)\//.test(String(cwd ?? ""))) { return "agent"; }
+  return "native";
+}
+
 function readHead(path, bytes = HEAD_BYTES) {
   let fd;
 
@@ -788,6 +800,8 @@ export class ClaudeProvider extends BaseProvider {
     const head = readHead(file.path);
     let cwd = null;
     let preview = "";
+    let sidechain = false;
+    let agentName = false;
 
     for (const line of head.split("\n")) {
       if (!line.trim()) {
@@ -806,6 +820,9 @@ export class ClaudeProvider extends BaseProvider {
         cwd = obj.cwd;
       }
 
+      if (obj.isSidechain === true) { sidechain = true; }
+      if (obj.type === "agent-name") { agentName = true; }
+
       if (!preview && obj.type === "user") {
         const blocks = toBlocks(obj.message?.content);
         const text = blocks.filter((b) => b.type === "text").map((b) => b.text ?? "").join(" ").trim();
@@ -822,6 +839,7 @@ export class ClaudeProvider extends BaseProvider {
 
     const summary = {
       id: file.id,
+      origin: claudeOrigin({ cwd, sidechain, agentName }),
       preview: preview || "(no prompt)",
       name: readTailTitle(file.path) || null,
       cwd,

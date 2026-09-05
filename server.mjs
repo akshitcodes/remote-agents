@@ -27,6 +27,7 @@ import { validateDispatchSettings, validateNewThreadModel, validateThreadSetting
 import * as push from "./push.mjs";
 import { SendLedger } from "./send-ledger.mjs";
 import { ProjectStore } from "./project-store.mjs";
+import { ThreadOrigins } from "./thread-origins.mjs";
 import { MAX_STARS, ThreadStars } from "./thread-stars.mjs";
 import { ThreadSubscriptions } from "./thread-subscriptions.mjs";
 import { pruneAttachments, readAttachment, resolveAttachmentIds, storeAttachment } from "./attachments.mjs";
@@ -70,6 +71,7 @@ const authFailures = new Map();
 const threadSubscriptions = new ThreadSubscriptions({ file: join(APP_HOME, "thread-subscriptions.json") });
 const threadStars = new ThreadStars({ file: join(APP_HOME, "thread-stars.json") });
 const projectStore = new ProjectStore({ file: join(APP_HOME, "projects.json") });
+const threadOrigins = new ThreadOrigins({ file: join(APP_HOME, "thread-origins.json") });
 const threadSettingsStore = new ThreadSettingsStore({ file: join(APP_HOME, "thread-settings.json") });
 const usageState = new UsageStateStore({ file: join(APP_HOME, "usage-state.json") });
 const usageRetryStore = new UsageRetryStore({ file: join(APP_HOME, "usage-retries.json") });
@@ -866,6 +868,7 @@ function makeEmit(name) {
   return function emit(event, data) {
     if (event === "notify" && data?.method === "thread/adopted" && data.params?.threadId && data.params?.sessionId) {
       threadSettings?.adopt(name, data.params.threadId, data.params.sessionId);
+      threadOrigins.adopt(name, data.params.threadId, data.params.sessionId);
     }
 
     if (event === "send-stage" && ["turn_started", "provider_accepted"].includes(data?.stage)
@@ -1832,6 +1835,33 @@ function applyThreadRunState(p, rows, running) {
   return rows;
 }
 
+// The ledger is the authority for "created from this UI"; provider metadata
+// fills in agent/native. Anything still unmarked is native — unclassifiable
+// sessions must be shown, never hidden.
+function applyThreadOrigins(providerName, rows) {
+  for (const thread of rows ?? []) {
+    if (threadOrigins.isUi(providerName, thread.id)) { thread.origin = "ui"; }
+    else if (!thread.origin) { thread.origin = "native"; }
+  }
+
+  return rows;
+}
+
+// Starred sessions are exempt: an explicit star outranks the default filter.
+function withoutAgentThreads(rows, includeAgents) {
+  if (includeAgents) { return { rows: rows ?? [], hiddenAgentCount: 0 }; }
+
+  const kept = [];
+  let hiddenAgentCount = 0;
+
+  for (const thread of rows ?? []) {
+    if (thread.origin === "agent" && !threadStars.has(thread.provider, thread.id)) { hiddenAgentCount += 1; continue; }
+    kept.push(thread);
+  }
+
+  return { rows: kept, hiddenAgentCount };
+}
+
 function threadRunIds(rows) {
   return (rows ?? []).flatMap((thread) => [thread.id, ...(thread.subagents ?? []).map((child) => child.id)]);
 }
@@ -1839,6 +1869,7 @@ function threadRunIds(rows) {
 async function listThreadsWithState(p, { search, cursor, limit } = {}) {
   const listed = await p.listThreads({ search, cursor, limit });
   rememberThreadTitles(p.name, listed.data);
+  applyThreadOrigins(p.name, listed.data);
   applyThreadRunState(p, listed.data, watch.runningDetails(p.name, threadRunIds(listed.data)));
   return listed;
 }
@@ -1846,6 +1877,7 @@ async function listThreadsWithState(p, { search, cursor, limit } = {}) {
 async function listProjectThreadsWithState(p, { search } = {}) {
   const listed = await p.listThreads({ search, limit: null });
   rememberThreadTitles(p.name, listed.data);
+  applyThreadOrigins(p.name, listed.data);
   // Resolving run state is the expensive half, and a full project listing only
   // needs it for rows recent enough to plausibly still be running.
   const candidates = [...(listed.data ?? [])]
@@ -1866,7 +1898,7 @@ async function listPinnedThreadsWithState(p, threadIds) {
 
   const listed = await p.listThreads({ limit: null });
   rememberThreadTitles(p.name, listed.data);
-  const rows = (listed.data ?? []).filter((thread) => wanted.has(String(thread.id)));
+  const rows = applyThreadOrigins(p.name, (listed.data ?? []).filter((thread) => wanted.has(String(thread.id))));
   applyThreadRunState(p, rows, watch.runningDetails(p.name, threadRunIds(rows)));
   return rows;
 }
@@ -2131,20 +2163,31 @@ const routes = {
       }
     });
 
+    const includeAgents = url.searchParams.get("origin") !== "mine";
+    let hiddenAgentCount = 0;
+    const visibleGroups = groups.map((rows) => {
+      const filtered = withoutAgentThreads(rows, includeAgents);
+      hiddenAgentCount += filtered.hiddenAgentCount;
+      return filtered.rows;
+    });
+
     const continuation = !!url.searchParams.get("cursor");
-    const ranked = continuation ? [] : rankRecentThreads(groups, { limit: 10 });
+    const ranked = continuation ? [] : rankRecentThreads(visibleGroups, { limit: 10 });
     const featured = new Set(ranked.map((thread) => `${thread.provider}:${thread.id}`));
-    const more = sortRecentThreads(groups.flat().filter((thread) => !featured.has(`${thread.provider}:${thread.id}`)), { runningFirst: false });
+    const more = sortRecentThreads(visibleGroups.flat().filter((thread) => !featured.has(`${thread.provider}:${thread.id}`)), { runningFirst: false });
     const hasMore = Object.values(nextState).some((providerCursor) => typeof providerCursor === "string");
 
     // Pins belong to the first page only: a continuation is already past the
     // pinned block, and a search is a query that pinning must not fight.
-    const pinned = continuation || search ? [] : await hydrateMissingPins(providerEntries, groups.flat());
+    // Starred sessions are exempt from the agent filter, so the visible groups
+    // are the right presence baseline here too.
+    const pinned = continuation || search ? [] : await hydrateMissingPins(providerEntries, visibleGroups.flat());
 
     json(res, 200, {
       data: ranked.concat(more),
       featuredCount: ranked.length,
       pinned,
+      hiddenAgentCount,
       nextCursor: hasMore ? encodeRecentCursor(nextState) : null,
       unavailableProviders,
     });
@@ -2168,8 +2211,11 @@ const routes = {
       else { unavailableProviders.push(providerEntries[index][0]); }
     });
 
+    const { rows: visible, hiddenAgentCount } = withoutAgentThreads(rows, url.searchParams.get("origin") !== "mine");
+
     json(res, 200, {
-      data: rows,
+      data: visible,
+      hiddenAgentCount,
       unavailableProviders,
     });
   },
@@ -2808,7 +2854,9 @@ const routes = {
       });
     }
     body.model = validateNewThreadModel(p.name, body.model, listed);
-    json(res, 200, await p.newThread(body));
+    const created = await p.newThread(body);
+    if (created?.thread?.id) { threadOrigins.markUi(p.name, created.thread.id); }
+    json(res, 200, created);
   },
 
   "POST /api/message": async (req, res) => {

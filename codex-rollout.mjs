@@ -68,6 +68,23 @@ export function listRolloutFiles() {
 const HEAD_BYTES = 256 * 1024;
 const summaryCache = new Map(); // path -> immutable metadata from the rollout head
 
+// Who created a session, from facts codex itself records in session_meta.
+// thread_source and source:"exec" are structural (written by the CLI, not
+// self-declared); originator is the connecting client's own name, which this
+// bridge sets to "codex-phone"/"codex-phone-thread" via clientInfo. Anything
+// unrecognised classifies as native: hiding a session we cannot classify is
+// strictly worse than showing clutter.
+export function codexOrigin(meta, threadSource) {
+  if (threadSource === "subagent") { return "agent"; }
+
+  const originator = String(meta?.originator ?? "");
+
+  if (originator.startsWith("codex-phone")) { return "ui"; }
+  if (meta?.source === "exec" || originator === "codex_exec") { return "agent"; }
+
+  return "native";
+}
+
 export function summarize(file) {
   const cached = summaryCache.get(file.path);
 
@@ -129,6 +146,7 @@ export function summarize(file) {
   const summary = {
     id,
     provider: "codex",
+    origin: codexOrigin(meta, threadSource),
     cwd: meta.cwd ?? "",
     // Codex's own name for the thread when it has one; the opening message is
     // only a stand-in until it does.
