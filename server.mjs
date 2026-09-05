@@ -26,6 +26,7 @@ import { rankRecentThreads, sortRecentThreads } from "./recent-threads.mjs";
 import { validateDispatchSettings, validateNewThreadModel, validateThreadSettingsPatch } from "./dispatch-settings.mjs";
 import * as push from "./push.mjs";
 import { SendLedger } from "./send-ledger.mjs";
+import { ProjectStore } from "./project-store.mjs";
 import { MAX_STARS, ThreadStars } from "./thread-stars.mjs";
 import { ThreadSubscriptions } from "./thread-subscriptions.mjs";
 import { pruneAttachments, readAttachment, resolveAttachmentIds, storeAttachment } from "./attachments.mjs";
@@ -68,6 +69,7 @@ const AUTH_MAX_BACKOFF_SECONDS = 60;
 const authFailures = new Map();
 const threadSubscriptions = new ThreadSubscriptions({ file: join(APP_HOME, "thread-subscriptions.json") });
 const threadStars = new ThreadStars({ file: join(APP_HOME, "thread-stars.json") });
+const projectStore = new ProjectStore({ file: join(APP_HOME, "projects.json") });
 const threadSettingsStore = new ThreadSettingsStore({ file: join(APP_HOME, "thread-settings.json") });
 const usageState = new UsageStateStore({ file: join(APP_HOME, "usage-state.json") });
 const usageRetryStore = new UsageRetryStore({ file: join(APP_HOME, "usage-retries.json") });
@@ -2733,7 +2735,19 @@ const routes = {
       return;
     }
 
-    json(res, 200, await p.projects());
+    const listed = await p.projects();
+    // A live scan is the authority; remembering it is what makes the next
+    // "new session" screen paint without waiting for the CLI at all.
+    projectStore.remember(p.name, listed?.projects);
+    json(res, 200, listed);
+  },
+
+  // The remembered copy for every installed provider, with no provider RPC in
+  // the path. The new-session screen renders from this immediately and then
+  // refreshes itself from GET /api/projects in the background.
+  "GET /api/projects/known": async (_req, res) => {
+    const names = usableProviderEntries().map(([name]) => name);
+    json(res, 200, { providers: names, projects: projectStore.all(names) });
   },
 
   "GET /api/thread/lock": async (req, res, url) => {
@@ -3362,7 +3376,12 @@ export function startServer(options = {}) {
   queueMicrotask(() => refreshGlobalUsageInterests());
 
   for (const [, p] of usableProviderEntries()) {
-    Promise.resolve(p.init()).catch((e) => console.error(`provider ${p.name} init failed:`, e));
+    Promise.resolve(p.init())
+      .then(() => p.projects())
+      .then((listed) => projectStore.remember(p.name, listed?.projects))
+      // Best-effort: a provider that cannot be scanned at boot just keeps
+      // whatever was remembered last run.
+      .catch((e) => console.error(`provider ${p.name} init failed:`, e));
   }
 
   return new Promise((resolve, reject) => {

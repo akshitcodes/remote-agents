@@ -422,6 +422,11 @@
   .new-session-projects { flex: 1; min-height: 110px; overflow-y: auto; overscroll-behavior: contain; padding: 1px 2px 4px 0; -webkit-overflow-scrolling: touch; }
   .new-session-footer { flex-shrink: 0; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--border); background: var(--bg2); }
   .new-session-footer .seclabel { margin-top: 0; }
+  .new-session-agents { margin: 2px 0 4px; }
+  .new-session-agents button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 38px; }
+  .new-session-agents img { width: 16px; height: 16px; object-fit: contain; }
+  .new-session-projects .opt { margin-bottom: 6px; }
+  .new-session-note { padding: 2px 2px 6px; color: var(--fg-faint); font-size: 11px; }
 
   /* file viewer */
   .file-tabs { display: flex; gap: 6px; margin: 4px 0 12px; }
@@ -6566,7 +6571,7 @@ function renderLockSheet() {
       <button class="primary-btn" id="retryTakeLockBtn">Try again</button>
       <button type="button" class="opt opt-button" id="escapeLockBtn" style="width:100%;margin-top:8px">Start another session</button>`);
     $("retryTakeLockBtn").onclick = () => tryTakeLock($("retryTakeLockBtn"));
-    $("escapeLockBtn").onclick = () => { closeControlPopover(); openNewSheet(); };
+    $("escapeLockBtn").onclick = () => { closeControlPopover(); openNewSession(); };
     return;
   }
 
@@ -6962,96 +6967,202 @@ function loadPrefs() {
 }
 
 // ---------- new session ----------
-async function openNewSheet(provider = state.provider) {
-  openSheet(`<h2>New session</h2><div class="hint">Loading projects…</div>`);
+// Model catalogs fetched only to validate a new session's model. Deliberately
+// not initModels(): that swaps the global catalog and would clobber the open
+// thread's composer, which is why the old flow silently reused whichever agent
+// happened to be open instead of offering a choice.
+const newSessionModels = new Map();
 
-  let projects = [];
+async function newSessionModel(provider) {
+  if (provider === state.modelsProvider && state.model) { return state.model; }
 
-  try { projects = (await api("/api/projects?provider=" + encodeURIComponent(provider))).projects; } catch {}
-  projects.sort((a, b) => Number(b.count ?? 0) - Number(a.count ?? 0) || String(a.name ?? a.path ?? "").localeCompare(String(b.name ?? b.path ?? "")));
+  if (!newSessionModels.has(provider)) {
+    const models = (await api("/api/models?provider=" + encodeURIComponent(provider)))?.data ?? [];
+    newSessionModels.set(provider, models.find((model) => model.isDefault)?.id || models[0]?.id || null);
+  }
 
-  const opts = projects.slice(0, 20).map((p, i) => `
-    <button type="button" class="opt opt-button ${i === 0 ? "sel" : ""}" data-cwd="${esc(p.path)}">
-      <div class="radio"></div>
-      <div><div class="on">${esc(p.name)}</div><div class="od">${esc(p.path)} · ${p.count} sessions</div></div>
-    </button>`).join("");
-
-  openSheet(`
-    <div class="new-session-layout">
-      <h2>New session</h2>
-      <div class="hint">Pick a project folder, or paste any path.</div>
-      <div class="new-session-projects">${opts || '<div class="empty">No recent projects</div>'}</div>
-      <div class="new-session-footer">
-        <div class="seclabel">Or a custom path</div>
-        <input class="field-input" id="cwdInput" placeholder="/Users/you/code/project" autocapitalize="off" autocorrect="off">
-        <button class="primary-btn" id="createBtn" ${state.modelsReady && state.model ? "" : "disabled"}>${state.modelsReady && state.model ? "Start session" : "Model unavailable — reload"}</button>
-      </div>
-    </div>`);
-  $("sheet").classList.add("new-session-host");
-
-  let chosen = projects[0]?.path || "";
-  $("sheetBody").querySelectorAll("[data-cwd]").forEach((el) => {
-    el.onclick = () => {
-      $("sheetBody").querySelectorAll(".opt").forEach((o) => o.classList.remove("sel"));
-      el.classList.add("sel");
-      chosen = el.dataset.cwd;
-      $("cwdInput").value = "";
-    };
-  });
-  $("createBtn").onclick = async () => {
-    const cwd = $("cwdInput").value.trim() || chosen;
-
-    if (!cwd || !state.modelsReady || !state.model) { return; }
-
-    $("createBtn").disabled = true;
-    $("createBtn").textContent = "Starting…";
-
-    try {
-      const res = await api("/api/thread/new", { provider, cwd, model: state.model });
-      const th = res.thread;
-      closeSheet();
-      openThread({ id: th.id, name: th.name ?? null, preview: th.preview ?? "New session", cwd: th.cwd ?? cwd, provider: th.provider ?? provider, draft: th.draft });
-    } catch (e) {
-      $("createBtn").disabled = false;
-      $("createBtn").textContent = "Start session";
-      alert("Failed: " + e.message);
-    }
-  };
+  return newSessionModels.get(provider);
 }
 
-function openNewSession() {
+// One screen: agent and project together. The remembered project list paints
+// immediately from the bridge's durable cache, then a live provider scan
+// refreshes it in place, so picking a folder never waits on a CLI round trip.
+async function openNewSession() {
   if (!AVAILABLE_PROVIDER_NAMES.length) {
     openSheet('<h2>No agent is ready</h2><div class="hint">Install and sign in to a provider on the Mac, then restart Remote Agents.</div>');
     return;
   }
 
-  if (state.active) {
-    // The desktop New button starts another task with the open task's provider;
-    // this keeps its exact validated catalog intact even if the sidebar is
-    // temporarily filtering a different provider.
-    openNewSheet(activeProvider());
-    return;
+  // The open thread's agent is the likely choice, so it starts selected — but
+  // it stays visible and changeable rather than being assumed.
+  let provider = (state.active ? activeProvider() : state.provider) || AVAILABLE_PROVIDER_NAMES[0];
+  if (!AVAILABLE_PROVIDER_NAMES.includes(provider)) { provider = AVAILABLE_PROVIDER_NAMES[0]; }
+
+  const known = new Map();
+  const refreshed = new Set();
+  let chosen = "";
+
+  openSheet(`
+    <div class="new-session-layout">
+      <h2>New session</h2>
+      <div class="seclabel" style="margin-top:6px">Agent</div>
+      <div class="new-session-agents seg" id="newProviderSeg" role="group" aria-label="Agent"></div>
+      <div class="seclabel">Project</div>
+      <div class="new-session-projects" id="newProjectList"><div class="new-session-note">Loading projects…</div></div>
+      <div class="new-session-footer">
+        <div class="seclabel">Or a custom path</div>
+        <input class="field-input" id="cwdInput" placeholder="/Users/you/code/project" autocapitalize="off" autocorrect="off">
+        <button class="primary-btn" id="createBtn" disabled>Start session</button>
+      </div>
+    </div>`);
+  $("sheet").classList.add("new-session-host");
+
+  function syncCreateButton() {
+    const cwd = $("cwdInput")?.value.trim() || chosen;
+    const button = $("createBtn");
+    if (!button) { return; }
+    button.disabled = !cwd;
+    button.textContent = cwd ? `Start ${PROVIDER_LABELS[provider] || provider} session` : "Pick a project";
   }
 
-  if (state.providerScope !== "all") {
-    openNewSheet();
-    return;
+  function renderProviders() {
+    const seg = $("newProviderSeg");
+    if (!seg) { return; }
+    seg.innerHTML = AVAILABLE_PROVIDER_NAMES.map((name) => `
+      <button type="button" class="${name === provider ? "on" : ""}" data-new-provider="${esc(name)}" aria-pressed="${name === provider}">
+        <img src="${esc(PROVIDER_ICONS[name] || PROVIDER_ICONS.codex)}" alt="">
+        <span>${esc(PROVIDER_LABELS[name] || name)}</span>
+      </button>`).join("");
+    seg.querySelectorAll("[data-new-provider]").forEach((button) => {
+      button.onclick = () => selectProvider(button.dataset.newProvider);
+    });
   }
 
-  openSheet(`<h2>New session</h2>
-    <div class="hint">Which agent should own this session?</div>
-    ${Object.entries(PROVIDER_LABELS).map(([provider, label]) => `<button class="opt opt-button" data-new-provider="${provider}"><div class="radio"></div><div><div class="on">${label}</div><div class="od">Start a new ${label} task</div></div></button>`).join("")}`);
+  function renderProjects() {
+    const host = $("newProjectList");
+    if (!host) { return; }
+    const projects = known.get(provider);
 
-  $("sheetBody").querySelectorAll("[data-new-provider]").forEach((button) => {
-    button.onclick = async () => {
-      state.provider = button.dataset.newProvider;
-      syncProviderSeg();
-      persistPrefs();
-      closeSheet();
-      await initModels(state.provider);
-      openNewSheet();
-    };
+    if (!projects) {
+      host.innerHTML = '<div class="new-session-note">Loading projects…</div>';
+      return;
+    }
+
+    if (!projects.length) {
+      host.innerHTML = `<div class="empty">No projects recorded for ${esc(PROVIDER_LABELS[provider] || provider)} yet. Paste a path below.</div>`;
+      return;
+    }
+
+    host.innerHTML = projects.map((project) => `
+      <button type="button" class="opt opt-button ${project.path === chosen ? "sel" : ""}" data-cwd="${esc(project.path)}">
+        <div class="radio"></div>
+        <div><div class="on">${esc(project.name)}</div><div class="od">${esc(project.path)} \u00b7 ${Number(project.count) || 0} sessions</div></div>
+      </button>`).join("");
+    host.querySelectorAll("[data-cwd]").forEach((el) => {
+      el.onclick = () => {
+        chosen = el.dataset.cwd;
+        host.querySelectorAll(".opt").forEach((option) => option.classList.toggle("sel", option === el));
+        $("cwdInput").value = "";
+        syncCreateButton();
+      };
+    });
+  }
+
+  // The remembered list is a cache, so it is refreshed from the provider once
+  // per agent per screen and re-rendered in place if the answer changed.
+  async function refreshProjects(name) {
+    if (refreshed.has(name)) { return; }
+    refreshed.add(name);
+
+    try {
+      const listed = (await api("/api/projects?provider=" + encodeURIComponent(name)))?.projects ?? [];
+      known.set(name, sortNewSessionProjects(listed));
+      if (name === provider) { renderProjects(); }
+    } catch {
+      // The remembered copy is still on screen and still usable.
+      if (!known.get(name)) { known.set(name, []); renderProjects(); }
+    }
+  }
+
+  function selectProvider(name) {
+    if (!name || name === provider || !AVAILABLE_PROVIDER_NAMES.includes(name)) { return; }
+    provider = name;
+    chosen = "";
+    renderProviders();
+    renderProjects();
+    syncCreateButton();
+    refreshProjects(name);
+    newSessionModel(name).catch(() => {});
+  }
+
+  renderProviders();
+  $("cwdInput").addEventListener("input", () => {
+    if ($("cwdInput").value.trim()) {
+      chosen = "";
+      $("newProjectList").querySelectorAll(".opt").forEach((option) => option.classList.remove("sel"));
+    }
+    syncCreateButton();
   });
+
+  $("createBtn").onclick = async () => {
+    const cwd = $("cwdInput").value.trim() || chosen;
+
+    if (!cwd) { return; }
+
+    const button = $("createBtn");
+    button.disabled = true;
+    button.textContent = "Starting…";
+
+    try {
+      const model = await newSessionModel(provider);
+
+      if (!model) {
+        throw Object.assign(new Error(`${PROVIDER_LABELS[provider] || provider} is not advertising any model right now.`), { code: "model_unavailable" });
+      }
+
+      const res = await api("/api/thread/new", { provider, cwd, model });
+      const thread = res.thread;
+      closeSheet();
+      // openThread switches the global provider and reloads its catalog, so a
+      // session started for another agent lands with the right controls.
+      openThread({
+        id: thread.id,
+        name: thread.name ?? null,
+        preview: thread.preview ?? "New session",
+        cwd: thread.cwd ?? cwd,
+        provider: thread.provider ?? provider,
+        draft: thread.draft,
+      });
+    } catch (e) {
+      button.disabled = false;
+      syncCreateButton();
+      chip("\u26a0\ufe0f", "Could not start the session: " + e.message);
+    }
+  };
+
+  // Paint from the durable cache first; the provider scan follows.
+  try {
+    const cached = await api("/api/projects/known");
+    for (const [name, projects] of Object.entries(cached?.projects ?? {})) {
+      known.set(name, sortNewSessionProjects(projects));
+    }
+  } catch {
+    // No cache available yet — the live scan below is the only source.
+  }
+
+  renderProjects();
+  syncCreateButton();
+  refreshProjects(provider);
+  newSessionModel(provider).catch(() => {});
+}
+
+// Most-used first is what makes the top of this list the folder you actually
+// want; recency only breaks ties.
+function sortNewSessionProjects(projects) {
+  return [...(projects ?? [])].sort((a, b) =>
+    Number(b.count ?? 0) - Number(a.count ?? 0)
+    || Number(b.lastUsed ?? 0) - Number(a.lastUsed ?? 0)
+    || String(a.name ?? a.path ?? "").localeCompare(String(b.name ?? b.path ?? "")));
 }
 
 // ---------- usage ----------
