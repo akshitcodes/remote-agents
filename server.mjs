@@ -2576,6 +2576,7 @@ const routes = {
   "GET /api/usage-retry-policy": async (_req, res, url) => {
     const provider = url.searchParams.get("provider");
     const threadId = url.searchParams.get("threadId");
+    if (!provider && !threadId) { return json(res, 200, { globalEnabled: usageRetryPolicies.value.globalEnabled === true }); }
     if (!provider || !threadId) { return json(res, 400, { error: "provider and threadId are required", code: "invalid_usage_retry" }); }
     if (!pickProvider(provider)) { return json(res, 400, { error: `unknown provider: ${provider}`, code: "invalid_usage_retry" }); }
     json(res, 200, usageRetryPolicies.get(provider, threadId));

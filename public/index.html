@@ -117,6 +117,13 @@
   .subagent-path { font-size: 11px; color: var(--fg-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .subagent-row .run-badge { flex-shrink: 0; }
   .row .meta { display: flex; gap: 5px; flex-wrap: nowrap; align-items: center; min-width: 0; overflow: hidden; }
+  .sidebar-foot { position: sticky; bottom: 0; z-index: 2; margin-top: 10px; padding: 5px 8px calc(env(safe-area-inset-bottom) + 5px); border-top: 1px solid var(--border); background: #0d1117f2; backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); }
+  .sidebar-foot button { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 40px; border: 0; border-radius: 9px; padding: 8px 9px; background: transparent; color: var(--fg-dim); font: inherit; font-size: 13.5px; font-weight: 600; text-align: left; cursor: pointer; }
+  .sidebar-foot button:hover, .sidebar-foot button:focus-visible { background: var(--bg3); color: var(--fg); outline: none; }
+  .sidebar-foot svg { width: 17px; height: 17px; flex: 0 0 17px; stroke: currentColor; fill: none; stroke-width: 2; }
+  .settings-nav { margin: 10px 0 4px; }
+  .settings-section { display: none; }
+  .settings-section.on { display: block; }
   #agentToggle { display: flex; align-items: center; gap: 7px; margin-top: 9px; color: var(--fg-dim); font-size: 12px; cursor: pointer; user-select: none; }
   #agentToggle input { width: 15px; height: 15px; flex: 0 0 15px; margin: 0; accent-color: var(--accent); cursor: pointer; }
   .chip.origin-badge { color: var(--purple); background: #bc8cff14; border: 1px solid #bc8cff3d; }
@@ -690,6 +697,10 @@
     <div id="pinnedRows"></div>
     <div id="rows"></div>
     <button id="loadMore" style="display:none">Load more</button>
+    <div class="sidebar-foot">
+      <button id="usageFootBtn"><svg viewBox="0 0 24 24"><path d="M3 20h18"/><path d="M6 20v-7"/><path d="M12 20V6"/><path d="M18 20v-11"/></svg>Usage</button>
+      <button id="appSettingsBtn" aria-haspopup="dialog"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>Settings</button>
+    </div>
   </aside>
 
   <main id="chatView" aria-label="Selected agent conversation">
@@ -7422,6 +7433,100 @@ async function openTaskNotificationSheet(thread) {
   });
 }
 
+function setShowAgentSessions(checked) {
+  if (state.showAgentSessions === !!checked) { return; }
+  state.showAgentSessions = !!checked;
+  persistPrefs();
+  loadThreads(false);
+}
+
+async function openAppSettingsSheet(section = "general") {
+  openSheet('<h2>Settings</h2><div class="hint">Loading…</div>');
+
+  // The only app setting that lives on the bridge rather than in this browser.
+  let globalResume = null;
+  try { globalResume = (await api("/api/usage-retry-policy"))?.globalEnabled === true; } catch {}
+  if (!$("sheet").classList.contains("show")) { return; }
+
+  let current = section;
+
+  const render = () => {
+    const thread = state.active;
+    const sections = [
+      ["general", "General"],
+      ["usage", "Usage & limits"],
+      ...(thread ? [["session", "This session"]] : []),
+    ];
+
+    $("sheetBody").innerHTML = `<h2 id="sheetTitle">Settings</h2>
+      <div class="seg settings-nav" role="tablist" aria-label="Settings sections">
+        ${sections.map(([key, label]) => `<button type="button" role="tab" data-settings-section="${key}" aria-selected="${key === current}" class="${key === current ? "on" : ""}">${label}</button>`).join("")}
+      </div>
+
+      <div class="settings-section ${current === "general" ? "on" : ""}">
+        <div class="seclabel">Sessions</div>
+        <div class="toggle-row">
+          <div class="toggle-copy"><div class="toggle-title">Show agent-made sessions</div><div class="toggle-desc">Subagents, headless codex exec runs, and other machine-driven sessions. Hidden from Recent and Projects by default; starred ones always show.</div></div>
+          <button type="button" class="toggle ${state.showAgentSessions ? "on" : ""}" id="settingsAgentToggle" role="switch" aria-checked="${state.showAgentSessions}"></button>
+        </div>
+      </div>
+
+      <div class="settings-section ${current === "usage" ? "on" : ""}">
+        <div class="seclabel">Usage & limits</div>
+        <div class="toggle-row">
+          <div class="toggle-copy"><div class="toggle-title">Auto-resume after usage resets</div><div class="toggle-desc">Global default for Codex, Claude, and Grok chats on this bridge. A chat can still override this in its task settings. New installs start with this off.</div></div>
+          <button type="button" class="toggle ${globalResume ? "on" : ""}" id="settingsResumeToggle" role="switch" aria-checked="${globalResume === true}" ${globalResume === null ? "disabled" : ""}></button>
+        </div>
+        ${globalResume === null ? '<div class="hint">Could not load the bridge setting. Close and reopen to retry.</div>' : ""}
+        <button type="button" class="opt opt-button" id="settingsUsageOpen"><div><div class="on">Usage dashboard</div><div class="od">Account limits for every provider.</div></div></button>
+      </div>
+
+      ${thread ? `<div class="settings-section ${current === "session" ? "on" : ""}">
+        <div class="seclabel">This session</div>
+        <div class="hint" style="margin-bottom:10px">Settings that belong to <b>${esc(thread.name || thread.preview || "this session")}</b>, not the app.</div>
+        <button type="button" class="opt opt-button" id="settingsTaskOpen"><div><div class="on">Task settings</div><div class="od">Codex account for this task and its auto-resume override.</div></div></button>
+        <button type="button" class="opt opt-button" id="settingsNotifyOpen"><div><div class="on">Task notifications</div><div class="od">How this device follows this session.</div></div></button>
+      </div>` : ""}`;
+
+    $("sheetBody").querySelectorAll("[data-settings-section]").forEach((tab) => {
+      tab.onclick = () => { current = tab.dataset.settingsSection; render(); };
+    });
+
+    const agentToggle = $("settingsAgentToggle");
+    agentToggle.onclick = () => {
+      setShowAgentSessions(!state.showAgentSessions);
+      agentToggle.classList.toggle("on", state.showAgentSessions);
+      agentToggle.setAttribute("aria-checked", String(state.showAgentSessions));
+    };
+
+    const resumeToggle = $("settingsResumeToggle");
+    resumeToggle.onclick = async () => {
+      resumeToggle.disabled = true;
+      try {
+        const thread = state.active;
+        const saved = await api("/api/usage-retry-policy", {
+          scope: "global",
+          enabled: !globalResume,
+          // With a chat open, the bridge can arm its pending stop immediately.
+          ...(thread ? { provider: thread.provider || state.provider, threadId: thread.id } : {}),
+        });
+        globalResume = saved.globalEnabled === true;
+        if (saved.retry) { updateUsageRetry(saved.retry); }
+        if (saved.armError) { chip("\u26a0\ufe0f", `Auto-resume is on; initial check will retry: ${saved.armError}`); }
+        if (thread) { state.usageRetryPolicy = { ...saved, provider: thread.provider || state.provider, threadId: thread.id }; }
+      } catch (error) {
+        chip("\u26a0\ufe0f", "Could not save auto-resume setting: " + error.message);
+      }
+      render();
+    };
+
+    $("settingsUsageOpen").onclick = openUsageSheet;
+    $("settingsTaskOpen")?.addEventListener("click", () => openTaskSettingsSheet());
+    $("settingsNotifyOpen")?.addEventListener("click", () => state.active && openTaskNotificationSheet(state.active));
+  };
+  render();
+}
+
 async function openTaskSettingsSheet() {
   const thread = state.active;
   if (!thread) { return; }
@@ -8432,11 +8537,9 @@ $("attachBtn").onclick = () => {
   $("imageInput").click();
 };
 $("draftStrip").onclick = openDraftsSheet;
-$("agentToggleInput").onchange = () => {
-  state.showAgentSessions = $("agentToggleInput").checked;
-  persistPrefs();
-  loadThreads(false);
-};
+$("agentToggleInput").onchange = () => setShowAgentSessions($("agentToggleInput").checked);
+$("usageFootBtn").onclick = openUsageSheet;
+$("appSettingsBtn").onclick = () => openAppSettingsSheet();
 $("imageInput").onchange = () => uploadImages($("imageInput").files);
 let composerDragDepth = 0;
 const composerWrap = $("composerWrap");
