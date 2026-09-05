@@ -14,7 +14,7 @@ import { basename, dirname, extname, join, resolve, sep, isAbsolute } from "node
 import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
 
-import { readConfig } from "./config.mjs";
+import { readConfig, writeConfig } from "./config.mjs";
 import { renderIndexHtml } from "./onboarding.mjs";
 import { remoteAgentsHome } from "./app-home.mjs";
 import * as watch from "./watch.mjs";
@@ -2325,6 +2325,31 @@ const routes = {
     } catch (e) {
       json(res, e.status ?? 500, { error: String(e.message ?? e) });
     }
+  },
+
+  // Where a new chat starts when the user has not picked a folder. Bridge-owned
+  // rather than per-browser: the folder you work in is a property of the Mac,
+  // not of the device you happen to be holding.
+  "GET /api/settings/default-cwd": async (_req, res) => {
+    json(res, 200, { defaultCwd: readConfig().defaultCwd || null });
+  },
+
+  "POST /api/settings/default-cwd": async (req, res) => {
+    const body = await readBody(req);
+    const requested = String(body?.defaultCwd ?? "").trim();
+
+    if (requested && !isAbsolute(requested)) {
+      return json(res, 400, { error: "the default folder must be an absolute path", code: "invalid_default_cwd" });
+    }
+
+    // Refuse a path that is not there rather than storing a default that fails
+    // only later, when a session is being created.
+    if (requested && !existsSync(requested)) {
+      return json(res, 400, { error: `no such folder: ${requested}`, code: "invalid_default_cwd" });
+    }
+
+    writeConfig({ ...readConfig(), defaultCwd: requested || undefined });
+    json(res, 200, { defaultCwd: requested || null });
   },
 
   "GET /api/thread/origin": async (_req, res) => {

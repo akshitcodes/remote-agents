@@ -304,6 +304,21 @@ function claudeObservation(lines) {
     if (r?.type === "user" && !r.toolUseResult) {
       const content = r?.message?.content;
       const isToolResult = Array.isArray(content) && content.some((c) => c?.type === "tool_result");
+      const text = contentText(content).trim();
+
+      // Claude Code writes this exact provider-owned record when the user
+      // presses Stop/Escape. It is a terminal marker for the preceding turn,
+      // not a new prompt. Treating it as an ordinary user message leaves the
+      // thread looking active until the ten-minute stale timer fires.
+      if (!isToolResult && text === "[Request interrupted by user]") {
+        return {
+          running: false,
+          terminalId: recordId("claude", r, line),
+          terminalOutcome: "aborted",
+          terminalText: "",
+          terminalError: null,
+        };
+      }
 
       if (!isToolResult) {
         return {

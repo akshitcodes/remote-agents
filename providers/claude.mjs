@@ -1202,6 +1202,8 @@ export class ClaudeProvider extends BaseProvider {
       sawResult: false,
       sawAssistantOutput: false,
       syntheticNoResponse: false,
+      deliveryRequestId: null,
+      deliveryMethod: null,
     };
   }
 
@@ -1219,6 +1221,8 @@ export class ClaudeProvider extends BaseProvider {
     ctx.sawResult = false;
     ctx.sawAssistantOutput = false;
     ctx.syntheticNoResponse = false;
+    ctx.deliveryRequestId = null;
+    ctx.deliveryMethod = null;
   }
 
   async ensureSession(emitThreadId, { cwd, model, effort, modeKey, isDraft }) {
@@ -1389,7 +1393,7 @@ export class ClaudeProvider extends BaseProvider {
   }
 
   async send(body = {}) {
-    const { threadId, text, attachments = [], model, effort, mode, sandbox, cwd, draft } = body;
+    const { threadId, text, attachments = [], model, effort, mode, sandbox, cwd, draft, requestId, deliveryMethod = "send" } = body;
 
     if (!String(text ?? "").trim() && !attachments.length) {
       throw Object.assign(new Error("message content required"), { status: 400 });
@@ -1422,6 +1426,8 @@ export class ClaudeProvider extends BaseProvider {
     }
 
     this.resetTurn(session.ctx);
+    session.ctx.deliveryRequestId = requestId ?? null;
+    session.ctx.deliveryMethod = deliveryMethod;
     session.stderr = "";
     session.busy = true;
     session.turnDone = new Promise((r) => {
@@ -1655,6 +1661,20 @@ export class ClaudeProvider extends BaseProvider {
         if (!ctx.turnId) {
           ctx.turnId = id || "turn";
           this.notify("turn/started", { threadId: tid, turn: { id: ctx.turnId } });
+        }
+
+        // Tie Claude's native message_start acknowledgement to the exact
+        // client request. This is stronger than the HTTP response: even if the
+        // browser or bridge connection drops immediately afterwards, both the
+        // durable ledger and the UI know that this one message was accepted.
+        if (ctx.deliveryRequestId) {
+          this.emit("send-stage", {
+            threadId: tid,
+            requestId: ctx.deliveryRequestId,
+            method: ctx.deliveryMethod || "send",
+            stage: "provider_accepted",
+            turnId: ctx.turnId,
+          });
         }
 
         session?._resolveTurnAccepted?.();

@@ -534,6 +534,24 @@
   .terminal-stop { border: 1px solid var(--danger); border-radius: 10px; padding: 10px 12px; background: #f8514914; color: #ffaaa5; font: inherit; font-weight: 600; cursor: pointer; }
   .terminal-status { min-height: 18px; color: var(--fg-dim); font-size: 12px; }
 
+  /* Desktop landing view: a new chat, ready to type, instead of a bare list. */
+  #homeView { display: none; flex: 1; min-height: 0; overflow-y: auto; place-items: center; padding: 24px; }
+  body.home-view #homeView { display: grid; }
+  body.home-view #transcript, body.home-view #composerWrap, body.home-view #approval { display: none !important; }
+  .home-card { width: min(100%, 720px); }
+  .home-title { margin-bottom: 6px; font-size: 27px; font-weight: 600; line-height: 1.2; }
+  .home-sub { margin-bottom: 20px; color: var(--fg-dim); font-size: 13.5px; }
+  .home-composer { border: 1px solid var(--border); border-radius: 16px; background: var(--bg2); padding: 12px 13px 10px; }
+  .home-composer textarea { width: 100%; min-height: 62px; max-height: 260px; border: 0; background: transparent; color: var(--fg); font: inherit; font-size: 15px; line-height: 1.45; outline: none; resize: none; }
+  .home-controls { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-top: 9px; }
+  .home-controls .ctl { background: var(--bg3); }
+  .home-controls .home-send { margin-left: auto; width: 36px; height: 36px; flex: 0 0 36px; border: 0; border-radius: 50%; background: var(--accent); color: #04260f; font-size: 16px; cursor: pointer; }
+  .home-controls .home-send:disabled { opacity: .4; cursor: default; }
+  .home-provider { display: inline-flex; align-items: center; gap: 6px; }
+  .home-provider img { width: 15px; height: 15px; object-fit: contain; }
+  .home-cwd { max-width: min(46vw, 340px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .home-note { margin-top: 12px; color: var(--fg-faint); font-size: 12px; }
+
   #terminalPanel { display: none; min-width: 0; min-height: 0; position: relative; overflow: hidden; background: #070a0e; border-color: var(--border); }
   .terminal-panel-head { height: 38px; display: flex; align-items: center; gap: 12px; padding: 0 7px 0 13px; border-bottom: 1px solid var(--border); background: var(--bg2); }
   .terminal-panel-title { min-width: 0; flex: 1; display: flex; align-items: center; gap: 10px; font-size: 12px; }
@@ -710,7 +728,7 @@
     <button id="filesBtn" class="hbtn icon" aria-label="Files" style="display:none"><svg viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg></button>
     <button id="terminalBtn" class="hbtn icon" aria-label="Project terminal" title="Project terminal" style="display:none"><svg viewBox="0 0 24 24"><path d="M4 17l6-5-6-5"/><path d="M12 19h8"/></svg></button>
     <button id="notifyBtn" class="hbtn icon" aria-label="Task notifications" aria-haspopup="dialog" style="display:none"><svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg></button>
-    <button id="settingsBtn" class="hbtn icon" aria-label="Task settings" aria-haspopup="dialog" title="Task settings" style="display:none"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21h-4v-.1A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3v-4h.1A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3h4v.1A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.2.37.54.73 1 .92.34.15.72.2 1.1.18H21v4h-.1a1.7 1.7 0 0 0-1.5.9z"/></svg></button>
+    <button id="settingsBtn" class="hbtn icon" aria-label="Task actions" aria-haspopup="dialog" title="Actions for this task" style="display:none"><svg viewBox="0 0 24 24" stroke-linecap="round"><circle cx="5" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1.4" fill="currentColor" stroke="none"/></svg></button>
     <button id="usageBtn" class="hbtn icon" aria-label="Usage"><svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 18 0 9 9 0 0 0-18 0z"/><path d="M12 12l4-2"/><path d="M12 7v0"/></svg></button>
     <div id="connDot" title="event stream"></div>
   </header>
@@ -734,6 +752,7 @@
   </aside>
 
   <main id="chatView" aria-label="Selected agent conversation">
+    <div id="homeView"><div class="home-card" id="homeCard"></div></div>
     <div id="transcript">
       <div id="messages"></div>
       <div id="livePill"><span class="run-dot"></span><span id="livePillText">Running — following along…</span></div>
@@ -3700,6 +3719,7 @@ async function openThread(t) {
   setBusy(false);
   syncControls();
   document.body.classList.add("thread-open");
+  document.body.classList.remove("home-view");
   syncSidebarToggle();
   $("listView").style.display = "none";
   $("chatView").style.display = "flex";
@@ -3766,6 +3786,12 @@ async function openThread(t) {
 
     renderHistory(res.thread, res.itemWindow);
     state.threadUserProgress = res.userProgress ?? null;
+    // Canonical history and the durable send ledger are already available at
+    // this point. Reconcile recovery bubbles even when the accepted turn is
+    // currently running; otherwise the provider copy and the old local copy
+    // remain visible together until the turn ends or the user taps Check.
+    await reconcilePendingDeliveryProof();
+    if (state.active !== t) { return; }
     scrollDown({ force: true });
     loadUsageRetryState(t);
     state.fetching = false;
@@ -3854,10 +3880,13 @@ function backToList() {
   state.threadModeUnknown = false;
   state.threadApprovalPolicy = null;
   state.threadSandboxPolicy = null;
-  document.body.classList.remove("thread-open");
   sendPresence();
   $("chatView").style.display = "none";
   $("listView").style.display = "block";
+  // Desktop keeps the workspace and lands on the new-chat view; mobile drops
+  // all the way back to the full-screen list.
+  document.body.classList.remove("thread-open");
+  syncWorkspaceChrome();
   $("backBtn").style.display = "none";
   $("newBtn").style.display = "flex";
   $("usageBtn").style.display = "flex";
@@ -7526,13 +7555,6 @@ async function openTaskNotificationSheet(thread) {
   });
 }
 
-function setShowAgentSessions(checked) {
-  if (state.showAgentSessions === !!checked) { return; }
-  state.showAgentSessions = !!checked;
-  persistPrefs();
-  loadThreads(false);
-}
-
 // A full-screen window rather than a sheet: settings are a place you go, not a
 // thing that slides over what you were doing. Two panes on desktop; on narrow
 // screens the section list is the first screen and picking one swaps to it.
@@ -7546,6 +7568,175 @@ const SETTINGS_SECTIONS = [
 ];
 
 const settingsState = { section: "general", globalResume: null, hidden: null, mine: null, loading: true };
+
+// The desktop workspace layout is keyed off body.thread-open, which used to
+// mean literally "a thread is open". It now means "show the two-pane
+// workspace", so the sidebar keeps the session list in view on desktop even
+// with nothing selected, and the right pane lands on a ready-to-type new chat.
+const WORKSPACE_QUERY = window.matchMedia("(min-width: 960px)");
+
+function isWorkspace() { return WORKSPACE_QUERY.matches; }
+
+function syncWorkspaceChrome() {
+  const home = isWorkspace() && !state.active;
+  document.body.classList.toggle("home-view", home);
+  document.body.classList.toggle("thread-open", home || !!state.active);
+
+  if (home) {
+    $("chatView").style.display = "flex";
+    $("listView").style.display = "block";
+    renderHomeView();
+  } else if (!state.active) {
+    $("chatView").style.display = "none";
+    $("listView").style.display = "block";
+  }
+}
+
+const homeDraft = { provider: null, cwd: null, defaultCwd: null, projects: {}, starting: false };
+
+async function loadHomeDefaults() {
+  const [cwdResult, knownResult] = await Promise.allSettled([
+    api("/api/settings/default-cwd"),
+    api("/api/projects/known"),
+  ]);
+  homeDraft.defaultCwd = cwdResult.status === "fulfilled" ? cwdResult.value?.defaultCwd ?? null : null;
+  const known = knownResult.status === "fulfilled" ? knownResult.value?.projects ?? {} : {};
+  homeDraft.projects = Object.fromEntries(Object.entries(known).map(([name, rows]) => [name, sortNewSessionProjects(rows)]));
+  if (document.body.classList.contains("home-view")) { renderHomeView(); }
+}
+
+function homeProvider() {
+  const candidate = homeDraft.provider || state.provider || AVAILABLE_PROVIDER_NAMES[0];
+  return AVAILABLE_PROVIDER_NAMES.includes(candidate) ? candidate : AVAILABLE_PROVIDER_NAMES[0];
+}
+
+// An explicit pick wins, then the configured default, then this agent's
+// busiest folder — so the first screen is never a dead end.
+function homeCwd() {
+  return homeDraft.cwd || homeDraft.defaultCwd || homeDraft.projects?.[homeProvider()]?.[0]?.path || "";
+}
+
+function menuPointFor(event) {
+  const rect = event.currentTarget.getBoundingClientRect();
+  return { x: rect.left, y: rect.bottom + 6 };
+}
+
+function renderHomeView() {
+  const card = $("homeCard");
+  if (!card) { return; }
+
+  if (!AVAILABLE_PROVIDER_NAMES.length) {
+    card.innerHTML = '<div class="home-title">No agent is ready</div><div class="home-sub">Install and sign in to a provider on the Mac, then restart Remote Agents.</div>';
+    return;
+  }
+
+  const provider = homeProvider();
+  const cwd = homeCwd();
+  const text = card.querySelector("#homeInput")?.value ?? "";
+  const folderName = cwd ? cwd.split(/[\\/]/).filter(Boolean).pop() : "Choose a folder";
+
+  card.innerHTML = `
+    <div class="home-title">What should we build${cwd ? ` in ${esc(folderName)}` : ""}?</div>
+    <div class="home-sub">Start a new session, or pick one from the list on the left.</div>
+    <div class="home-composer">
+      <textarea id="homeInput" rows="2" placeholder="Describe the task…"></textarea>
+      <div class="home-controls">
+        <button type="button" class="ctl home-provider" id="homeProviderCtl" aria-label="Choose agent">
+          <img src="${esc(PROVIDER_ICONS[provider] || PROVIDER_ICONS.codex)}" alt=""><b>${esc(PROVIDER_LABELS[provider] || provider)}</b><span class="ck">▾</span>
+        </button>
+        <button type="button" class="ctl home-cwd" id="homeCwdCtl" aria-label="Choose folder" title="${esc(cwd || "")}">
+          \u{1F4C1} <b>${esc(folderName)}</b><span class="ck">▾</span>
+        </button>
+        <button type="button" class="home-send" id="homeSend" aria-label="Start session"${cwd ? "" : " disabled"}>➤</button>
+      </div>
+    </div>
+    ${cwd ? "" : '<div class="home-note">Pick a folder to start, or set a default in Settings → General.</div>'}`;
+
+  const input = card.querySelector("#homeInput");
+  input.value = text;
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); startHomeSession(); }
+  });
+
+  $("homeProviderCtl").onclick = (event) => {
+    openControlPopover(null, `<div class="control-menu-title">Agent</div>${AVAILABLE_PROVIDER_NAMES.map((name) => `
+      <button type="button" class="control-menu-row" data-home-provider="${esc(name)}">
+        <span class="menu-check" aria-hidden="true">${name === provider ? "✓" : ""}</span>
+        <span class="menu-label">${esc(PROVIDER_LABELS[name] || name)}</span>
+      </button>`).join("")}`, "home-provider", { point: menuPointFor(event) });
+    $("controlPopover").querySelectorAll("[data-home-provider]").forEach((button) => {
+      button.onclick = () => {
+        closeControlPopover();
+        homeDraft.provider = button.dataset.homeProvider;
+        renderHomeView();
+      };
+    });
+  };
+
+  $("homeCwdCtl").onclick = (event) => {
+    const rows = (homeDraft.projects?.[provider] ?? []).slice(0, 12);
+    openControlPopover(null, `<div class="control-menu-title">Folder</div>${rows.map((row) => `
+      <button type="button" class="control-menu-row" data-home-cwd="${esc(row.path)}">
+        <span class="menu-check" aria-hidden="true">${row.path === cwd ? "✓" : ""}</span>
+        <span class="menu-label">${esc(row.name)}</span>
+        <span class="menu-value">${Number(row.count) || 0}</span>
+      </button>`).join("")}
+      <button type="button" class="control-menu-row" data-home-cwd-other="1">
+        <span class="menu-check" aria-hidden="true"></span><span class="menu-label">Other folder…</span>
+      </button>`, "home-cwd", { point: menuPointFor(event) });
+    $("controlPopover").querySelectorAll("[data-home-cwd]").forEach((button) => {
+      button.onclick = () => { closeControlPopover(); homeDraft.cwd = button.dataset.homeCwd; renderHomeView(); };
+    });
+    $("controlPopover").querySelector("[data-home-cwd-other]").onclick = () => { closeControlPopover(); openNewSession(); };
+  };
+
+  $("homeSend").onclick = startHomeSession;
+}
+
+// Creates the session, opens it, then hands the text to the ordinary send path
+// so every readiness guard and queue rule still applies to the first message.
+async function startHomeSession() {
+  if (homeDraft.starting) { return; }
+
+  const provider = homeProvider();
+  const cwd = homeCwd();
+  const text = $("homeInput")?.value ?? "";
+
+  if (!cwd) { return; }
+
+  homeDraft.starting = true;
+  if ($("homeSend")) { $("homeSend").disabled = true; }
+
+  try {
+    const model = await newSessionModel(provider);
+
+    if (!model) {
+      throw Object.assign(new Error(`${PROVIDER_LABELS[provider] || provider} is not advertising any model right now.`), { code: "model_unavailable" });
+    }
+
+    const created = (await api("/api/thread/new", { provider, cwd, model })).thread;
+    await openThread({
+      id: created.id,
+      name: created.name ?? null,
+      preview: created.preview ?? "New session",
+      cwd: created.cwd ?? cwd,
+      provider: created.provider ?? provider,
+      draft: created.draft,
+    });
+
+    if (text.trim()) {
+      $("input").value = text;
+      await send();
+    }
+
+    homeDraft.cwd = null;
+  } catch (e) {
+    chip("⚠️", "Could not start the session: " + e.message);
+  } finally {
+    homeDraft.starting = false;
+    if (document.body.classList.contains("home-view")) { renderHomeView(); }
+  }
+}
 
 function setShowAgentSessions(checked) {
   if (state.showAgentSessions === !!checked) { return; }
@@ -7616,7 +7807,18 @@ function renderSettingsBody() {
   let html = `<h1 id="settingsHeading">${esc(section.title)}</h1>`;
 
   if (section.key === "general") {
-    html += `<div class="settings-card-label">Appearance</div>
+    const defaultCwd = homeDraft.defaultCwd;
+    html += `<div class="settings-card-label">New chats</div>
+      <div class="settings-card">
+        <div class="toggle-row">
+          <div class="toggle-copy">
+            <div class="toggle-title">Default folder</div>
+            <div class="toggle-desc">${defaultCwd ? esc(defaultCwd) : "New chats start in whichever folder you have worked in most."}</div>
+          </div>
+          <button type="button" class="hidden-row-action" data-setting="default-cwd" style="flex-shrink:0;border:1px solid var(--border);border-radius:8px;padding:7px 11px;background:var(--bg3);color:var(--accent2);font:inherit;font-size:12px;cursor:pointer">Change</button>
+        </div>
+      </div>
+      <div class="settings-card-label">Appearance</div>
       <div class="settings-card">
         <div class="toggle-row">
           <div class="toggle-copy"><div class="toggle-title">Collapse the session sidebar</div><div class="toggle-desc">Start with the desktop sidebar collapsed so the conversation gets the full width.</div></div>
@@ -7703,6 +7905,19 @@ function renderSettingsBody() {
 
 function wireSettingsBody(section, thread) {
   const body = $("settingsBody");
+
+  body.querySelector('[data-setting="default-cwd"]')?.addEventListener("click", async () => {
+    const next = prompt("Absolute path new chats should start in (leave empty to clear):", homeDraft.defaultCwd ?? "");
+    if (next === null) { return; }
+
+    try {
+      const saved = await api("/api/settings/default-cwd", { defaultCwd: next.trim() });
+      homeDraft.defaultCwd = saved.defaultCwd ?? null;
+      renderSettingsBody();
+    } catch (error) {
+      chip("\u26a0\ufe0f", "Could not save the default folder: " + error.message);
+    }
+  });
 
   body.querySelector('[data-setting="sidebar"]')?.addEventListener("click", () => {
     toggleSidebar();
@@ -9028,6 +9243,7 @@ document.addEventListener("pointerdown", (event) => {
   closeControlPopover();
 });
 window.addEventListener("resize", positionControlPopover);
+WORKSPACE_QUERY.addEventListener("change", syncWorkspaceChrome);
 
 // Local-path links (see localFileTarget) open in the file viewer instead of
 // navigating the browser to a path this server does not serve.
@@ -9143,6 +9359,8 @@ state.failedSends = loadFailedSends();
 connectEvents();
 refreshAvailableProviders().then(() => {
   if (state.provider) { initModels(); }
+  syncWorkspaceChrome();
+  loadHomeDefaults();
   return Promise.all([loadNotificationRules(), Promise.all([loadThreadStars(), loadHiddenThreads(), loadManualOrigins()]).then(() => loadThreads(false))]);
 }).then(() => openLinkedThread().catch(() => {}));
 </script>

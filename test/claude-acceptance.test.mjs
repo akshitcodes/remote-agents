@@ -28,7 +28,8 @@ function fakeSession(provider, onWrite) {
 }
 
 test("Claude send is accepted only after a real message_start", async () => {
-  const provider = new ClaudeProvider(() => {});
+  const events = [];
+  const provider = new ClaudeProvider((event, data) => events.push({ event, data }));
   let wrote = false;
   const session = fakeSession(provider, (current) => {
     wrote = true;
@@ -36,10 +37,26 @@ test("Claude send is accepted only after a real message_start", async () => {
   });
   provider.ensureSession = async () => session;
 
-  const result = await provider.send({ threadId: "thread-claude", text: "hello", cwd: "/tmp" });
+  const result = await provider.send({
+    threadId: "thread-claude",
+    text: "hello",
+    cwd: "/tmp",
+    requestId: "request-1",
+    deliveryMethod: "send",
+  });
 
   assert.equal(wrote, true);
   assert.deepEqual(result, { ok: true, threadId: "thread-claude" });
+  assert.deepEqual(events.find(({ event }) => event === "send-stage"), {
+    event: "send-stage",
+    data: {
+      threadId: "thread-claude",
+      requestId: "request-1",
+      method: "send",
+      stage: "provider_accepted",
+      turnId: "msg-1",
+    },
+  });
 });
 
 test("Claude writes image blocks into the accepted stream-json user frame", async () => {

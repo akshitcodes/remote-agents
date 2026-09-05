@@ -105,6 +105,31 @@ test("a Codex turn_aborted marker clears a preceding task_started state", () => 
   });
 });
 
+test("Claude's native user-interrupt record is an exact aborted terminal", () => {
+  const observation = observeProviderTail("claude", [
+    JSON.stringify({
+      type: "assistant",
+      uuid: "assistant-before-stop",
+      message: { stop_reason: null, content: [{ type: "text", text: "Still working" }] },
+    }),
+    JSON.stringify({
+      type: "user",
+      uuid: "native-interrupt",
+      promptId: "prompt-1",
+      entrypoint: "claude-vscode",
+      message: { role: "user", content: [{ type: "text", text: "[Request interrupted by user]" }] },
+    }),
+  ]);
+
+  assert.deepEqual(observation, {
+    running: false,
+    terminalId: "claude:native-interrupt",
+    terminalOutcome: "aborted",
+    terminalText: "",
+    terminalError: null,
+  });
+});
+
 test("resolved runtime retains an aborted terminal for native resume", () => {
   assert.deepEqual(resolveThreadRunState({
     observed: {
